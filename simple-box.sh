@@ -306,6 +306,28 @@ issue_cert_bundle() {
     return 0
 }
 
+# 清理本脚本遗留的端口跳跃规则（按标记逐条删除，不触碰其它规则）
+clear_port_hopping() {
+    local ranges
+    # iptables -S 输出形如: -A PREROUTING -p udp -m udp --dport 20000:40000 -j REDIRECT --to-ports 8443
+    ranges=$(iptables -t nat -S PREROUTING 2>/dev/null \
+        | grep -oP -- '--dport \K[0-9]+:[0-9]+(?=.*REDIRECT --to-ports)' | sort -u || true)
+    local r tport
+    for r in $ranges; do
+        tport=$(iptables -t nat -S PREROUTING 2>/dev/null \
+            | grep -F -- "--dport $r " | grep -oP -- '--to-ports \K[0-9]+' | head -1 || true)
+        if [[ -n "$tport" ]]; then
+            iptables -t nat -D PREROUTING -p udp --dport "$r" -j REDIRECT --to-ports "$tport" 2>/dev/null || true
+            if command -v ip6tables &>/dev/null; then
+                ip6tables -t nat -D PREROUTING -p udp --dport "$r" -j REDIRECT --to-ports "$tport" 2>/dev/null || true
+            fi
+        fi
+    done
+    if command -v netfilter-persistent &>/dev/null; then
+        netfilter-persistent save >/dev/null 2>&1 || true
+    fi
+}
+
 # 端口跳跃 iptables 规则配置
 setup_port_hopping() {
     local hy_port="$1"
@@ -600,30 +622,29 @@ install_node() {
     [[ -n "$old_domain" ]] && echo -e "${CYAN}  4. 当前已有域名 ${old_domain}，输入 keep 可沿用${PLAIN}"
 
     local hy_domain
-    read -r -p "请输入域名 [回车=IP自签]: " hy_domain || hy_domain=""
-    if [[ -z "$hy_domain" ]]; then
-        hy_domain="ip"
-    fi
-    case "${hy_domain,,}" in
-        ip|self|selfsigned) hy_domain="" ;;
-        none) hy_domain="skip" ;;
-        keep)
-            if [[ -n "$old_domain" ]]; then
-                hy_domain="$old_domain"
-                echo -e "${BLUE}沿用已有域名: ${hy_domain}${PLAIN}"
-            else
+    while true; do
+        read -r -p "请输入域名 [回车=IP自签]: " hy_domain || hy_domain=""
+        [[ -z "$hy_domain" ]] && hy_domain="ip"
+
+        case "${hy_domain,,}" in
+            ip|self|selfsigned) hy_domain=""; break ;;
+            none|skip)          hy_domain="skip"; break ;;
+            keep)
+                if [[ -n "$old_domain" ]]; then
+                    hy_domain="$old_domain"
+                    echo -e "${BLUE}沿用已有域名: ${hy_domain}${PLAIN}"
+                    break
+                fi
                 echo -e "${YELLOW}当前没有已配置的域名，回退为 IP 自签证书。${PLAIN}"
-                hy_domain=""
-            fi
-            ;;
-    esac
-    # 用户输入合法域名时做基础格式校验
-    if [[ -n "$hy_domain" && "$hy_domain" != "skip" ]]; then
-        if ! [[ "$hy_domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$ ]]; then
-            echo -e "${RED}域名格式非法: ${hy_domain}${PLAIN}"
-            return 1
+                hy_domain=""; break
+                ;;
+        esac
+
+        if [[ "$hy_domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$ ]]; then
+            break
         fi
-    fi
+        echo -e "${RED}域名格式非法: ${hy_domain}（示例: node.example.com）${PLAIN}"
+    done
 
     local target_host="$hy_domain"
     local cf_token=""
@@ -735,6 +756,8 @@ install_node() {
             ufw allow "$hy_port/udp" >/dev/null 2>&1 || true
         fi
     fi
+    # 先清理本脚本可能遗留的端口跳跃规则，再按当前配置重建
+    clear_port_hopping
     if [ "$hy_enabled" = true ] && [[ -n "$hy_range" ]]; then
         setup_port_hopping "$hy_port" "$hy_range"
     fi

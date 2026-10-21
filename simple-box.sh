@@ -55,11 +55,10 @@ validate_domain() {
     [[ "$d" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$ ]]
 }
 
-# 剔除字符串首尾的空白字符与引号
+# 剔除字符串首尾的空白字符与引号（循环剥离，支持空格与单双引号任意层嵌套）
 trim_string() {
-    local str="$1"
-    # 使用 tr/sed 安全剥离首尾空白与包裹引号
-    echo "$str" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+    local val="$1"
+    echo "$val" | sed -E ':loop; s/^[[:space:]]+|[[:space:]]+$//g; s/^["'"'"']+|["'"'"']+$//g; t loop'
 }
 
 # 在线校验 Cloudflare API Token 有效性
@@ -234,8 +233,13 @@ update_singbox_core() {
     tag=$(curl -sSL --max-time 20 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null \
         | grep -Po '"tag_name": "\K[^"]*' || true)
     if [[ -z "$tag" ]]; then
-        echo -e "${RED}获取最新版本失败（GitHub API 不通或被限流），已保留现有版本。${PLAIN}"
-        return 1
+        if [[ -f /usr/local/bin/sing-box ]]; then
+            echo -e "${YELLOW}获取最新版本失败（GitHub API 不通或被限流），已保留现有版本 (v${cur_ver})。${PLAIN}"
+            return 0
+        else
+            echo -e "${YELLOW}GitHub API 限流，启用内置稳定发布版本 (v1.14.3) 进行安装...${PLAIN}"
+            tag="v1.14.3"
+        fi
     fi
     local latest_ver=${tag#v}
     local arch=$(get_arch)
@@ -334,16 +338,11 @@ issue_cert_bundle() {
             echo -e "${RED}域名证书申请失败（Token 权限、域名拼写或 CF 网络问题）。${PLAIN}"
             echo -e "${YELLOW}已自动降级为 10 年期 IP 自签证书，保证节点立即可用。${PLAIN}"
         }
-        # 模式 B: 为公网 IP 生成 10 年自签 ECC 证书
-        [[ -z "$domain" ]] && echo -e "${YELLOW}为服务器 IP (${server_ip}) 生成 10 年期自签 ECC 证书...${PLAIN}"
-        local tmp_key="${CERT_DIR}/.private.key.tmp"
-        local tmp_crt="${CERT_DIR}/.fullchain.cer.tmp"
-        openssl ecparam -genkey -name prime256v1 -out "$tmp_key" >/dev/null 2>&1
-        openssl req -new -x509 -days 3650 -key "$tmp_key" -out "$tmp_crt" \
-            -subj "/CN=${server_ip}" -addext "subjectAltName=IP:${server_ip},IP:127.0.0.1" >/dev/null 2>&1
-        # 原子替换，避免读到半写状态
-        mv -f "$tmp_key" "${CERT_DIR}/private.key"
-        mv -f "$tmp_crt" "${CERT_DIR}/fullchain.cer"
+        # 模式 B: 为公网 IP 生成 10 年自签 ECC 证书（含公私钥配对严格校验）
+        if ! issue_self_signed_cert "$server_ip"; then
+            echo -e "${RED}自签证书生成失败。${PLAIN}"
+            return 1
+        fi
         CERT_MODE="selfsigned"
     fi
 
@@ -586,7 +585,13 @@ generate_full_client_config() {
     mkdir -p "${WEB_DIR}/${token}"
 
     if [ ! -f "$TEMPLATE_FILE" ]; then
-        curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/template.yaml -o "$TEMPLATE_FILE" 2>/dev/null || true
+        local script_dir
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        if [ -f "${script_dir}/template.yaml" ]; then
+            cp -f "${script_dir}/template.yaml" "$TEMPLATE_FILE" 2>/dev/null || true
+        else
+            curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/template.yaml -o "$TEMPLATE_FILE" 2>/dev/null || true
+        fi
     fi
 
     # 1. 组装完整配置
@@ -905,12 +910,18 @@ install_node() {
     done
 
     local vl_sni
-    read -r -p "请输入 Reality 借壳伪装域名 [默认 ${old_vl_sni:-gateway.icloud.com}]: " vl_sni || vl_sni=""
-    vl_sni=${vl_sni:-${old_vl_sni:-gateway.icloud.com}}
-    if [[ "$vl_sni" == "$server_ip" ]]; then
-        echo -e "${RED}Reality 伪装域名不能是本机 IP（必须为可正常访问 TLS 1.3 的站点）。${PLAIN}"
-        return 1
-    fi
+    while true; do
+        read -r -p "请输入 Reality 借壳伪装域名 [默认 ${old_vl_sni:-gateway.icloud.com}]: " vl_sni || vl_sni=""
+        vl_sni=$(trim_string "$vl_sni")
+        vl_sni=${vl_sni:-${old_vl_sni:-gateway.icloud.com}}
+        if [[ "$vl_sni" == "$server_ip" ]]; then
+            echo -e "${RED}Reality 伪装域名不能是本机 IP，请重新输入！${PLAIN}"; continue
+        fi
+        if ! validate_domain "$vl_sni"; then
+            echo -e "${RED}域名格式非法（示例: gateway.icloud.com），请重新输入！${PLAIN}"; continue
+        fi
+        break
+    done
 
     echo -e "\n${YELLOW}=== 2. 配置 Hysteria 2 参数 ===${PLAIN}"
     local hy_enabled=true
@@ -1677,7 +1688,7 @@ ${GREEN}================ 在线订阅站点模块配置 ================${PLAIN}
                 local new_token
                 new_token=$(openssl rand -hex 12)
 
-                rm -rf "${WEB_DIR}/${old_token}"
+                [[ -n "${old_token:-}" ]] && rm -rf "${WEB_DIR:?}/${old_token:?}"
                 mkdir -p "${WEB_DIR}/${new_token}"
 
                 SUB_TOKEN="$new_token"

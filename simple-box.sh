@@ -360,10 +360,10 @@ setup_caddy_subscription() {
     local domain_or_ip="$1"
     local token="$2"
     local sub_port="$3"
+    local cert_mode="${4:-selfsigned}"
 
     install_caddy
 
-    echo -e "${BLUE}配置 Caddy HTTPS 安全订阅站点 (端口 ${sub_port})...${PLAIN}"
     mkdir -p "/etc/caddy/sites"
     
     if [ ! -f /etc/caddy/Caddyfile ]; then
@@ -375,8 +375,10 @@ setup_caddy_subscription() {
     # 清理所有旧版 simple-box caddy 配置文件
     rm -f /etc/caddy/sites/*-${sub_port}.caddy /etc/caddy/sites/simple-box*.caddy
 
-    cat > "/etc/caddy/sites/simple-box-sub.caddy" <<EOF
-# Simple-Box HTTPS 订阅分发站点
+    if [[ "$cert_mode" == "domain" ]]; then
+        echo -e "${BLUE}配置 Caddy HTTPS 安全订阅站点 (端口 ${sub_port}, 域名 CA 证书)...${PLAIN}"
+        cat > "/etc/caddy/sites/simple-box-sub.caddy" <<EOF
+# Simple-Box HTTPS 订阅分发站点 (域名 CA 证书)
 :${sub_port} {
     tls ${CERT_DIR}/fullchain.cer ${CERT_DIR}/private.key
 
@@ -392,6 +394,24 @@ setup_caddy_subscription() {
     }
 }
 EOF
+    else
+        echo -e "${BLUE}配置 Caddy HTTP 订阅分发站点 (端口 ${sub_port}, 客户端直接导入免证书报错)...${PLAIN}"
+        cat > "/etc/caddy/sites/simple-box-sub.caddy" <<EOF
+# Simple-Box HTTP 订阅分发站点 (IP 自签兼容模式)
+http://:${sub_port} {
+    @sub path /sub_${token}/config.yaml /sub_${token}/provider.yaml /sub_${token}/links.txt
+    handle @sub {
+        root * ${WEB_DIR}
+        header Content-Type "text/plain; charset=utf-8"
+        file_server
+    }
+
+    handle {
+        respond 404
+    }
+}
+EOF
+    fi
 
     if command -v ufw &>/dev/null && ufw status | grep -qw "active"; then
         ufw allow "${sub_port}/tcp" >/dev/null 2>&1 || true
@@ -692,6 +712,9 @@ install_node() {
             if ! validate_port "$hy_port"; then
                 echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
             fi
+            if [[ "$hy_port" == "$vl_port" ]]; then
+                echo -e "${RED}端口冲突: 该端口已分配给 VLESS-Reality (${vl_port})，不能共用！${PLAIN}"; continue
+            fi
             if check_port_occupied "$hy_port" "udp"; then break; fi
             echo -e "${YELLOW}请更换其他未占用的 UDP 端口！${PLAIN}"
         done
@@ -700,18 +723,41 @@ install_node() {
             read -r -p "请输入端口跳跃范围 [默认 ${old_hy_range:-20000:40000}] (none=不启用): " hy_range || hy_range=""
             hy_range=${hy_range:-${old_hy_range:-20000:40000}}
             [[ "${hy_range,,}" == "none" ]] && { hy_range=""; break; }
-            if validate_range "$hy_range"; then break; fi
-            echo -e "${RED}范围格式非法，应为 起始:结束（如 20000:40000）。${PLAIN}"
+            if ! validate_range "$hy_range"; then
+                echo -e "${RED}范围格式非法，应为 起始:结束（如 20000:40000）。${PLAIN}"; continue
+            fi
+            local r_start="${hy_range%%:*}"
+            local r_end="${hy_range##*:}"
+            if (( vl_port >= r_start && vl_port <= r_end )); then
+                echo -e "${RED}范围冲突: 端口跳跃范围包含已设定的 Reality 端口 (${vl_port})，请调整！${PLAIN}"; continue
+            fi
+            if (( hy_port >= r_start && hy_port <= r_end )); then
+                echo -e "${RED}范围冲突: 端口跳跃范围包含 Hysteria 2 主端口 (${hy_port})，请调整！${PLAIN}"; continue
+            fi
+            break
         done
     fi
 
-    echo -e "\n${YELLOW}=== 3. 配置 HTTPS 订阅站点参数 ===${PLAIN}"
+    echo -e "\n${YELLOW}=== 3. 配置在线订阅站点参数 ===${PLAIN}"
     local sub_port
     while true; do
-        read -r -p "请输入 Caddy 订阅 HTTPS 监听端口 [默认 ${old_sub_port:-8444}]: " sub_port || sub_port=""
+        read -r -p "请输入 Caddy 订阅监听端口 [默认 ${old_sub_port:-8444}]: " sub_port || sub_port=""
         sub_port=${sub_port:-${old_sub_port:-8444}}
         if ! validate_port "$sub_port"; then
             echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
+        fi
+        if [[ "$sub_port" == "$vl_port" ]]; then
+            echo -e "${RED}端口冲突: 该端口已分配给 VLESS-Reality (${vl_port})，不能共用！${PLAIN}"; continue
+        fi
+        if [[ -n "$hy_port" && "$sub_port" == "$hy_port" ]]; then
+            echo -e "${RED}端口冲突: 该端口已分配给 Hysteria 2 主端口 (${hy_port})，不能共用！${PLAIN}"; continue
+        fi
+        if [[ -n "$hy_range" ]]; then
+            local r_start="${hy_range%%:*}"
+            local r_end="${hy_range##*:}"
+            if (( sub_port >= r_start && sub_port <= r_end )); then
+                echo -e "${RED}范围冲突: 订阅端口 (${sub_port}) 落在 Hysteria 2 跳跃范围 (${hy_range}) 内，请更换！${PLAIN}"; continue
+            fi
         fi
         if check_port_occupied "$sub_port" "tcp"; then break; fi
         echo -e "${YELLOW}请更换其他未占用的 TCP 端口！${PLAIN}"
@@ -859,6 +905,7 @@ HY_RANGE="${hy_range}"
 HY_PASS="${hy_password}"
 HY_SKIP_CERT="${hy_skip_cert}"
 SUB_PORT="${sub_port}"
+SUB_PROTO="${sub_proto}"
 SUB_TOKEN="${sub_token}"
 EOF
 
@@ -902,10 +949,15 @@ EOF
     local hy_ports_display="$hy_port"
     [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"
     generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_enabled" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
-    setup_caddy_subscription "$target_host" "$sub_token" "$sub_port"
+    local sub_proto="http"
+    [[ "$CERT_MODE" == "domain" ]] && sub_proto="https"
+    setup_caddy_subscription "$target_host" "$sub_token" "$sub_port" "$CERT_MODE"
 
     show_subscription
 
+    if [[ "${SUB_PROTO:-}" == "http" ]]; then
+        echo -e "${CYAN}提示: 当前为 IP 自签模式，因主流客户端 (如 ClashX.Meta) 会阻断未受信任的自签 HTTPS 证书，订阅已采用 HTTP 分发 (带随机 Token 严格保护)，可在客户端直接粘贴导入。${PLAIN}"
+    fi
     if [[ "${cert_fell_back:-}" == "true" ]]; then
         echo -e "${YELLOW}注意: 本次因域名证书申请失败已回退为 IP 自签证书，客户端已自动设为 skip-cert-verify。${PLAIN}"
     fi
@@ -921,9 +973,10 @@ show_subscription() {
     source "$ENV_FILE"
     set -e
     local port=${SUB_PORT:-8444}
+    local proto=${SUB_PROTO:-https}
     local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
-    local sub_url="https://${host}:${port}/sub_${SUB_TOKEN}/config.yaml"
-    local provider_url="https://${host}:${port}/sub_${SUB_TOKEN}/provider.yaml"
+    local sub_url="${proto}://${host}:${port}/sub_${SUB_TOKEN}/config.yaml"
+    local provider_url="${proto}://${host}:${port}/sub_${SUB_TOKEN}/provider.yaml"
 
     echo -e "\n${GREEN}====================== 节点在线订阅已生成 ======================${PLAIN}"
     echo -e "1. ${YELLOW}完整配置订阅 (推荐 ClashX.Meta / Mihomo 直接导入托管)${PLAIN}:"
@@ -1074,7 +1127,9 @@ menu() {
             sub_port=${SUB_PORT:-8444}
         fi
         if command -v caddy &>/dev/null && systemctl is-active --quiet caddy; then
-            caddy_status="${GREEN}运行中 (端口: ${sub_port})${PLAIN}"
+            local p_tag="HTTP"
+            [[ "${SUB_PROTO:-}" == "https" ]] && p_tag="HTTPS"
+            caddy_status="${GREEN}运行中 (端口: ${sub_port} [${p_tag}])${PLAIN}"
         fi
 
         # 3. 打印系统面板

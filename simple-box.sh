@@ -1448,6 +1448,8 @@ uninstall_all() {
     echo -e "${GREEN}sing-box 与订阅配置已彻底干净卸载！${PLAIN}"
     echo -e "${YELLOW}本脚本自身的入口 (simbo) 也已删除，控制台即将退出。${PLAIN}"
     echo -e "${YELLOW}如需重装，请重新执行一键安装命令。${PLAIN}"
+    echo -e "${CYAN}注: TCP BBR 是内核级 sysctl 设置（/etc/sysctl.d/99-bbr.conf），不属于本脚本，卸载不会还原。${PLAIN}"
+    echo -e "${CYAN}    如需恢复系统默认，请在卸载前先用「TCP BBR 加速管理」关闭，或手动删除该文件。${PLAIN}"
     # 卸载后目录与入口都已不存在，继续停留在菜单毫无意义（面板还会读到已删除的配置）
     UNINSTALL_DONE=true
 }
@@ -2025,6 +2027,15 @@ _ENTRY_SRC="${BASH_SOURCE[0]:-}"
 if [[ -z "$_ENTRY_SRC" || "$_ENTRY_SRC" == "$0" ]]; then
     case "${1:-}" in
         install|reinstall) install_node || exit 1 ;;
+        "")
+            # 未安装时直接进入安装向导，而不是弹出一个全是「未配置 / 未运行」的空面板
+            if [[ ! -f "$ENV_FILE" && ! -f /usr/local/bin/sing-box ]]; then
+                echo -e "${YELLOW}未检测到已安装的 Simple-Box，正在进入安装向导...${PLAIN}"
+                install_node || exit 1
+            else
+                menu
+            fi
+            ;;
         *) menu ;;
     esac
 fi

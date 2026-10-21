@@ -113,13 +113,14 @@ simbo
 ====================================================
             Simple-Box Manager - 控制台            
 ====================================================
- 操作系统: Ubuntu 24.04.5 LTS (amd64)
- IP 地址: 203.0.113.10 | TLS 证书: IP 自签证书
- BBR 加速: 已开启
- sing-box 内核: 运行中 (v1.14.3)
- Caddy 代理: 运行中 (HTTP:8444)
- VLESS-Reality: TCP 443 [伪装: gateway.icloud.com]
- Hysteria 2: UDP 8443 [跳跃: 20000:40000]
+ 服务器操作系统: Ubuntu 24.04.5 LTS (amd64)
+ 流量算法: BBR
+ 公网地址: 203.0.113.10
+ 证书服务: 运行中 (Caddy v2.11.7)
+ TLS 证书: IP 自签证书
+ 代理服务: 运行中 (sing-box v1.14.3)
+ VLESS-Reality | TCP:443 | servername: gateway.icloud.com
+ Hysteria 2 | UDP:8443 | sni: o2.ducto.net | ports: 20000:40000
 ----------------------------------------------------
  在线订阅: http://203.0.113.10:8444/2dac50852729bf55bb61833d/config.yaml
  节点列表: http://203.0.113.10:8444/2dac50852729bf55bb61833d/provider.yaml

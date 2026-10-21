@@ -2036,69 +2036,64 @@ menu() {
             cur_ip=$(grep -oP '^SERVER_IP="\K[^"]*' "$ENV_FILE" 2>/dev/null || true)
         fi
         [[ -z "${cur_ip:-}" ]] && cur_ip=$(curl -s4m3 https://icanhazip.com 2>/dev/null || echo "检测中...")
-        bbr_status=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "关闭")
-        if [[ "$bbr_status" == "bbr" ]]; then
-            bbr_status="${GREEN}已开启${PLAIN}"
+        local cc_algo
+        cc_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "关闭")
+        if [[ "$cc_algo" == "bbr" ]]; then
+            bbr_status="${GREEN}BBR${PLAIN}"
         else
-            bbr_status="${YELLOW}未开启${PLAIN}"
+            bbr_status="${YELLOW}${cc_algo^^}${PLAIN}"
         fi
 
         # 2. 服务运行状态与版本提取
-        local sb_ver="未安装"
+        local sb_ver=""
         local sb_status="${RED}未运行${PLAIN}"
         if [[ -f /usr/local/bin/sing-box ]]; then
             sb_ver=$(/usr/local/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
+            sb_ver="v${sb_ver#v}"
             if systemctl is-active --quiet sing-box; then
-                sb_status="${GREEN}运行中 (v${sb_ver})${PLAIN}"
+                sb_status="${GREEN}运行中 (sing-box ${sb_ver})${PLAIN}"
             else
-                sb_status="${RED}已停止 (v${sb_ver})${PLAIN}"
+                sb_status="${RED}已停止 (sing-box ${sb_ver})${PLAIN}"
             fi
+        else
+            sb_status="${RED}未安装${PLAIN}"
         fi
 
-        local caddy_status="${RED}未配置${PLAIN}"
-        local sub_port="8444"
-        if [[ -f "$ENV_FILE" ]]; then
-            set +e; source "$ENV_FILE"; set -e
-            sub_port=${SUB_PORT:-8444}
-            # 只有本脚本的站点配置存在时才报告订阅在运行，避免卸载后误显示
-            if [[ -f /etc/caddy/sites/simple-box-sub.caddy ]] \
-               && command -v caddy &>/dev/null && systemctl is-active --quiet caddy; then
-                local p_tag="HTTP"
-                [[ "${SUB_PROTO:-}" == "https" ]] && p_tag="HTTPS"
-                caddy_status="${GREEN}运行中 (${p_tag}:${sub_port})${PLAIN}"
-            elif command -v caddy &>/dev/null && systemctl is-active --quiet caddy; then
-                caddy_status="${YELLOW}无订阅站点${PLAIN}"
+        local caddy_ver=""
+        local caddy_status="${RED}未安装${PLAIN}"
+        if command -v caddy &>/dev/null; then
+            caddy_ver=$(caddy version 2>/dev/null | head -n1 | awk '{print $1}')
+            caddy_ver="v${caddy_ver#v}"
+            if systemctl is-active --quiet caddy; then
+                caddy_status="${GREEN}运行中 (Caddy ${caddy_ver})${PLAIN}"
             else
-                caddy_status="${RED}未运行${PLAIN}"
+                caddy_status="${RED}已停止 (Caddy ${caddy_ver})${PLAIN}"
             fi
         fi
 
         # 3. 打印系统面板
-        echo -e " 操作系统: ${CYAN}${os_name} (${arch})${PLAIN}"
+        echo -e " 服务器操作系统: ${CYAN}${os_name} (${arch})${PLAIN}"
+        echo -e " 流量算法: ${bbr_status}"
+        echo -e " 公网地址: ${CYAN}${cur_ip}${PLAIN}"
+        echo -e " 证书服务: ${caddy_status}"
+        
         local cert_display="未配置"
         if [[ -f "$ENV_FILE" ]]; then
             set +e; source "$ENV_FILE"; set -e
-            # 以持久化的 CERT_MODE 为准，避免 skip 模式下显示"未配置"却实际有自签证书
             if [[ "${CERT_MODE:-selfsigned}" == "domain" && -n "${HY_DOMAIN:-}" ]]; then
                 cert_display="${HY_DOMAIN} (CA 证书)"
             else
                 cert_display="IP 自签证书"
             fi
         fi
-        echo -e " IP 地址: ${CYAN}${cur_ip}${PLAIN} | TLS 证书: ${CYAN}${cert_display}${PLAIN}"
-        echo -e " BBR 加速: ${bbr_status}"
-        echo -e " sing-box 内核: ${sb_status}"
-        echo -e " Caddy 代理: ${caddy_status}"
+        echo -e " TLS 证书: ${CYAN}${cert_display}${PLAIN}"
+        echo -e " 代理服务: ${sb_status}"
         
         if [[ -f "$ENV_FILE" ]]; then
-            local p_hy=""
-            if [[ -n "${HY_RANGE:-}" ]]; then
-                p_hy="UDP ${HY_PORT:-8443} [跳跃: ${HY_RANGE}]"
-            else
-                p_hy="UDP ${HY_PORT:-8443} [无跳跃]"
-            fi
-            echo -e " VLESS-Reality: ${BLUE}TCP ${VL_PORT:-443} [伪装: ${VL_SNI:-未配置}]${PLAIN}"
-            echo -e " Hysteria 2: ${BLUE}${p_hy}${PLAIN}"
+            local hy_sni="${HY_DOMAIN:-$SERVER_IP}"
+            local hy_ports="${HY_RANGE:-无}"
+            echo -e " ${BLUE}VLESS-Reality | TCP:${VL_PORT:-443} | servername: ${VL_SNI:-gateway.icloud.com}${PLAIN}"
+            echo -e " ${BLUE}Hysteria 2 | UDP:${HY_PORT:-8443} | sni: ${hy_sni} | ports: ${hy_ports}${PLAIN}"
             
             local proto=${SUB_PROTO:-http}
             local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}

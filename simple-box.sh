@@ -43,6 +43,9 @@ install_deps() {
     if [ ${#missing[@]} -gt 0 ]; then
         echo -e "${BLUE}安装必要基础组件: ${missing[*]}...${PLAIN}"
         if command -v apt-get &>/dev/null; then
+            export DEBIAN_FRONTEND=noninteractive
+            echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections 2>/dev/null || true
+            echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections 2>/dev/null || true
             apt-get update -qq && apt-get install -y -qq "${missing[@]}" iptables-persistent socat
         elif command -v yum &>/dev/null; then
             yum install -y epel-release && yum install -y "${missing[@]}" socat

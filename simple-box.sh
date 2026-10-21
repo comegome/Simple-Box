@@ -185,6 +185,10 @@ install_caddy() {
         return 0
     fi
     echo -e "${BLUE}正在安装 Caddy 用于安全的 HTTPS 订阅分发...${PLAIN}"
+    # 记录「Caddy 是本脚本装的」：卸载时才敢连软件包一起清理，
+    # 若用户机器上本来就有 caddy（可能还托管别的站点），卸载绝不能动它。
+    mkdir -p "$CONF_DIR" 2>/dev/null || true
+    : > "${CONF_DIR}/.caddy_installed_by_script" 2>/dev/null || true
     if command -v apt-get &>/dev/null; then
         apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl
         curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg --yes
@@ -573,8 +577,10 @@ setup_caddy_subscription() {
     
     if [ ! -f /etc/caddy/Caddyfile ]; then
         echo -e "import sites/*.caddy\n" > /etc/caddy/Caddyfile
+        : > "${CONF_DIR}/.caddyfile_created_by_script" 2>/dev/null || true
     elif ! grep -q "import sites/\*\.caddy" /etc/caddy/Caddyfile; then
         echo -e "\nimport sites/*.caddy" >> /etc/caddy/Caddyfile
+        : > "${CONF_DIR}/.caddyfile_appended_by_script" 2>/dev/null || true
     fi
 
     # 清理所有旧版 simple-box caddy 配置文件
@@ -1443,6 +1449,41 @@ uninstall_all() {
     rm -f /usr/local/bin/sing-box.bak.* 2>/dev/null || true
     rm -f /usr/local/bin/simbo
     rm -rf /usr/local/share/simple-box
+
+    # ---- Caddy 收尾 ----
+    # 站点配置一律删除；Caddyfile 中的 import 行只在「本脚本加的」才回退；
+    # 软件包只在「本脚本装的」才卸载，避免误删用户原有的 caddy。
+    local caddy_owned=false caddyfile_created=false caddyfile_appended=false
+    [[ -f "${CONF_DIR}/.caddy_installed_by_script" ]] && caddy_owned=true
+    [[ -f "${CONF_DIR}/.caddyfile_created_by_script" ]] && caddyfile_created=true
+    [[ -f "${CONF_DIR}/.caddyfile_appended_by_script" ]] && caddyfile_appended=true
+
+    if [[ "$caddyfile_created" == "true" ]]; then
+        rm -f /etc/caddy/Caddyfile
+        echo -e "${BLUE}已移除本脚本创建的 Caddyfile${PLAIN}"
+    elif [[ "$caddyfile_appended" == "true" && -f /etc/caddy/Caddyfile ]]; then
+        # 仅回退本脚本追加的那行 import，保留用户原有内容
+        sed -i '\|^import sites/\*\.caddy$|d' /etc/caddy/Caddyfile
+        sed -i -e :a -e '/^\n*$/{$d;N;};/\n$/ba' /etc/caddy/Caddyfile 2>/dev/null || true
+        echo -e "${BLUE}已回退本脚本追加的 Caddyfile import 行${PLAIN}"
+    fi
+
+    if [[ "$caddy_owned" == "true" ]]; then
+        echo -e "${BLUE}正在卸载本脚本安装的 Caddy...${PLAIN}"
+        if command -v apt-get &>/dev/null; then
+            apt-get remove -y -qq caddy >/dev/null 2>&1 || true
+            apt-get autoremove -y -qq >/dev/null 2>&1 || true
+        elif command -v yum &>/dev/null; then
+            yum remove -y caddy >/dev/null 2>&1 || true
+        fi
+        rm -f /etc/apt/sources.list.d/caddy-stable.list
+        rm -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+        echo -e "${BLUE}已卸载 Caddy 软件包并清理其软件源${PLAIN}"
+    elif command -v caddy &>/dev/null; then
+        systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
+        echo -e "${CYAN}Caddy 为系统预装/他处安装，仅移除本站点配置，软件包保留${PLAIN}"
+    fi
+
     rm -rf "$CONF_DIR"
 
     echo -e "${GREEN}sing-box 与订阅配置已彻底干净卸载！${PLAIN}"

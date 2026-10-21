@@ -382,7 +382,7 @@ setup_caddy_subscription() {
 :${sub_port} {
     tls ${CERT_DIR}/fullchain.cer ${CERT_DIR}/private.key
 
-    @sub path /sub_${token}/config.yaml /sub_${token}/provider.yaml /sub_${token}/links.txt
+    @sub path /${token}/config.yaml /${token}/provider.yaml /${token}/links.txt
     handle @sub {
         root * ${WEB_DIR}
         header Content-Type "text/plain; charset=utf-8"
@@ -399,7 +399,7 @@ EOF
         cat > "/etc/caddy/sites/simple-box-sub.caddy" <<EOF
 # Simple-Box HTTP 订阅分发站点 (IP 自签兼容模式)
 http://:${sub_port} {
-    @sub path /sub_${token}/config.yaml /sub_${token}/provider.yaml /sub_${token}/links.txt
+    @sub path /${token}/config.yaml /${token}/provider.yaml /${token}/links.txt
     handle @sub {
         root * ${WEB_DIR}
         header Content-Type "text/plain; charset=utf-8"
@@ -443,14 +443,14 @@ generate_full_client_config() {
     local hy_password="${13}"
     local hy_skip_cert="${14}"
 
-    mkdir -p "${WEB_DIR}/sub_${token}"
+    mkdir -p "${WEB_DIR}/${token}"
 
     if [ ! -f "$TEMPLATE_FILE" ]; then
         curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/template.yaml -o "$TEMPLATE_FILE" 2>/dev/null || true
     fi
 
     # 1. 组装完整配置
-    local full_config_file="${WEB_DIR}/sub_${token}/config.yaml"
+    local full_config_file="${WEB_DIR}/${token}/config.yaml"
     if [ -f "$TEMPLATE_FILE" ]; then
         cat "$TEMPLATE_FILE" > "$full_config_file"
     else
@@ -511,7 +511,7 @@ EOF
     printf '      - "DIRECT"\n' >> "$full_config_file"
 
     # 2. 组装纯 Provider 片段
-    local provider_file="${WEB_DIR}/sub_${token}/provider.yaml"
+    local provider_file="${WEB_DIR}/${token}/provider.yaml"
     cat > "$provider_file" <<EOF
 proxies:
   - name: "${node_prefix}-VLESS-Reality"
@@ -546,7 +546,7 @@ EOF
 
     # 3. 组装原生分享链接
     local vless_link="vless://${user_uuid}@${server_ip}:${vl_port}?security=reality&encryption=none&pbk=${vl_pubkey}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${vl_sni}&sid=${vl_shortid}#${node_prefix}-VLESS-Reality"
-    local links_out="${WEB_DIR}/sub_${token}/links.txt"
+    local links_out="${WEB_DIR}/${token}/links.txt"
     echo "$vless_link" > "$links_out"
 
     if [ "$hy_enabled" = true ]; then
@@ -975,8 +975,8 @@ show_subscription() {
     local port=${SUB_PORT:-8444}
     local proto=${SUB_PROTO:-https}
     local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
-    local sub_url="${proto}://${host}:${port}/sub_${SUB_TOKEN}/config.yaml"
-    local provider_url="${proto}://${host}:${port}/sub_${SUB_TOKEN}/provider.yaml"
+    local sub_url="${proto}://${host}:${port}/${SUB_TOKEN}/config.yaml"
+    local provider_url="${proto}://${host}:${port}/${SUB_TOKEN}/provider.yaml"
 
     echo -e "\n${GREEN}====================== 节点在线订阅已生成 ======================${PLAIN}"
     echo -e "1. ${YELLOW}完整配置订阅 (推荐 ClashX.Meta / Mihomo 直接导入托管)${PLAIN}:"

@@ -181,7 +181,7 @@ sing-box check -c /etc/sing-box/config.json   # 配置合法性
 ss -tlnp | grep -E ':(443|8444)'              # Reality 与订阅端口
 ss -ulnp | grep 8443                          # Hy2 端口
 iptables -t nat -L PREROUTING -n --line-numbers | grep 8443   # 端口跳跃
-curl -k https://<域名或IP>:8444/sub_<token>/provider.yaml     # 订阅可达性
+curl -k https://<域名或IP>:8444/<token>/provider.yaml     # 订阅可达性
 ```
 
 ---

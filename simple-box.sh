@@ -25,6 +25,21 @@ YAML_PROVIDER="${CONF_DIR}/clash_meta_provider.yaml"
 LINKS_FILE="${CONF_DIR}/links.txt"
 TEMPLATE_FILE="${CONF_DIR}/template.yaml"
 
+SCRIPT_URL="https://raw.githubusercontent.com/comegome/simple-box/main/simple-box.sh"
+
+# 管道执行（curl ... | bash）不受支持，且必须在此处就拦下：
+# bash 从 stdin 读取脚本正文，脚本里的 read 会与 bash 抢同一条流，
+# 用户看到的每个提问都会把脚本剩余代码当成答案吃掉，结果是静默错乱而非报错。
+# 检测依据：BASH_SOURCE[0] 为空 且 stdin 不是终端。
+if [[ -z "${BASH_SOURCE[0]:-}" ]]; then
+    cat >/dev/null 2>&1 || true   # 抽干管道，让外层 curl 正常结束（否则 curl: (23)）
+    echo -e "${RED}不支持管道执行（curl ... | bash）。${PLAIN}"
+    echo -e "${YELLOW}原因: bash 从 stdin 读取脚本，脚本内的交互提问会与脚本正文抢同一条输入流。${PLAIN}"
+    echo -e "${YELLOW}请先下载再运行：${PLAIN}"
+    echo -e "  curl -fsSL ${SCRIPT_URL} -o /tmp/simple-box.sh && sudo bash /tmp/simple-box.sh"
+    exit 1
+fi
+
 [[ $EUID -ne 0 ]] && echo -e "${RED}错误: 必须使用 root 权限运行此脚本！${PLAIN}" && exit 1
 
 get_arch() {
@@ -2002,20 +2017,6 @@ menu() {
     done
 }
 
-# 管道执行（curl ... | bash）时 stdin 就是脚本自身的输入流，交互式 read 会立即 EOF。
-# 若确实存在可用控制终端，把 stdin 重新接到 /dev/tty，让菜单可正常交互。
-# 注意：必须先用子 shell 试探能否打开 /dev/tty；无控制终端时直接 exec 会失败，
-# 配合 set -e 会把整个脚本静默杀掉（表现为零输出、退出码 0）。
-_INTERACTIVE=false
-if [[ -z "${BASH_SOURCE[0]:-}" && ! -t 0 ]]; then
-    if (exec </dev/tty) 2>/dev/null; then
-        exec </dev/tty
-        _INTERACTIVE=true
-    fi
-elif [ -t 0 ]; then
-    _INTERACTIVE=true
-fi
-
 # 入口守卫：三种执行方式都要能进入主流程
 #   1) ./simple-box.sh / bash simple-box.sh  -> BASH_SOURCE[0] == $0
 #   2) bash <(curl ...)                      -> BASH_SOURCE[0] == /dev/fd/63 == $0
@@ -2024,15 +2025,6 @@ _ENTRY_SRC="${BASH_SOURCE[0]:-}"
 if [[ -z "$_ENTRY_SRC" || "$_ENTRY_SRC" == "$0" ]]; then
     case "${1:-}" in
         install|reinstall) install_node || exit 1 ;;
-        *)
-            if [[ "$_INTERACTIVE" == "true" ]]; then
-                menu
-            else
-                echo -e "${RED}当前环境没有可用终端，无法打开交互式菜单。${PLAIN}"
-                echo -e "${YELLOW}请在真实终端中运行，或使用非交互模式：${PLAIN}"
-                echo -e "  curl -fsSL <脚本地址> | sudo bash -s install"
-                exit 1
-            fi
-            ;;
+        *) menu ;;
     esac
 fi

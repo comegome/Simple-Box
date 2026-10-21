@@ -43,26 +43,26 @@
 ### 1. 官方直链（海外 VPS 推荐）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/simple-box.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/simple-box.sh -o /tmp/simple-box.sh && sudo bash /tmp/simple-box.sh
 ```
 
 ### 2. CDN 加速直链（国内机器 / 抗 DNS 污染）
 
 ```bash
-curl -fsSL https://cdn.jsdelivr.net/gh/comegome/simple-box@main/simple-box.sh | sudo bash
+curl -fsSL https://cdn.jsdelivr.net/gh/comegome/simple-box@main/simple-box.sh -o /tmp/simple-box.sh && sudo bash /tmp/simple-box.sh
 ```
 
 > ⚠️ **不要用 `sudo bash <(curl ...)`**：`sudo` 默认会关闭调用方打开的额外文件描述符，`<(...)` 生成的 `/dev/fd/63` 在子进程里已经不存在，于是报
-> `bash: /dev/fd/63: No such file or directory` 与 `curl: (23) Failure writing output to destination`。
-> 这是 `sudo` 的行为，不是脚本问题。管道写法（`curl ... | sudo bash`）不涉及文件描述符传递，任何环境都可用。
+> `bash: /dev/fd/63: No such file or directory` 与 `curl: (23) Failure writing output to destination`。这是 `sudo` 的行为，不是脚本问题。
 >
-> 若你的 `sudo` 配置了 `closefrom_override` 且已允许，也可用 `sudo bash <(curl ...)`；否则请用上面的管道写法。
+> ⚠️ **也不要用 `curl ... | sudo bash`**：bash 从 stdin 读取脚本正文，脚本里的交互提问会和脚本自身抢同一条输入流，安装过程会静默错乱。脚本会主动检测并拒绝这种执行方式。
+>
+> 结论：**先下载成文件，再执行**。这是唯一稳妥的方式，也方便你在运行前审阅代码。
 
-### 3. 下载后执行（需要反复使用或审计代码时）
+### 3. 无人值守安装（无交互，全默认值）
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/simple-box.sh -o simple-box.sh
-sudo bash simple-box.sh
+curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/simple-box.sh -o /tmp/simple-box.sh && sudo bash /tmp/simple-box.sh install
 ```
 
 ---

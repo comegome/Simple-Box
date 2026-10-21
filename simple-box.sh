@@ -28,12 +28,23 @@ TEMPLATE_FILE="${CONF_DIR}/template.yaml"
 [[ $EUID -ne 0 ]] && echo -e "${RED}错误: 必须使用 root 权限运行此脚本！${PLAIN}" && exit 1
 
 get_arch() {
-    local arch=$(uname -m)
+    local arch
+    arch=$(uname -m)
     case "$arch" in
         x86_64)  echo "amd64" ;;
         aarch64) echo "arm64" ;;
-        *) echo -e "${RED}不支持的系统架构: $arch${PLAIN}"; exit 1 ;;
+        *) return 1 ;;
     esac
+}
+
+# 架构校验（供需要中止流程处调用，避免在 $(...) 子 shell 中 exit 被吞掉）
+require_arch() {
+    local a
+    if ! a=$(get_arch); then
+        echo -e "${RED}不支持的系统架构: $(uname -m)（仅支持 x86_64 / aarch64）${PLAIN}"
+        return 1
+    fi
+    echo "$a"
 }
 
 # 端口与端口段合法性校验
@@ -119,12 +130,14 @@ check_port_occupied() {
 # 基础依赖检查与安装
 install_deps() {
     local missing=()
-    for cmd in curl tar jq openssl iptables socat qrencode; do
+    # 仅保留真正被调用的依赖：jq / socat 全程未使用，已移除
+    for cmd in curl tar openssl iptables qrencode; do
         if ! command -v "$cmd" &>/dev/null; then
             missing+=("$cmd")
         fi
     done
     if [ ${#missing[@]} -gt 0 ]; then
+        echo -e "${BLUE}缺失依赖: ${missing[*]}${PLAIN}"
         echo -e "${BLUE}安装必要基础组件: ${missing[*]}...${PLAIN}"
         if command -v apt-get &>/dev/null; then
             export DEBIAN_FRONTEND=noninteractive
@@ -137,6 +150,17 @@ install_deps() {
             yum install -y epel-release >/dev/null 2>&1 || true
             yum install -y "${missing[@]}" || echo -e "${YELLOW}部分依赖安装失败，将尝试继续。${PLAIN}"
         fi
+    fi
+
+    # 关键依赖缺失时给出明确警告（iptables 缺失会导致端口跳跃静默失效）
+    local critical_missing=()
+    for cmd in curl tar openssl iptables; do
+        command -v "$cmd" &>/dev/null || critical_missing+=("$cmd")
+    done
+    if [ ${#critical_missing[@]} -gt 0 ]; then
+        echo -e "${RED}关键依赖仍缺失: ${critical_missing[*]}${PLAIN}"
+        echo -e "${YELLOW}请手动安装后重试（缺少 iptables 将导致端口跳跃失效）。${PLAIN}"
+        return 1
     fi
 }
 
@@ -242,14 +266,17 @@ update_singbox_core() {
         fi
     fi
     local latest_ver=${tag#v}
-    local arch=$(get_arch)
+    local arch
+    if ! arch=$(require_arch); then
+        return 1
+    fi
 
     echo -e "本地当前版本: ${CYAN}v${cur_ver}${PLAIN} | 官方最新版本: ${GREEN}${tag}${PLAIN} (${arch})"
 
     if [[ "$cur_ver" == "$latest_ver" && "$force_flag" != "force" ]]; then
         echo -e "${GREEN}当前已是官方最新版本，无需重复更新！${PLAIN}"
         if [ -t 0 ]; then
-            read -p "是否强制重新下载覆盖安装？(y/N): " re_install
+            read -r -p "是否强制重新下载覆盖安装？(y/N): " re_install
             [[ "$re_install" != "y" && "$re_install" != "Y" ]] && return 0
         else
             return 0
@@ -272,8 +299,27 @@ update_singbox_core() {
         return 1
     fi
     if [[ -f "$tmp_dir/sing-box" ]]; then
+        # 升级前备份旧内核，新内核若无法解析现有配置则自动回滚
+        local old_bin_backup=""
+        if [[ -x /usr/local/bin/sing-box ]]; then
+            old_bin_backup="/usr/local/bin/sing-box.bak.$$"
+            cp -f /usr/local/bin/sing-box "$old_bin_backup" 2>/dev/null || old_bin_backup=""
+        fi
         install -m 755 "$tmp_dir/sing-box" /usr/local/bin/sing-box
         rm -rf "$tmp_dir"
+
+        if [[ -f "$CONF_FILE" ]] && ! /usr/local/bin/sing-box check -c "$CONF_FILE" >/dev/null 2>&1; then
+            echo -e "${RED}新内核无法解析现有配置，正在回滚到旧版本...${PLAIN}"
+            if [[ -n "$old_bin_backup" ]]; then
+                mv -f "$old_bin_backup" /usr/local/bin/sing-box
+                echo -e "${GREEN}已回滚，仍使用原内核: $(/usr/local/bin/sing-box version | head -n1)${PLAIN}"
+            else
+                echo -e "${RED}无旧内核备份可回滚，请手动重装。${PLAIN}"
+            fi
+            return 1
+        fi
+        [[ -n "$old_bin_backup" ]] && rm -f "$old_bin_backup" 2>/dev/null || true
+
         echo -e "${GREEN}sing-box 内核更新成功: $(/usr/local/bin/sing-box version | head -n1)${PLAIN}"
         if systemctl is-active --quiet sing-box; then
             systemctl restart sing-box
@@ -322,11 +368,18 @@ issue_cert_bundle() {
         fi
     fi
 
-    # 校验：域名证书是否真的落地（含有效期）
+    # 校验：域名证书是否真的落地（含有效期 + 公私钥配对，避免 acme 写半截）
     local ok=false
     if [[ -s "${CERT_DIR}/fullchain.cer" && -s "${CERT_DIR}/private.key" ]]; then
         if openssl x509 -in "${CERT_DIR}/fullchain.cer" -noout -checkend 0 >/dev/null 2>&1; then
-            ok=true
+            local d_crt_pub d_key_pub
+            d_crt_pub=$(openssl x509 -in "${CERT_DIR}/fullchain.cer" -noout -pubkey 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
+            d_key_pub=$(openssl pkey -in "${CERT_DIR}/private.key" -pubout 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
+            if [[ -n "$d_crt_pub" && "$d_crt_pub" == "$d_key_pub" ]]; then
+                ok=true
+            else
+                echo -e "${RED}域名证书与私钥不配对（acme 写入异常），将降级为自签证书。${PLAIN}"
+            fi
         fi
     fi
 
@@ -750,7 +803,9 @@ write_singbox_config() {
     local hy_port="${7:-}"
     local hy_password="${8:-}"
 
-    cat > "$CONF_FILE" <<EOF
+    # 先写临时文件再原子替换，避免 sing-box 文件监视器读到半截 JSON
+    local tmp_conf="${CONF_FILE}.tmp.$$"
+    cat > "$tmp_conf" <<EOF
 {
   "log": {
     "disabled": false,
@@ -788,7 +843,7 @@ write_singbox_config() {
 EOF
 
     if [ "$hy_enabled" = true ]; then
-        cat >> "$CONF_FILE" <<EOF
+        cat >> "$tmp_conf" <<EOF
     ,
     {
       "type": "hysteria2",
@@ -819,6 +874,8 @@ EOF
   ]
 }
 EOF
+    chmod 644 "$tmp_conf" 2>/dev/null || true
+    mv -f "$tmp_conf" "$CONF_FILE"
 }
 
 # 集中写入持久化环境变量
@@ -842,6 +899,7 @@ HY_SKIP_CERT="${hy_skip_cert}"
 SUB_PORT="${sub_port}"
 SUB_PROTO="${sub_proto}"
 SUB_TOKEN="${sub_token}"
+CERT_MODE="${CERT_MODE:-selfsigned}"
 EOF
 }
 
@@ -851,11 +909,23 @@ render_and_reload() {
         echo -e "${RED}未找到 sing-box 内核，无法应用配置。${PLAIN}"
         return 1
     fi
+
+    # 写配置前先备份当前可用版本，校验失败时真正回滚（原来只提示不动作）
+    local backup="${CONF_FILE}.bak"
+    [[ -f "$CONF_FILE" ]] && cp -f "$CONF_FILE" "$backup" 2>/dev/null || true
+
     if ! /usr/local/bin/sing-box check -c "$CONF_FILE" >/dev/null 2>&1; then
-        echo -e "${RED}生成的 sing-box 配置文件校验失败！已回滚到上一份可用配置。${PLAIN}"
-        /usr/local/bin/sing-box check -c "$CONF_FILE" || true
+        echo -e "${RED}生成的 sing-box 配置校验失败！正在回滚到上一份可用配置...${PLAIN}"
+        /usr/local/bin/sing-box check -c "$CONF_FILE" 2>&1 | tail -3 || true
+        if [[ -s "$backup" ]]; then
+            cp -f "$backup" "$CONF_FILE"
+            echo -e "${GREEN}已回滚，原配置保持不变。${PLAIN}"
+        else
+            echo -e "${YELLOW}无备份可回滚（首次安装），请检查上方报错。${PLAIN}"
+        fi
         return 1
     fi
+    rm -f "$backup" 2>/dev/null || true
 
     if systemctl is-active --quiet sing-box 2>/dev/null; then
         systemctl restart sing-box 2>/dev/null || { echo -e "${RED}sing-box 重启失败，请查看: journalctl -u sing-box -n 30${PLAIN}"; return 1; }
@@ -878,7 +948,10 @@ render_and_reload() {
 }
 
 install_node() {
-    install_deps
+    if ! install_deps; then
+        echo -e "${RED}基础依赖检查未通过，安装中止。${PLAIN}"
+        return 1
+    fi
 
     if [[ ! -f /usr/local/bin/sing-box ]]; then
         update_singbox_core "force" || { echo -e "${RED}内核安装失败，无法继续。${PLAIN}"; return 1; }
@@ -908,7 +981,7 @@ install_node() {
     local vl_port
     while true; do
         read -r -p "请输入 Reality 监听端口 [默认 ${old_vl_port:-443}]: " vl_port || vl_port=""
-        vl_port=${vl_port:-${old_vl_port:-443}}
+        vl_port=$(trim_string "${vl_port:-${old_vl_port:-443}}")
         if ! validate_port "$vl_port"; then
             echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
         fi
@@ -978,7 +1051,11 @@ install_node() {
         hy_skip_cert="true"
     else
         target_host="$hy_domain"
-        if [[ -z "$CF_TOKEN" ]]; then
+        # 支持预置 CF_TOKEN 环境变量（无人值守部署）；必须同步到局部变量，否则会静默降级为自签
+        if [[ -n "${CF_TOKEN:-}" ]]; then
+            cf_token="$CF_TOKEN"
+        fi
+        if [[ -z "$cf_token" ]]; then
             echo -e "\n${CYAN}------------------- Cloudflare API Token 获取指引 -------------------${PLAIN}"
 echo -e "${CYAN} 1. 登录 CF -> 右上角头像 -> [配置文件] -> 左侧导航 [API 令牌]${PLAIN}"
 echo -e "${CYAN} 2. 点击 [创建令牌] -> 找到 [编辑区域 DNS (Edit zone DNS)] 点击 [使用模板]${PLAIN}"
@@ -1022,7 +1099,7 @@ echo -e "${CYAN}----------------------------------------------------------------
         hy_range="20000:40000"
         while true; do
             read -r -p "请输入 Hysteria 2 主监听 UDP 端口 [默认 ${old_hy_port:-8443}]: " hy_port || hy_port=""
-            hy_port=${hy_port:-${old_hy_port:-8443}}
+            hy_port=$(trim_string "${hy_port:-${old_hy_port:-8443}}")
             if ! validate_port "$hy_port"; then
                 echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
             fi
@@ -1035,7 +1112,7 @@ echo -e "${CYAN}----------------------------------------------------------------
 
         while true; do
             read -r -p "请输入端口跳跃范围 [默认 ${old_hy_range:-20000:40000}] (none=不启用): " hy_range || hy_range=""
-            hy_range=${hy_range:-${old_hy_range:-20000:40000}}
+            hy_range=$(trim_string "${hy_range:-${old_hy_range:-20000:40000}}")
             [[ "${hy_range,,}" == "none" ]] && { hy_range=""; break; }
             if ! validate_range "$hy_range"; then
                 echo -e "${RED}范围格式非法，应为 起始:结束（如 20000:40000）。${PLAIN}"; continue
@@ -1056,7 +1133,7 @@ echo -e "${CYAN}----------------------------------------------------------------
     local sub_port
     while true; do
         read -r -p "请输入 Caddy 订阅监听端口 [默认 ${old_sub_port:-8444}]: " sub_port || sub_port=""
-        sub_port=${sub_port:-${old_sub_port:-8444}}
+        sub_port=$(trim_string "${sub_port:-${old_sub_port:-8444}}")
         if ! validate_port "$sub_port"; then
             echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
         fi
@@ -1079,9 +1156,10 @@ echo -e "${CYAN}----------------------------------------------------------------
 
     local node_prefix
     read -r -p "请输入节点名称前缀 (如 HK / US / Oracle-O2) [默认 ${old_prefix:-Node}]: " node_prefix || node_prefix=""
-    node_prefix=${node_prefix:-${old_prefix:-Node}}
-    # 去掉会破坏 YAML/URI 的字符
-    node_prefix=$(echo "$node_prefix" | tr -d '"' | tr -d "'")
+    node_prefix=$(trim_string "${node_prefix:-${old_prefix:-Node}}")
+    # 去掉会破坏 YAML/URI 的字符（引号、逗号、井号、冒号、反斜杠）
+    node_prefix=$(printf '%s' "$node_prefix" | tr -d '\"'"'"',#:\\')
+    [[ -z "$node_prefix" ]] && node_prefix="Node"
 
     # 证书重生成前先停 sing-box，避免文件监视器读到写入中途的 cert/key 组合
     if systemctl is-active --quiet sing-box; then
@@ -1090,7 +1168,12 @@ echo -e "${CYAN}----------------------------------------------------------------
 
     # 签发证书（skip 模式下仍需自签证书，仅供 Caddy 订阅站点的 TLS 使用）
     if [ "$hy_enabled" = true ]; then
-        issue_cert_bundle "$hy_domain" "$cf_token" "$server_ip" || return 1
+        if ! issue_cert_bundle "$hy_domain" "$cf_token" "$server_ip"; then
+            # 前面为签发证书已停服务，失败必须拉起，否则整站失联
+            systemctl start sing-box 2>/dev/null || true
+            echo -e "${RED}证书阶段失败，已恢复原有 sing-box 服务，安装中止。${PLAIN}"
+            return 1
+        fi
         if [[ "$CERT_MODE" == "domain" ]]; then
             hy_skip_cert="false"
             target_host="$hy_domain"
@@ -1103,20 +1186,34 @@ echo -e "${CYAN}----------------------------------------------------------------
             fi
         fi
     else
-        issue_cert_bundle "" "" "$server_ip" || return 1
+        if ! issue_cert_bundle "" "" "$server_ip"; then
+            systemctl start sing-box 2>/dev/null || true
+            echo -e "${RED}自签证书生成失败，已恢复原有 sing-box 服务，安装中止。${PLAIN}"
+            return 1
+        fi
         target_host="$server_ip"
         hy_skip_cert="true"
     fi
 
-    # 生成密钥凭证
+    # 生成密钥凭证（任一步失败都必须中止，否则空值会写进配置导致服务起不来）
     echo -e "${BLUE}生成安全密钥凭证...${PLAIN}"
-    local key_pair=$(/usr/local/bin/sing-box generate reality-keypair)
-    local vl_privkey=$(echo "$key_pair" | awk '/PrivateKey/{print $2}')
-    local vl_pubkey=$(echo "$key_pair" | awk '/PublicKey/{print $2}')
-    local vl_shortid=$(/usr/local/bin/sing-box generate rand 8 --hex)
-    local user_uuid=$(/usr/local/bin/sing-box generate uuid)
-    local hy_password=$(/usr/local/bin/sing-box generate rand 16 --base64 | tr -dc 'a-zA-Z0-9' | head -c 16)
-    local sub_token=$(openssl rand -hex 12)
+    local key_pair vl_privkey vl_pubkey vl_shortid user_uuid hy_password sub_token
+    key_pair=$(/usr/local/bin/sing-box generate reality-keypair) || {
+        echo -e "${RED}Reality 密钥对生成失败，已中止。${PLAIN}"; return 1; }
+    vl_privkey=$(echo "$key_pair" | awk '/PrivateKey/{print $2}')
+    vl_pubkey=$(echo "$key_pair" | awk '/PublicKey/{print $2}')
+    vl_shortid=$(/usr/local/bin/sing-box generate rand 8 --hex) || vl_shortid=""
+    user_uuid=$(/usr/local/bin/sing-box generate uuid) || user_uuid=""
+    hy_password=$(/usr/local/bin/sing-box generate rand 16 --base64 | tr -dc 'a-zA-Z0-9' | head -c 16) || hy_password=""
+    sub_token=$(openssl rand -hex 12) || sub_token=""
+    if [[ -z "$vl_privkey" || -z "$vl_pubkey" || -z "$vl_shortid" || -z "$user_uuid" || -z "$sub_token" ]]; then
+        echo -e "${RED}关键凭证生成不完整（privkey/uuid/shortid/token 有空值），已中止安装。${PLAIN}"
+        return 1
+    fi
+    if [ "$hy_enabled" = true ] && [[ -z "$hy_password" ]]; then
+        echo -e "${RED}Hysteria 2 密码生成失败，已中止安装。${PLAIN}"
+        return 1
+    fi
 
     # 防火墙精准放行
     if command -v ufw &>/dev/null && ufw status | grep -qw "active"; then
@@ -1234,6 +1331,10 @@ show_subscription() {
 
 # 展示单独节点链接与二维码
 show_links() {
+    # 若 links.txt 比 env.conf 旧，说明配置已变更，需重新生成，避免展示陈旧链接
+    if [[ -f "$LINKS_FILE" && -f "$ENV_FILE" && "$ENV_FILE" -nt "$LINKS_FILE" ]]; then
+        rm -f "$LINKS_FILE"
+    fi
     if [[ ! -f "$LINKS_FILE" ]]; then
         if [[ -f "$ENV_FILE" ]]; then
             set +e; source "$ENV_FILE"; set -e
@@ -1306,7 +1407,7 @@ uninstall_all() {
                 netfilter-persistent save >/dev/null 2>&1 || true
             fi
         fi
-        rm -f /etc/caddy/sites/*-${SUB_PORT:-8444}.caddy /etc/caddy/sites/simple-box*.caddy
+        rm -f /etc/caddy/sites/*-"${SUB_PORT:-8444}".caddy /etc/caddy/sites/simple-box*.caddy
         systemctl reload caddy 2>/dev/null || true
     fi
 
@@ -1319,7 +1420,7 @@ uninstall_all() {
         fi
     fi
 
-    rm -f /usr/local/bin/sing-box
+    rm -f /usr/local/bin/sing-box /usr/local/bin/sing-box.bak.* 2>/dev/null || true
     rm -f /usr/local/bin/simbo
     rm -rf /usr/local/share/simple-box
     rm -rf "$CONF_DIR"
@@ -1409,8 +1510,7 @@ ${GREEN}================= VLESS-Reality 模块配置 =================${PLAIN}"
                 local sub_port="${SUB_PORT:-8444}"
                 local sub_proto="${SUB_PROTO:-http}"
                 local sub_token="${SUB_TOKEN}"
-                local CERT_MODE="selfsigned"
-                [[ "$hy_skip_cert" != "true" ]] && CERT_MODE="domain"
+                local CERT_MODE="${CERT_MODE:-selfsigned}"
 
                 write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "$hy_enabled" "$hy_port" "$hy_password"
                 write_env_config
@@ -1678,8 +1778,9 @@ ${GREEN}================ 在线订阅站点模块配置 ================${PLAIN}
 
                 SUB_PORT="$sub_port"
                 SUB_TOKEN="$new_token"
-                local CERT_MODE="selfsigned"
-                [[ "${HY_SKIP_CERT:-true}" != "true" ]] && CERT_MODE="domain"
+                # 证书模式以 env.conf 持久化的 CERT_MODE 为准（旧逻辑用 HY_SKIP_CERT 推断，
+                # 在「仅 Reality」的 skip 模式下会误判成 domain，把自签证书配成 HTTPS 导致客户端导入失败）
+                local CERT_MODE="${CERT_MODE:-selfsigned}"
 
                 local node_prefix="$NODE_PREFIX"
                 local server_ip="$SERVER_IP"
@@ -1696,7 +1797,9 @@ ${GREEN}================ 在线订阅站点模块配置 ================${PLAIN}
                 local hy_range="${HY_RANGE:-}"
                 local hy_password="${HY_PASS:-}"
                 local hy_skip_cert="${HY_SKIP_CERT:-true}"
-                local sub_proto="$SUB_PROTO"
+                # SUB_PROTO 必须由证书模式重新推导，不能沿用旧值（域名/自签切换后会写错协议）
+                local sub_proto="http"
+                [[ "$CERT_MODE" == "domain" ]] && sub_proto="https"
                 local sub_token="$new_token"
                 write_env_config
 
@@ -1770,9 +1873,14 @@ menu() {
         if [ -f /etc/os-release ]; then
             os_name=$(grep -oP 'PRETTY_NAME="\K[^"]+' /etc/os-release || grep -oP 'PRETTY_NAME=\K.+' /etc/os-release | tr -d '"')
         fi
-        local arch=$(get_arch)
-        local cur_ip=$(curl -s4m3 https://icanhazip.com || echo "检测中...")
-        local bbr_status=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "关闭")
+        local arch cur_ip bbr_status
+        arch=$(get_arch 2>/dev/null || echo "unknown")
+        # 优先读已持久化的 SERVER_IP，避免每次刷新面板都外呼 curl（菜单响应从 3s 降到瞬时）
+        if [[ -f "$ENV_FILE" ]]; then
+            cur_ip=$(grep -oP '^SERVER_IP="\K[^"]*' "$ENV_FILE" 2>/dev/null || true)
+        fi
+        [[ -z "${cur_ip:-}" ]] && cur_ip=$(curl -s4m3 https://icanhazip.com 2>/dev/null || echo "检测中...")
+        bbr_status=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "关闭")
         if [[ "$bbr_status" == "bbr" ]]; then
             bbr_status="${GREEN}已开启 (bbr)${PLAIN}"
         else
@@ -1808,11 +1916,10 @@ menu() {
         local cert_display="未配置"
         if [[ -f "$ENV_FILE" ]]; then
             set +e; source "$ENV_FILE"; set -e
-            if [[ "$HY_ENABLED" == "false" || "$HY_DOMAIN" == "skip" ]]; then
-                cert_display="未启用 (仅Reality)"
-            elif [[ -n "$HY_DOMAIN" && "$HY_DOMAIN" != "skip" ]]; then
-                cert_display="${HY_DOMAIN}"
-            elif [[ "$HY_SKIP_CERT" == "true" ]]; then
+            # 以持久化的 CERT_MODE 为准，避免 skip 模式下显示"未配置"却实际有自签证书
+            if [[ "${CERT_MODE:-selfsigned}" == "domain" && -n "${HY_DOMAIN:-}" ]]; then
+                cert_display="${HY_DOMAIN} (CA 证书)"
+            else
                 cert_display="IP 自签证书"
             fi
         fi

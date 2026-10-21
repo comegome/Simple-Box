@@ -377,17 +377,13 @@ issue_self_signed_cert() {
     fi
     # 原子替换，避免 sing-box/caddy 读到半写状态
     # 先校验新证书与私钥确实配对，再原子替换，避免上线后握手失败
-    local crt_mod key_mod
-    crt_mod=$(openssl x509 -in "$tmp_crt" -noout -modulus 2>/dev/null | openssl md5 2>/dev/null)
-    key_mod=$(openssl rsa -in "$tmp_key" -noout -modulus 2>/dev/null | openssl md5 2>/dev/null)
-    if [[ -z "$crt_mod" || -z "$key_mod" ]]; then
-        # ECC 证书没有 modulus，改用公钥指纹比对
-        crt_mod=$(openssl x509 -in "$tmp_crt" -noout -pubkey 2>/dev/null | openssl md5 2>/dev/null)
-        key_mod=$(openssl ec -in "$tmp_key" -pubout 2>/dev/null | openssl md5 2>/dev/null)
-    fi
-    if [[ -z "$crt_mod" || "$crt_mod" != "$key_mod" ]]; then
+    # 统一用公钥比对（RSA/ECC 通用；-modulus 对 ECC 无效）
+    local crt_pub key_pub
+    crt_pub=$(openssl x509 -in "$tmp_crt" -noout -pubkey 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
+    key_pub=$(openssl pkey -in "$tmp_key" -pubout 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
+    if [[ -z "$crt_pub" || -z "$key_pub" || "$crt_pub" != "$key_pub" ]]; then
         rm -f "$tmp_key" "$tmp_crt"
-        echo -e "${RED}自签证书与私钥不匹配，已放弃本次写入（原证书保持不变）。${PLAIN}"
+        echo -e "${RED}自签证书与私钥不匹配 (crt=${crt_pub:-空} key=${key_pub:-空})，已放弃本次写入（原证书保持不变）。${PLAIN}"
         return 1
     fi
 

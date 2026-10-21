@@ -86,27 +86,35 @@ update_singbox_core() {
 issue_cf_cert() {
     local domain="$1"
     local cf_token="$2"
+    local acme_bin="$HOME/.acme.sh/acme.sh"
 
-    echo -e "${BLUE}配置 acme.sh 并使用 Cloudflare DNS API 申请证书...${PLAIN}"
+    echo -e "${BLUE}配置 acme.sh 证书环境...${PLAIN}"
     mkdir -p "$CERT_DIR"
     
-    if [ ! -f "$HOME/.acme.sh/acme.sh" ]; then
+    if [ ! -f "$acme_bin" ]; then
         curl -sSL https://get.acme.sh | sh -s email="admin@${domain}"
     fi
 
     export CF_Token="$cf_token"
-    "$HOME/.acme.sh/acme.sh" --set-default-ca --server letsencrypt
-    "$HOME/.acme.sh/acme.sh" --issue --dns dns_cf -d "$domain" -d "*.${domain}" --keylength ec-256 --force
 
-    "$HOME/.acme.sh/acme.sh" --install-cert -d "$domain" --ecc \
+    # 若本地已有该域名的有效证书，直接同步安装，0秒跳过网络签发
+    if [[ -f "$HOME/.acme.sh/${domain}_ecc/fullchain.cer" && -f "$HOME/.acme.sh/${domain}_ecc/${domain}.key" ]]; then
+        echo -e "${GREEN}检测到本地已有 ${domain} 的有效证书，直接同步部署...${PLAIN}"
+    else
+        echo -e "${BLUE}通过 Cloudflare DNS API 申请全新证书...${PLAIN}"
+        "$acme_bin" --set-default-ca --server letsencrypt
+        "$acme_bin" --issue --dns dns_cf -d "$domain" --dnssleep 20 --keylength ec-256 --force
+    fi
+
+    "$acme_bin" --install-cert -d "$domain" --ecc \
         --fullchain-file "${CERT_DIR}/fullchain.cer" \
         --key-file "${CERT_DIR}/private.key" \
         --reloadcmd "systemctl reload sing-box 2>/dev/null || true"
 
     if [[ -f "${CERT_DIR}/fullchain.cer" && -f "${CERT_DIR}/private.key" ]]; then
-        echo -e "${GREEN}证书已成功签发并安装至 ${CERT_DIR}！${PLAIN}"
+        echo -e "${GREEN}证书已成功部署至 ${CERT_DIR}！${PLAIN}"
     else
-        echo -e "${RED}证书签发失败，请检查 CF Token 权限与域名托管状态！${PLAIN}"
+        echo -e "${RED}证书部署失败，请检查配置！${PLAIN}"
         exit 1
     fi
 }

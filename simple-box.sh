@@ -55,10 +55,10 @@ validate_domain() {
     [[ "$d" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$ ]]
 }
 
-# 剔除字符串首尾的空白字符与引号（循环剥离，支持空格与单双引号任意层嵌套）
+# 剔除字符串首尾的空白字符与引号（清洗换行符、制表符、空格与单双引号任意层嵌套）
 trim_string() {
     local val="$1"
-    echo "$val" | sed -E ':loop; s/^[[:space:]]+|[[:space:]]+$//g; s/^["'"'"']+|["'"'"']+$//g; t loop'
+    echo "$val" | tr -d '\r\n' | sed -E ':loop; s/^[[:space:]]+|[[:space:]]+$//g; s/^["'"'"']+|["'"'"']+$//g; t loop'
 }
 
 # 在线校验 Cloudflare API Token 有效性

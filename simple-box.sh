@@ -1883,14 +1883,16 @@ menu() {
     done
 }
 
-case "$1" in
-    install|reinstall) install_node || exit 1 ;;
-    reality) menu_reality_module ;;
-    hy2) menu_hy2_module ;;
-    sub|yaml) show_subscription ;;
-    link|url|qr) show_links ;;
-    bbr) manage_bbr ;;
-    core|box) menu_singbox_manage ;;
-    del|uninstall) uninstall_all ;;
-    *) menu ;;
-esac
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+    case "${1:-}" in
+        install|reinstall) install_node || exit 1 ;;
+        reality) menu_reality_module ;;
+        hy2) menu_hy2_module ;;
+        sub|yaml) show_subscription ;;
+        link|url|qr) show_links ;;
+        bbr) manage_bbr ;;
+        core|box) menu_singbox_manage ;;
+        del|uninstall) uninstall_all ;;
+        *) menu ;;
+    esac
+fi

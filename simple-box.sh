@@ -376,11 +376,26 @@ issue_self_signed_cert() {
         echo -e "${RED}自签证书生成失败。${PLAIN}"; return 1
     fi
     # 原子替换，避免 sing-box/caddy 读到半写状态
+    # 先校验新证书与私钥确实配对，再原子替换，避免上线后握手失败
+    local crt_mod key_mod
+    crt_mod=$(openssl x509 -in "$tmp_crt" -noout -modulus 2>/dev/null | openssl md5 2>/dev/null)
+    key_mod=$(openssl rsa -in "$tmp_key" -noout -modulus 2>/dev/null | openssl md5 2>/dev/null)
+    if [[ -z "$crt_mod" || -z "$key_mod" ]]; then
+        # ECC 证书没有 modulus，改用公钥指纹比对
+        crt_mod=$(openssl x509 -in "$tmp_crt" -noout -pubkey 2>/dev/null | openssl md5 2>/dev/null)
+        key_mod=$(openssl ec -in "$tmp_key" -pubout 2>/dev/null | openssl md5 2>/dev/null)
+    fi
+    if [[ -z "$crt_mod" || "$crt_mod" != "$key_mod" ]]; then
+        rm -f "$tmp_key" "$tmp_crt"
+        echo -e "${RED}自签证书与私钥不匹配，已放弃本次写入（原证书保持不变）。${PLAIN}"
+        return 1
+    fi
+
     mv -f "$tmp_key" "${CERT_DIR}/private.key"
     mv -f "$tmp_crt" "${CERT_DIR}/fullchain.cer"
     chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
     chmod 644 "${CERT_DIR}"/* 2>/dev/null || true
-    echo -e "${GREEN}IP 自签证书已就绪 (10 年有效期)。${PLAIN}"
+    echo -e "${GREEN}IP 自签证书已就绪 (10 年有效期，公私钥已配对校验)。${PLAIN}"
     return 0
 }
 
@@ -1477,6 +1492,11 @@ echo -e "${CYAN}----------------------------------------------------------------
                     fi
                     break
                 done
+
+                # 重签证书前必须先停 sing-box，否则文件监视器会读到「新 cert + 旧 key」
+                if systemctl is-active --quiet sing-box 2>/dev/null; then
+                    systemctl stop sing-box 2>/dev/null || true
+                fi
 
                 if [[ -n "$hy_domain" && -n "$cf_token" ]]; then
                     # issue_cert_bundle 内部会设置全局 CERT_MODE，必须以它为准而非返回码

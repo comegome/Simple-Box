@@ -965,7 +965,7 @@ render_and_reload() {
 
     local hy_ports_display="$hy_port"
     [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"
-    generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_enabled" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
+    generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "true" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
 
     setup_caddy_subscription "$target_host" "$sub_token" "$sub_port" "$CERT_MODE"
     reload_caddy_safe || true
@@ -992,7 +992,7 @@ install_node() {
         old_hy_range="$HY_RANGE"; old_sub_port="$SUB_PORT"; old_prefix="$NODE_PREFIX"
         old_domain="${HY_DOMAIN:-}"
         # 若 env.conf 中无域名记录，探测 acme.sh 目录中是否曾签发过历史域名证书
-        if [[ -z "$old_domain" || "$old_domain" == "skip" ]] && [[ -d "$HOME/.acme.sh" ]]; then
+        if [[ -z "$old_domain" ]] && [[ -d "$HOME/.acme.sh" ]]; then
             local acme_d
             acme_d=$(find "$HOME/.acme.sh" -maxdepth 1 -type d -name "*_ecc" 2>/dev/null | head -n1)
             if [[ -n "$acme_d" ]]; then
@@ -1048,7 +1048,7 @@ install_node() {
     local hy_domain=""
 
     # 1. 优先检测本地已存在的域名配置
-    if [[ -n "$old_domain" && "$old_domain" != "skip" ]]; then
+    if [[ -n "$old_domain" ]]; then
         echo -e "${GREEN}检测到当前已配置域名: ${CYAN}${old_domain}${PLAIN}"
         local reuse_domain=""
         read -r -p "是否继续使用此域名？[Y/n (回车沿用，输入 n 更换域名或使用 IP)]: " reuse_domain || reuse_domain=""
@@ -1064,15 +1064,13 @@ install_node() {
         echo -e "${CYAN}  1. 使用自有域名: 需在 Cloudflare 将域名 A 记录解析至本机 IP (${server_ip})${PLAIN}"
         echo -e "${CYAN}  2. CF 代理状态必须为【仅限 DNS】(灰色云朵)，小黄云 CDN 会阻断 UDP${PLAIN}"
         echo -e "${CYAN}  3. 直接回车 = 使用 IP 自签证书（10 年 ECC，客户端自动开启 skip-cert-verify）${PLAIN}"
-        echo -e "${CYAN}  4. 输入 skip = 跳过 Hysteria 2，仅部署 VLESS-Reality${PLAIN}"
 
         while true; do
-            read -r -p "请输入域名 [回车=IP自签, skip=跳过Hy2]: " hy_domain || hy_domain=""
+            read -r -p "请输入域名 [回车=IP自签]: " hy_domain || hy_domain=""
             hy_domain=$(trim_string "$hy_domain")
 
             case "${hy_domain,,}" in
                 ""|ip|self|selfsigned) hy_domain=""; break ;;
-                none|skip)            hy_domain="skip"; break ;;
             esac
 
             if validate_domain "$hy_domain"; then
@@ -1085,10 +1083,7 @@ install_node() {
     local target_host="$hy_domain"
     local cf_token=""
 
-    if [[ "$hy_domain" == "skip" || "$hy_domain" == "none" ]]; then
-        echo -e "${YELLOW}已选择跳过 Hysteria 2，将仅部署 VLESS-Reality。${PLAIN}"
-        hy_enabled=false
-    elif [[ -z "$hy_domain" ]]; then
+    if [[ -z "$hy_domain" ]]; then
         echo -e "${YELLOW}未输入域名，自动启用自签证书模式 (IP 直连 + skip-cert-verify)。${PLAIN}"
         target_host="$server_ip"
         hy_skip_cert="true"
@@ -1149,43 +1144,38 @@ echo -e "${CYAN}----------------------------------------------------------------
         fi
     fi
 
-    local hy_port=""
-    local hy_range=""
+    local hy_port="8443"
+    local hy_range="20000:40000"
+    while true; do
+        read -r -p "请输入 Hysteria 2 主监听 UDP 端口 [默认 ${old_hy_port:-8443}]: " hy_port || hy_port=""
+        hy_port=$(trim_string "${hy_port:-${old_hy_port:-8443}}")
+        if ! validate_port "$hy_port"; then
+            echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
+        fi
+        if [[ "$hy_port" == "$vl_port" ]]; then
+            echo -e "${RED}端口冲突: 该端口已分配给 VLESS-Reality (${vl_port})，不能共用！${PLAIN}"; continue
+        fi
+        if check_port_occupied "$hy_port" "udp"; then break; fi
+        echo -e "${YELLOW}请更换其他未占用的 UDP 端口！${PLAIN}"
+    done
 
-    if [ "$hy_enabled" = true ]; then
-        hy_port="8443"
-        hy_range="20000:40000"
-        while true; do
-            read -r -p "请输入 Hysteria 2 主监听 UDP 端口 [默认 ${old_hy_port:-8443}]: " hy_port || hy_port=""
-            hy_port=$(trim_string "${hy_port:-${old_hy_port:-8443}}")
-            if ! validate_port "$hy_port"; then
-                echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
-            fi
-            if [[ "$hy_port" == "$vl_port" ]]; then
-                echo -e "${RED}端口冲突: 该端口已分配给 VLESS-Reality (${vl_port})，不能共用！${PLAIN}"; continue
-            fi
-            if check_port_occupied "$hy_port" "udp"; then break; fi
-            echo -e "${YELLOW}请更换其他未占用的 UDP 端口！${PLAIN}"
-        done
-
-        while true; do
-            read -r -p "请输入端口跳跃范围 [默认 ${old_hy_range:-20000:40000}] (none=不启用): " hy_range || hy_range=""
-            hy_range=$(trim_string "${hy_range:-${old_hy_range:-20000:40000}}")
-            [[ "${hy_range,,}" == "none" ]] && { hy_range=""; break; }
-            if ! validate_range "$hy_range"; then
-                echo -e "${RED}范围格式非法，应为 起始:结束（如 20000:40000）。${PLAIN}"; continue
-            fi
-            local r_start="${hy_range%%:*}"
-            local r_end="${hy_range##*:}"
-            if (( vl_port >= r_start && vl_port <= r_end )); then
-                echo -e "${RED}范围冲突: 端口跳跃范围包含已设定的 Reality 端口 (${vl_port})，请调整！${PLAIN}"; continue
-            fi
-            if (( hy_port >= r_start && hy_port <= r_end )); then
-                echo -e "${RED}范围冲突: 端口跳跃范围包含 Hysteria 2 主端口 (${hy_port})，请调整！${PLAIN}"; continue
-            fi
-            break
-        done
-    fi
+    while true; do
+        read -r -p "请输入端口跳跃范围 [默认 ${old_hy_range:-20000:40000}] (none=不启用): " hy_range || hy_range=""
+        hy_range=$(trim_string "${hy_range:-${old_hy_range:-20000:40000}}")
+        [[ "${hy_range,,}" == "none" ]] && { hy_range=""; break; }
+        if ! validate_range "$hy_range"; then
+            echo -e "${RED}范围格式非法，应为 起始:结束（如 20000:40000）。${PLAIN}"; continue
+        fi
+        local r_start="${hy_range%%:*}"
+        local r_end="${hy_range##*:}"
+        if (( vl_port >= r_start && vl_port <= r_end )); then
+            echo -e "${RED}范围冲突: 端口跳跃范围包含已设定的 Reality 端口 (${vl_port})，请调整！${PLAIN}"; continue
+        fi
+        if (( hy_port >= r_start && hy_port <= r_end )); then
+            echo -e "${RED}范围冲突: 端口跳跃范围包含 Hysteria 2 主端口 (${hy_port})，请调整！${PLAIN}"; continue
+        fi
+        break
+    done
 
     echo -e "\n${YELLOW}=== 3. 配置在线订阅站点参数 ===${PLAIN}"
     local sub_port
@@ -1224,33 +1214,22 @@ echo -e "${CYAN}----------------------------------------------------------------
         systemctl stop sing-box 2>/dev/null || true
     fi
 
-    # 签发证书（skip 模式下仍需自签证书，仅供 Caddy 订阅站点的 TLS 使用）
-    if [ "$hy_enabled" = true ]; then
-        if ! issue_cert_bundle "$hy_domain" "$cf_token" "$server_ip"; then
-            # 前面为签发证书已停服务，失败必须拉起，否则整站失联
-            systemctl start sing-box 2>/dev/null || true
-            echo -e "${RED}证书阶段失败，已恢复原有 sing-box 服务，安装中止。${PLAIN}"
-            return 1
-        fi
-        if [[ "$CERT_MODE" == "domain" ]]; then
-            hy_skip_cert="false"
-            target_host="$hy_domain"
-        else
-            hy_skip_cert="true"
-            target_host="$server_ip"
-            if [[ -n "$hy_domain" && "$hy_domain" != "skip" ]]; then
-                hy_domain=""          # 已降级，清除域名避免后续误用
-                cert_fell_back="true"
-            fi
-        fi
+    # 签发证书（域名走 CF DNS API，无域名走 10 年 IP ECC 自签）
+    if ! issue_cert_bundle "$hy_domain" "$cf_token" "$server_ip"; then
+        systemctl start sing-box 2>/dev/null || true
+        echo -e "${RED}证书阶段失败，已恢复原有 sing-box 服务，安装中止。${PLAIN}"
+        return 1
+    fi
+    if [[ "$CERT_MODE" == "domain" ]]; then
+        hy_skip_cert="false"
+        target_host="$hy_domain"
     else
-        if ! issue_cert_bundle "" "" "$server_ip"; then
-            systemctl start sing-box 2>/dev/null || true
-            echo -e "${RED}自签证书生成失败，已恢复原有 sing-box 服务，安装中止。${PLAIN}"
-            return 1
-        fi
-        target_host="$server_ip"
         hy_skip_cert="true"
+        target_host="$server_ip"
+        if [[ -n "$hy_domain" ]]; then
+            hy_domain=""          # 已降级，清除域名避免后续误用
+            cert_fell_back="true"
+        fi
     fi
 
     # 生成密钥凭证（任一步失败都必须中止，否则空值会写进配置导致服务起不来）
@@ -1268,7 +1247,7 @@ echo -e "${CYAN}----------------------------------------------------------------
         echo -e "${RED}关键凭证生成不完整（privkey/uuid/shortid/token 有空值），已中止安装。${PLAIN}"
         return 1
     fi
-    if [ "$hy_enabled" = true ] && [[ -z "$hy_password" ]]; then
+    if [[ -z "$hy_password" ]]; then
         echo -e "${RED}Hysteria 2 密码生成失败，已中止安装。${PLAIN}"
         return 1
     fi
@@ -1276,20 +1255,18 @@ echo -e "${CYAN}----------------------------------------------------------------
     # 防火墙精准放行
     if command -v ufw &>/dev/null && ufw status | grep -qw "active"; then
         ufw allow "$vl_port/tcp" >/dev/null 2>&1 || true
-        if [ "$hy_enabled" = true ]; then
-            ufw allow "$hy_port/udp" >/dev/null 2>&1 || true
-        fi
+        ufw allow "$hy_port/udp" >/dev/null 2>&1 || true
     fi
     # 先清理本脚本可能遗留的端口跳跃规则，再按当前配置重建
     clear_port_hopping
-    if [ "$hy_enabled" = true ] && [[ -n "$hy_range" ]]; then
+    if [[ -n "$hy_range" ]]; then
         setup_port_hopping "$hy_port" "$hy_range"
     fi
 
     local sub_proto="http"
     [[ "$CERT_MODE" == "domain" ]] && sub_proto="https"
 
-    write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "$hy_enabled" "$hy_port" "$hy_password"
+    write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "true" "$hy_port" "$hy_password"
     write_env_config
 
     # 配置 systemd 服务
@@ -1331,7 +1308,7 @@ EOF
     # 部署 Caddy 订阅并组装完整客户端配置
     local hy_ports_display="$hy_port"
     [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"
-    generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_enabled" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
+    generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "true" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
     setup_caddy_subscription "$target_host" "$sub_token" "$sub_port" "$CERT_MODE"
 
     show_subscription
@@ -1474,7 +1451,7 @@ uninstall_all() {
     if [[ -x "$HOME/.acme.sh/acme.sh" && -f "$ENV_FILE" ]]; then
         local un_domain
         un_domain=$(grep -oP '^HY_DOMAIN="\K[^"]*' "$ENV_FILE" 2>/dev/null || true)
-        if [[ -n "$un_domain" && "$un_domain" != "skip" ]]; then
+        if [[ -n "$un_domain" ]]; then
             "$HOME/.acme.sh/acme.sh" --remove -d "$un_domain" --ecc >/dev/null 2>&1 || true
         fi
     fi
@@ -1622,7 +1599,7 @@ ${GREEN}================= VLESS-Reality 模块配置 =================${PLAIN}"
                 local sub_token="${SUB_TOKEN}"
                 local CERT_MODE="${CERT_MODE:-selfsigned}"
 
-                write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "$hy_enabled" "$hy_port" "$hy_password"
+                write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "true" "$hy_port" "$hy_password"
                 write_env_config
                 if ! render_and_reload; then
                     echo -e "${RED}Reality 模块更新失败，请检查上面的错误信息。${PLAIN}"
@@ -1669,7 +1646,7 @@ ${GREEN}================== Hysteria 2 模块配置 ===================${PLAIN}"
 
                 local old_hy_domain="${HY_DOMAIN:-}"
                 # 1. 优先检测当前已配置域名
-                if [[ -n "$old_hy_domain" && "$old_hy_domain" != "skip" ]]; then
+                if [[ -n "$old_hy_domain" ]]; then
                     echo -e "${GREEN}检测到当前已配置域名: ${CYAN}${old_hy_domain}${PLAIN}"
                     local reuse_d=""
                     read -r -p "是否继续使用该域名？[Y/n (回车沿用，输入 n 更换域名或使用 IP)]: " reuse_d || reuse_d=""
@@ -1841,7 +1818,7 @@ echo -e "${CYAN}----------------------------------------------------------------
                     continue
                 fi
 
-                write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "$hy_enabled" "$hy_port" "$hy_password"
+                write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "true" "$hy_port" "$hy_password"
                 write_env_config
                 if ! render_and_reload; then
                     echo -e "${RED}Hysteria 2 模块更新失败，请检查上面的错误信息。${PLAIN}"

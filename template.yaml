@@ -1,0 +1,198 @@
+### 基础设置 ###
+# 参考文档: https://wiki.metacubex.one/config/general/
+mixed-port: 7890                # 同时支持 HTTP(S) 与 SOCKS5 代理，替代单一 port
+allow-lan: false                # 仅限本机访问，防止局域网扫描与未授权调用
+mode: rule
+log-level: warning              # 隐私与I/O优化：仅记录警告与错误，避免明文记录所有访问域名
+unified-delay: true             # 计算 RTT，消除不同协议连接握手带来的延迟差异
+tcp-concurrent: false            # 速度优化：开启后并发连接 DNS 解析出的所有 IP，采用最快成功的连接。暂时不开启
+find-process-mode: off          # 速度与隐私优化：无进程规则时关闭进程匹配，消除每次连接的系统调用开销并避免读取本地进程信息
+ipv6: false                     # 全局关闭 IPv6，防止 IPv6 旁路泄漏
+keep-alive-idle: 15             # TCP Keep-Alive 最大空闲时间（秒），减少死连接挂起
+keep-alive-interval: 15         # TCP Keep-Alive 探测包间隔（秒）
+global-ua: chrome               # 隐私优化：隐藏默认的 clash.meta UA 指纹，伪装为常规浏览器
+
+# GEO 数据库设置
+geodata-mode: true              # 使用 dat 格式数据库
+geodata-loader: standard        # 速度优化：使用标准内存加载器提升匹配吞吐量（内存极小设备可改回 memconservative）
+geo-auto-update: true
+geo-update-interval: 24
+etag-support: true              # 利用 ETag 避免重复下载未变更的外部资源
+
+geox-url:
+  geoip: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geoip.dat"
+  geosite: "https://testingcf.jsdelivr.net/gh/MetaCubeX/meta-rules-dat@release/geosite.dat"
+
+profile:
+  store-selected: true
+  store-fake-ip: false
+
+
+### TUN 模块 ###
+# 参考文档: https://wiki.metacubex.one/config/inbound/tun/
+tun:
+  enable: true
+  stack: mips                   # 配合 bbr 使用
+  congestion-controller: bbr    # 仅 mips 栈生效
+  auto-route: true
+  strict-route: true
+  auto-detect-interface: true
+  udp-timeout: 300
+  endpoint-independent-nat: true  # 建议开启：改善 WebRTC / STUN / P2P
+  dns-hijack:
+    - "any:53"
+    - "tcp://any:53"
+
+  route-exclude-address:
+    - 100.64.0.0/10        # tailnet 流量根本不进 TUN
+
+### DNS 模块 ###
+# 参考文档: https://wiki.metacubex.one/config/dns/
+dns:
+  enable: true
+  listen: "127.0.0.1:1053"
+  ipv6: false                   # 丢弃 AAAA 解析，防止 IPv6 泄漏与无效双栈等待
+  prefer-h3: false              # 开启 respect-rules 时官方强烈建议关闭 prefer-h3
+  respect-rules: true           # 防泄漏核心：DNS 查询连接严格遵循路由分流规则（海外 DoH 经由代理出站）
+  use-hosts: false
+  use-system-hosts: false       # 防止系统 hosts 污染或干扰内部分流
+  cache-algorithm: "arc"        # 高性能自适应替换缓存算法 (ARC)
+  enhanced-mode: "fake-ip"
+  fake-ip-range: "198.18.0.1/16"
+  fake-ip-filter-mode: blacklist
+
+  # Fake-IP 过滤：仅对必须使用真实 IP 的局域网、NTP 及系统连通性检测放行
+  fake-ip-filter:
+    - "+.lan"
+    - "+.local"
+    - "+.arpa"
+    - "router.asus.com"
+    - "time.*.com"
+    - "ntp.*.com"
+    - "+.pool.ntp.org"
+    - "+.push.apple.com"
+    - "xbox.*.microsoft.com"
+    - "+.xboxlive.com"
+    - "geosite:private"
+    - "geosite:connectivity-check"
+
+
+  # 1. 引导层：纯 IP 加密 DNS（备用解析）
+  default-nameserver:
+    - "tls://223.5.5.5"
+    - "tls://1.12.12.12"
+
+  # 2. 节点域名解析器：直接使用纯 IP DoH，省去先解析 DoH 域名的引导耗时
+  proxy-server-nameserver:
+    - "https://223.5.5.5/dns-query#disable-ipv6=true"
+    - "https://1.12.12.12/dns-query#disable-ipv6=true"
+
+  # 3. 直连出口解析器：确保最终匹配到 DIRECT 出站的连接使用国内 DoH 解析，保障国内 CDN 精准调度
+  direct-nameserver:
+    - "https://223.5.5.5/dns-query#disable-ipv6=true"
+    - "https://1.12.12.12/dns-query#disable-ipv6=true"
+  direct-nameserver-follow-policy: false
+
+  # 4. 业务分流策略（自上而下按顺序匹配，严格遵循“先国外核心 -> 再海外大厂国内CDN -> 再国外通用 -> 最后纯国内”的顺序，与下方 rules 完全对齐）
+  nameserver-policy:
+
+    "geosite:category-ads-all": "rcode://name_error"
+    "geosite:private": "system"
+
+    # 最高优先级：Google、GFW 及国内大厂海外业务优先使用海外 DoH，防止因数据库集合重叠被下方 cn 规则截获
+    "geosite:google,gfw,geolocation-cn@!cn":
+      - "https://1.1.1.1/dns-query#disable-ipv6=true&disable-qtype-65=true"
+      - "https://1.0.0.1/dns-query#disable-ipv6=true&disable-qtype-65=true"
+    # 次优先级：已排除 Google/GFW 的海外大厂（微软/苹果/Steam等）国内 CDN 节点使用国内 DoH
+    "geosite:geolocation-!cn@cn":
+      - "https://223.5.5.5/dns-query#disable-ipv6=true"
+      - "https://1.12.12.12/dns-query#disable-ipv6=true"
+    # 第三优先级：其余已知国外域名使用海外 DoH
+    "geosite:geolocation-!cn":
+      - "https://1.1.1.1/dns-query#disable-ipv6=true&disable-qtype-65=true"
+      - "https://1.0.0.1/dns-query#disable-ipv6=true&disable-qtype-65=true"
+    # 最低优先级：纯国内域名使用国内 DoH
+    "geosite:cn":
+      - "https://223.5.5.5/dns-query#disable-ipv6=true"
+      - "https://1.12.12.12/dns-query#disable-ipv6=true"
+
+  # 5. 兜底主解析器：数据库遗漏的任何未知域名 100% 落入此处，通过代理连接海外 Cloudflare DoH
+  nameserver:
+    - "https://1.1.1.1/dns-query#disable-ipv6=true&disable-qtype-65=true"
+    - "https://1.0.0.1/dns-query#disable-ipv6=true&disable-qtype-65=true"
+
+
+### 域名嗅探模块 ###
+# 参考文档: https://wiki.metacubex.one/config/sniff/
+sniffer:
+  enable: true
+  force-dns-mapping: true       # 对 fake-ip-filter 放行的真实 IP 流量强制嗅探
+  parse-pure-ip: true           # 对所有纯 IP 连接强制嗅探域名以匹配分流规则
+  override-destination: false   # 隐私与兼容性优化：全局关闭目标覆写以保护 ECH 与自定义 SNI，仅对 HTTP 开启
+
+  sniff:
+    HTTP:
+      ports: [80, 8080-8880]
+      override-destination: true
+    TLS:
+      ports: [443, 8443]
+    QUIC:
+      ports: [443, 8443]
+
+  skip-domain:
+    - "Mijia Cloud"             # 官方文档标准写法（米家设备非标 SNI 含空格与大写）
+    - "+.mijia.cloud"
+    - "+.push.apple.com"
+    - "+.lan"
+    - "+.local"
+    - "time.*.com"
+    - "+.pool.ntp.org"
+
+  skip-dst-address:             # 速度优化：跳过局域网与私有目标 IP 的嗅探开销
+    - 127.0.0.0/8
+    - 10.0.0.0/8
+    - 172.16.0.0/12
+    - 192.168.0.0/16
+    - 100.64.0.0/10
+    - 224.0.0.0/4
+    - 255.255.255.255/32
+
+
+
+### 分流规则 ###
+# 参考文档: https://wiki.metacubex.one/config/rules/
+# 核心原则：“先国外、后国内、未知兜底归国外”，且所有 IP 规则均附带 no-resolve，确保数据库遗漏的海外域名 0ms 直达代理节点
+rules:
+  # 0. Tailscale 直连（必须在所有 GEOSITE 之前）
+  - DOMAIN-SUFFIX,ducto.net,DIRECT
+  - DOMAIN-REGEX,^derp\d+[a-z]?\.tailscale\.com$,DIRECT
+  
+  # 1. 局域网与私有网络直连
+  - GEOSITE,private,DIRECT
+  - GEOIP,private,DIRECT,no-resolve
+
+  # 2. 广告与追踪静默拦截
+  - GEOSITE,category-ads-all,REJECT-DROP
+
+  # 3. NTP 时间同步直连
+  - AND,((DST-PORT,123),(NETWORK,UDP)),DIRECT
+
+  # 4. 海外 QUIC (UDP 443/8443) 快速回退 TCP
+  # 先无条件拦截 Google/GFW/国内大厂海外业务 的 QUIC（防止 google@cn 漏过），再拦截其余非国内 QUIC，全程零 DNS 解析开销
+  - AND,((NETWORK,UDP),(OR,((DST-PORT,443),(DST-PORT,8443))),(OR,((GEOSITE,google),(GEOSITE,gfw),(GEOSITE,geolocation-cn@!cn)))),REJECT
+  - AND,((NETWORK,UDP),(OR,((DST-PORT,443),(DST-PORT,8443))),(NOT,((GEOSITE,cn))),(NOT,((GEOSITE,geolocation-!cn@cn))),(NOT,((GEOIP,CN,no-resolve)))),REJECT
+
+  # 5. 核心域名精准分流（严格遵循“先国外 -> 再国内 -> 兜底国外”，与上方 nameserver-policy 顺序 1:1 对应）
+  - GEOSITE,google,📌节点选择
+  - GEOSITE,gfw,📌节点选择
+  - GEOSITE,geolocation-cn@!cn,📌节点选择     # 优先将国内大厂纯海外业务（TikTok、京东国际等）送入代理，防止被下方 cn 误匹配
+  - GEOSITE,geolocation-!cn@cn,DIRECT         # 已排除 Google/GFW 的海外大厂（微软/苹果/Steam等）国内 CDN 节点直连
+  - GEOSITE,geolocation-!cn,📌节点选择        # 其余已知海外站点走代理
+  - GEOSITE,cn,DIRECT                         # 纯国内域名置于所有海外域名规则之后
+
+  # 6. 纯 IP 流量分流（全部附加 no-resolve，未收录的未知域名会直接跳过此步，绝不触发本地 DNS 解析）
+  - GEOIP,telegram,📌节点选择,no-resolve
+  - GEOIP,CN,DIRECT,no-resolve
+
+  # 7. 兜底规则：数据库遗漏的任何未知域名 100% 匹配此处，直接发往代理节点由 VPS 远端解析
+  - MATCH,📌节点选择

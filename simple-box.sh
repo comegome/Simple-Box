@@ -1,9 +1,11 @@
 #!/usr/bin/env bash
 # ==============================================================================
-# Simple-Box Manager - 极简、安全、透明的自用 Sing-box 管理脚本
+# Simple-Box Manager - 极简、安全、透明的自用 Sing-box 服务端管理脚本
 # 协议支持: 
 #   1. VLESS-TCP-Reality-Vision (日常主力直连)
 #   2. Hysteria 2 (晚高峰弱网/UDP端口跳跃, 基于 Cloudflare 证书)
+# 订阅分发:
+#   集成 Caddy 8444 HTTPS，输出组装好的完整客户端规则模板订阅与纯节点订阅
 # ==============================================================================
 set -e
 
@@ -16,13 +18,13 @@ PLAIN='\033[0m'
 CONF_DIR="/etc/sing-box"
 CONF_FILE="${CONF_DIR}/config.json"
 CERT_DIR="${CONF_DIR}/cert"
+WEB_DIR="${CONF_DIR}/web"
 ENV_FILE="${CONF_DIR}/env.conf"
-YAML_FILE="${CONF_DIR}/clash_meta_provider.yaml"
+YAML_PROVIDER="${CONF_DIR}/clash_meta_provider.yaml"
+TEMPLATE_FILE="${CONF_DIR}/template.yaml"
 
-# 检查 root 权限
 [[ $EUID -ne 0 ]] && echo -e "${RED}错误: 必须使用 root 权限运行此脚本！${PLAIN}" && exit 1
 
-# 架构判定
 get_arch() {
     local arch=$(uname -m)
     case "$arch" in
@@ -32,10 +34,28 @@ get_arch() {
     esac
 }
 
-# 基础依赖检查与安装 (最小化，不影响系统现有防火墙策略)
+# 端口冲突检测
+check_port_occupied() {
+    local port="$1"
+    local proto="$2" # tcp 或 udp
+    local in_use=""
+    if [[ "$proto" == "tcp" ]]; then
+        in_use=$(ss -tlnp 2>/dev/null | grep -E "[: ]${port} " || true)
+    elif [[ "$proto" == "udp" ]]; then
+        in_use=$(ss -ulnp 2>/dev/null | grep -E "[: ]${port} " || true)
+    fi
+    if [[ -n "$in_use" ]]; then
+        echo -e "${RED}警告: ${proto^^} 端口 ${port} 已被占用！${PLAIN}"
+        echo -e "${YELLOW}占用详情: ${in_use}${PLAIN}"
+        return 1
+    fi
+    return 0
+}
+
+# 基础依赖检查与安装
 install_deps() {
     local missing=()
-    for cmd in curl tar jq openssl iptables; do
+    for cmd in curl tar jq openssl iptables socat; do
         if ! command -v "$cmd" &>/dev/null; then
             missing+=("$cmd")
         fi
@@ -46,11 +66,30 @@ install_deps() {
             export DEBIAN_FRONTEND=noninteractive
             echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections 2>/dev/null || true
             echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections 2>/dev/null || true
-            apt-get update -qq && apt-get install -y -qq "${missing[@]}" iptables-persistent socat
+            apt-get update -qq && apt-get install -y -qq "${missing[@]}" iptables-persistent
         elif command -v yum &>/dev/null; then
-            yum install -y epel-release && yum install -y "${missing[@]}" socat
+            yum install -y epel-release && yum install -y "${missing[@]}"
         fi
     fi
+}
+
+# 检查并安装 Caddy
+install_caddy() {
+    if command -v caddy &>/dev/null; then
+        return 0
+    fi
+    echo -e "${BLUE}正在安装 Caddy 用于安全的 HTTPS 订阅分发...${PLAIN}"
+    if command -v apt-get &>/dev/null; then
+        apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg --yes
+        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
+        apt-get update -qq && apt-get install -y -qq caddy
+    elif command -v yum &>/dev/null; then
+        yum install -y yum-plugin-copr
+        yum copr enable -y @caddy/caddy
+        yum install -y caddy
+    fi
+    systemctl enable caddy >/dev/null 2>&1 || true
 }
 
 # 获取并升级官方最新 sing-box 内核
@@ -82,7 +121,7 @@ update_singbox_core() {
     fi
 }
 
-# 配置 Cloudflare ACME 证书
+# Cloudflare DNS 证书管理
 issue_cf_cert() {
     local domain="$1"
     local cf_token="$2"
@@ -97,7 +136,7 @@ issue_cf_cert() {
 
     export CF_Token="$cf_token"
 
-    # 若本地已有该域名的有效证书，直接同步安装，0秒跳过网络签发
+    # 若本地已有该域名的有效证书，直接同步部署
     if [[ -f "$HOME/.acme.sh/${domain}_ecc/fullchain.cer" && -f "$HOME/.acme.sh/${domain}_ecc/${domain}.key" ]]; then
         echo -e "${GREEN}检测到本地已有 ${domain} 的有效证书，直接同步部署...${PLAIN}"
     else
@@ -109,7 +148,7 @@ issue_cf_cert() {
     "$acme_bin" --install-cert -d "$domain" --ecc \
         --fullchain-file "${CERT_DIR}/fullchain.cer" \
         --key-file "${CERT_DIR}/private.key" \
-        --reloadcmd "systemctl reload sing-box 2>/dev/null || true"
+        --reloadcmd "systemctl reload sing-box 2>/dev/null || true; systemctl reload caddy 2>/dev/null || true"
 
     if [[ -f "${CERT_DIR}/fullchain.cer" && -f "${CERT_DIR}/private.key" ]]; then
         echo -e "${GREEN}证书已成功部署至 ${CERT_DIR}！${PLAIN}"
@@ -119,10 +158,10 @@ issue_cf_cert() {
     fi
 }
 
-# 端口跳跃 iptables 规则配置 (精准增量设置，不破坏原有规则)
+# 端口跳跃 iptables 规则配置 (精准增量设置)
 setup_port_hopping() {
     local hy_port="$1"
-    local range="$2" # e.g. 20000:40000
+    local range="$2"
 
     echo -e "${BLUE}配置 Hysteria 2 端口跳跃 (UDP ${range} -> ${hy_port})...${PLAIN}"
     iptables -t nat -D PREROUTING -p udp --dport "$range" -j REDIRECT --to-ports "$hy_port" 2>/dev/null || true
@@ -132,16 +171,161 @@ setup_port_hopping() {
         ip6tables -t nat -A PREROUTING -p udp --dport "$range" -j REDIRECT --to-ports "$hy_port" 2>/dev/null || true
     fi
 
-    # 保存 iptables 规则
     if command -v netfilter-persistent &>/dev/null; then
         netfilter-persistent save >/dev/null 2>&1 || true
     fi
 
-    # 精准开放防火墙 (UFW 友好模式)
     if command -v ufw &>/dev/null && ufw status | grep -qw "active"; then
         ufw allow "$hy_port/udp" >/dev/null 2>&1 || true
         ufw allow "${range/:/-}/udp" >/dev/null 2>&1 || true
     fi
+}
+
+# 部署 Caddy 订阅分发服务
+setup_caddy_subscription() {
+    local domain="$1"
+    local token="$2"
+    local sub_port="8444"
+
+    install_caddy
+
+    echo -e "${BLUE}配置 Caddy HTTPS 安全订阅站点 (端口 ${sub_port})...${PLAIN}"
+    mkdir -p "/etc/caddy/sites"
+    
+    # 确保主 Caddyfile 包含 sites/*.caddy
+    if [ ! -f /etc/caddy/Caddyfile ]; then
+        echo -e "import sites/*.caddy\n" > /etc/caddy/Caddyfile
+    elif ! grep -q "import sites/\*\.caddy" /etc/caddy/Caddyfile; then
+        echo -e "\nimport sites/*.caddy" >> /etc/caddy/Caddyfile
+    fi
+
+    # 清除旧的同名站点配置，避免重复绑定冲突
+    rm -f "/etc/caddy/sites/${domain}-8444.caddy" "/etc/caddy/sites/simple-box.caddy"
+
+    # 生成安全隔离站点配置（仅放行对应 Token，其余一律 404）
+    cat > "/etc/caddy/sites/${domain}-8444.caddy" <<EOF
+# Simple-Box HTTPS 订阅分发站点
+${domain}:${sub_port} {
+    tls ${CERT_DIR}/fullchain.cer ${CERT_DIR}/private.key
+
+    @sub path /sub_${token}/config.yaml /sub_${token}/provider.yaml
+    handle @sub {
+        root * ${WEB_DIR}
+        header Content-Type "text/plain; charset=utf-8"
+        file_server
+    }
+
+    handle {
+        respond 404
+    }
+}
+EOF
+
+    # 防火墙精准放行 8444
+    if command -v ufw &>/dev/null && ufw status | grep -qw "active"; then
+        ufw allow "${sub_port}/tcp" >/dev/null 2>&1 || true
+    fi
+
+    systemctl restart caddy
+}
+
+# 组装完整的客户端订阅文件
+generate_full_client_config() {
+    local domain="$1"
+    local token="$2"
+    local node_prefix="$3"
+    local server_ip="$4"
+    local vl_port="$5"
+    local user_uuid="$6"
+    local vl_sni="$7"
+    local vl_pubkey="$8"
+    local vl_shortid="$9"
+    local hy_port="${10}"
+    local hy_ports_display="${11}"
+    local hy_password="${12}"
+
+    mkdir -p "${WEB_DIR}/sub_${token}"
+
+    # 下载/复制模板
+    if [ ! -f "$TEMPLATE_FILE" ]; then
+        curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/template.yaml -o "$TEMPLATE_FILE" 2>/dev/null || true
+    fi
+
+    # 1. 组装完整配置 (模板 + proxies + proxy-groups)
+    local full_config_file="${WEB_DIR}/sub_${token}/config.yaml"
+    if [ -f "$TEMPLATE_FILE" ]; then
+        cat "$TEMPLATE_FILE" > "$full_config_file"
+    else
+        echo "mixed-port: 7890" > "$full_config_file"
+        echo "mode: rule" >> "$full_config_file"
+    fi
+
+    cat >> "$full_config_file" <<EOF
+
+# ==================== Simple-Box 动态生成节点 ====================
+proxies:
+  - name: "${node_prefix}-VLESS-Reality"
+    type: vless
+    server: ${server_ip}
+    port: ${vl_port}
+    uuid: ${user_uuid}
+    network: tcp
+    tls: true
+    udp: true
+    flow: xtls-rprx-vision
+    servername: ${vl_sni}
+    reality-opts:
+      public-key: ${vl_pubkey}
+      short-id: ${vl_shortid}
+    client-fingerprint: chrome
+
+  - name: "${node_prefix}-Hysteria2"
+    type: hysteria2
+    server: ${domain}
+    port: ${hy_port}
+    ports: "${hy_ports_display}"
+    password: "${hy_password}"
+    sni: ${domain}
+    skip-cert-verify: false
+
+proxy-groups:
+  - name: "📌节点选择"
+    type: select
+    proxies:
+      - "${node_prefix}-VLESS-Reality"
+      - "${node_prefix}-Hysteria2"
+      - "DIRECT"
+EOF
+
+    # 2. 组装纯 Provider 片段
+    local provider_file="${WEB_DIR}/sub_${token}/provider.yaml"
+    cat > "$provider_file" <<EOF
+proxies:
+  - name: "${node_prefix}-VLESS-Reality"
+    type: vless
+    server: ${server_ip}
+    port: ${vl_port}
+    uuid: ${user_uuid}
+    network: tcp
+    tls: true
+    udp: true
+    flow: xtls-rprx-vision
+    servername: ${vl_sni}
+    reality-opts:
+      public-key: ${vl_pubkey}
+      short-id: ${vl_shortid}
+    client-fingerprint: chrome
+
+  - name: "${node_prefix}-Hysteria2"
+    type: hysteria2
+    server: ${domain}
+    port: ${hy_port}
+    ports: "${hy_ports_display}"
+    password: "${hy_password}"
+    sni: ${domain}
+    skip-cert-verify: false
+EOF
+    cp -f "$provider_file" "$YAML_PROVIDER"
 }
 
 # 部署与配置主函数
@@ -150,15 +334,22 @@ install_node() {
     [[ ! -f /usr/local/bin/sing-box ]] && update_singbox_core
 
     mkdir -p "$CONF_DIR"
-
-    # 读取公网 IP
     local server_ip=$(curl -s4m5 https://icanhazip.com || curl -s4m5 https://api.ipify.org || echo "YOUR_SERVER_IP")
 
     echo -e "\n${YELLOW}=== 1. 配置 VLESS-Reality 参数 ===${PLAIN}"
-    if [[ -z "$VL_PORT" ]]; then
-        read -p "请输入 Reality 监听端口 [默认 443]: " vl_port
-    fi
-    vl_port=${vl_port:-${VL_PORT:-443}}
+    while true; do
+        if [[ -z "$VL_PORT" ]]; then
+            read -p "请输入 Reality 监听端口 [默认 443]: " vl_port
+        fi
+        vl_port=${vl_port:-${VL_PORT:-443}}
+        if check_port_occupied "$vl_port" "tcp"; then
+            break
+        else
+            echo -e "${YELLOW}请更换其他未占用的端口！${PLAIN}"
+            VL_PORT=""
+            vl_port=""
+        fi
+    done
 
     if [[ -z "$VL_SNI" ]]; then
         read -p "请输入 Reality 借壳伪装域名 [默认 gateway.icloud.com]: " vl_sni
@@ -178,10 +369,19 @@ install_node() {
     cf_token=${cf_token:-$CF_TOKEN}
     [[ -z "$cf_token" ]] && echo -e "${RED}CF Token 不能为空！${PLAIN}" && exit 1
 
-    if [[ -z "$HY_PORT" ]]; then
-        read -p "请输入 Hysteria 2 主监听 UDP 端口 [默认 8443]: " hy_port
-    fi
-    hy_port=${hy_port:-${HY_PORT:-8443}}
+    while true; do
+        if [[ -z "$HY_PORT" ]]; then
+            read -p "请输入 Hysteria 2 主监听 UDP 端口 [默认 8443]: " hy_port
+        fi
+        hy_port=${hy_port:-${HY_PORT:-8443}}
+        if check_port_occupied "$hy_port" "udp"; then
+            break
+        else
+            echo -e "${YELLOW}请更换其他未占用的 UDP 端口！${PLAIN}"
+            HY_PORT=""
+            hy_port=""
+        fi
+    done
 
     if [[ -z "$HY_RANGE" ]]; then
         read -p "请输入端口跳跃范围 [默认 20000:40000]: " hy_range
@@ -196,7 +396,7 @@ install_node() {
     # 签发证书
     issue_cf_cert "$hy_domain" "$cf_token"
 
-    # 生成密钥对与 UUID
+    # 生成密钥凭证
     echo -e "${BLUE}生成安全密钥凭证...${PLAIN}"
     local key_pair=$(/usr/local/bin/sing-box generate reality-keypair)
     local vl_privkey=$(echo "$key_pair" | awk '/PrivateKey/{print $2}')
@@ -204,15 +404,16 @@ install_node() {
     local vl_shortid=$(/usr/local/bin/sing-box generate rand 8 --hex)
     local user_uuid=$(/usr/local/bin/sing-box generate uuid)
     local hy_password=$(/usr/local/bin/sing-box generate rand 16 --base64 | tr -dc 'a-zA-Z0-9' | head -c 16)
+    local sub_token=$(openssl rand -hex 12)
 
-    # 精准放行防火墙端口 (绝对不全局清空)
+    # 防火墙精准放行
     if command -v ufw &>/dev/null && ufw status | grep -qw "active"; then
         ufw allow "$vl_port/tcp" >/dev/null 2>&1 || true
         ufw allow "$hy_port/udp" >/dev/null 2>&1 || true
     fi
     setup_port_hopping "$hy_port" "$hy_range"
 
-    # 生成 sing-box 配置文件
+    # 生成服务端配置文件
     cat > "$CONF_FILE" <<EOF
 {
   "log": {
@@ -274,7 +475,7 @@ install_node() {
 }
 EOF
 
-    # 保存环境变量备忘 (便于查看与卸载)
+    # 保存环境配置备忘
     cat > "$ENV_FILE" <<EOF
 NODE_PREFIX="${node_prefix}"
 SERVER_IP="${server_ip}"
@@ -287,6 +488,7 @@ HY_DOMAIN="${hy_domain}"
 HY_PORT="${hy_port}"
 HY_RANGE="${hy_range}"
 HY_PASS="${hy_password}"
+SUB_TOKEN="${sub_token}"
 EOF
 
     # 配置 systemd 服务
@@ -313,57 +515,42 @@ EOF
     systemctl enable --now sing-box
     systemctl restart sing-box
 
-    # 生成 Clash.Meta (Mihomo) 的 Provider 片段
+    # 部署 Caddy 订阅并组装完整客户端配置
     local hy_ports_display="${hy_port},${hy_range/:/-}"
-    cat > "$YAML_FILE" <<EOF
-# ==============================================================================
-# 复制以下内容直接粘贴至你的 Clash.Meta / Mihomo 配置文件中的 proxies: 列表下
-# 或作为独立的 proxy-providers 文件引入
-# ==============================================================================
-proxies:
-  - name: "${node_prefix}-VLESS-Reality"
-    type: vless
-    server: ${server_ip}
-    port: ${vl_port}
-    uuid: ${user_uuid}
-    network: tcp
-    tls: true
-    udp: true
-    flow: xtls-rprx-vision
-    servername: ${vl_sni}
-    reality-opts:
-      public-key: ${vl_pubkey}
-      short-id: ${vl_shortid}
-    client-fingerprint: chrome
+    generate_full_client_config "$hy_domain" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password"
+    setup_caddy_subscription "$hy_domain" "$sub_token"
 
-  - name: "${node_prefix}-Hysteria2"
-    type: hysteria2
-    server: ${hy_domain}
-    port: ${hy_port}
-    ports: "${hy_ports_display}"
-    password: "${hy_password}"
-    sni: ${hy_domain}
-    skip-cert-verify: false
-EOF
-
-    show_yaml
+    show_subscription
 }
 
-# 输出与查看配置
-show_yaml() {
-    if [[ -f "$YAML_FILE" ]]; then
-        echo -e "\n${GREEN}================== ClashX.Meta (Mihomo) 节点配置 ==================${PLAIN}"
-        cat "$YAML_FILE"
-        echo -e "${GREEN}===================================================================${PLAIN}"
-        echo -e "配置文件已保存在: ${YELLOW}${YAML_FILE}${PLAIN}\n"
-    else
-        echo -e "${RED}未找到已生成的配置文件！${PLAIN}"
+# 输出订阅详情与节点 YAML
+show_subscription() {
+    if [[ ! -f "$ENV_FILE" ]]; then
+        echo -e "${RED}未找到已安装的环境配置！${PLAIN}"
+        return 1
+    fi
+    source "$ENV_FILE"
+    local sub_url="https://${HY_DOMAIN}:8444/sub_${SUB_TOKEN}/config.yaml"
+    local provider_url="https://${HY_DOMAIN}:8444/sub_${SUB_TOKEN}/provider.yaml"
+
+    echo -e "\n${GREEN}====================== 节点在线订阅已生成 ======================${PLAIN}"
+    echo -e "1. ${YELLOW}完整配置订阅 (推荐 ClashX.Meta 直接导入托管)${PLAIN}:"
+    echo -e "   ${GREEN}${sub_url}${PLAIN}"
+    echo -e "   (内置 MIPS TUN、纯 IP DoH、ARC 缓存与 📌节点选择 分流规则)\n"
+    echo -e "2. ${YELLOW}纯节点 Provider 订阅 (供自建规则文件引用)${PLAIN}:"
+    echo -e "   ${GREEN}${provider_url}${PLAIN}"
+    echo -e "${GREEN}=================================================================${PLAIN}"
+
+    if [[ -f "$YAML_PROVIDER" ]]; then
+        echo -e "\n${YELLOW}=== 本地节点 YAML 片段 (亦可手动复制) ===${PLAIN}"
+        cat "$YAML_PROVIDER"
+        echo -e "${YELLOW}==========================================${PLAIN}\n"
     fi
 }
 
 # 彻底干净卸载
 uninstall_all() {
-    echo -e "${YELLOW}警告: 即将彻底卸载 sing-box 并清除所有节点与证书配置！${PLAIN}"
+    echo -e "${YELLOW}警告: 即将彻底卸载 sing-box 并清除所有节点、订阅与证书配置！${PLAIN}"
     read -p "确认卸载吗？(y/N): " confirm
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && echo "已取消。" && return 0
 
@@ -373,7 +560,6 @@ uninstall_all() {
     rm -f /etc/systemd/system/sing-box.service
     systemctl daemon-reload
 
-    # 读取旧环境变量精准撤销端口跳跃规则与防火墙
     if [[ -f "$ENV_FILE" ]]; then
         source "$ENV_FILE"
         if [[ -n "$HY_RANGE" && -n "$HY_PORT" ]]; then
@@ -386,46 +572,58 @@ uninstall_all() {
                 netfilter-persistent save >/dev/null 2>&1 || true
             fi
         fi
+        # 清除 Caddy 站点配置
+        rm -f "/etc/caddy/sites/${HY_DOMAIN}-8444.caddy" "/etc/caddy/sites/simple-box.caddy"
+        systemctl reload caddy 2>/dev/null || true
     fi
 
-    # 清除文件
     rm -f /usr/local/bin/sing-box
     rm -rf "$CONF_DIR"
 
-    echo -e "${GREEN}sing-box 已彻底干净卸载，系统未残留任何无用规则与配置！${PLAIN}"
+    echo -e "${GREEN}sing-box 与订阅配置已彻底干净卸载！${PLAIN}"
 }
 
 # 交互菜单
 menu() {
     clear
     echo -e "${GREEN}====================================================${PLAIN}"
-    echo -e "${GREEN}        Simple-Box Manager - 极简安全 Sing-box 控制台     ${PLAIN}"
+    echo -e "${GREEN}        Simple-Box Manager - 极简安全控制台        ${PLAIN}"
     echo -e "${GREEN}====================================================${PLAIN}"
-    echo -e " 1. 安装 / 重置配置 (VLESS-Reality + Hysteria2)"
-    echo -e " 2. 查看当前节点的 Clash.Meta YAML 配置"
+    echo -e " 1. 安装 / 重置配置 (VLESS-Reality + Hysteria2 + Caddy)"
+    echo -e " 2. 查看在线订阅链接与节点 YAML"
     echo -e " 3. 检查并升级 sing-box 官方最新内核"
-    echo -e " 4. 重启 sing-box 服务"
-    echo -e " 5. 查看运行日志"
+    echo -e " 4. 重启服务 (sing-box 与 Caddy)"
+    echo -e " 5. 查看 sing-box 运行日志"
     echo -e " 6. 彻底干净卸载"
     echo -e " 0. 退出"
     echo -e "${GREEN}====================================================${PLAIN}"
     
-    local status="未安装"
+    local sb_status="未安装"
     if [[ -f /usr/local/bin/sing-box ]]; then
         if systemctl is-active --quiet sing-box; then
-            status="${GREEN}运行中${PLAIN}"
+            sb_status="${GREEN}运行中${PLAIN}"
         else
-            status="${RED}未运行${PLAIN}"
+            sb_status="${RED}未运行${PLAIN}"
         fi
     fi
-    echo -e "服务状态: ${status}"
-    echo ""
+    local caddy_status="未安装"
+    if command -v caddy &>/dev/null; then
+        if systemctl is-active --quiet caddy; then
+            caddy_status="${GREEN}运行中${PLAIN}"
+        else
+            caddy_status="${RED}未运行${PLAIN}"
+        fi
+    fi
+    echo -e "Sing-box 状态: ${sb_status} | Caddy 订阅状态: ${caddy_status}\n"
     read -p "请输入选项 [0-6]: " opt
     case "$opt" in
         1) install_node ;;
-        2) show_yaml ;;
+        2) show_subscription ;;
         3) update_singbox_core ;;
-        4) systemctl restart sing-box && echo -e "${GREEN}已重启！${PLAIN}" ;;
+        4) 
+            systemctl restart sing-box && systemctl restart caddy 2>/dev/null || true
+            echo -e "${GREEN}服务已重启！${PLAIN}"
+            ;;
         5) journalctl -u sing-box -o cat -e -f ;;
         6) uninstall_all ;;
         0) exit 0 ;;
@@ -433,11 +631,10 @@ menu() {
     esac
 }
 
-# 支持命令行参数快速调用
 case "$1" in
     install) install_node ;;
     update) update_singbox_core ;;
-    yaml) show_yaml ;;
+    yaml|sub) show_subscription ;;
     del|uninstall) uninstall_all ;;
     *) menu ;;
 esac

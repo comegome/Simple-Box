@@ -87,6 +87,31 @@ trim_string() {
     echo "$val" | tr -d '\r\n' | sed -E ':loop; s/^[[:space:]]+|[[:space:]]+$//g; s/^["'"'"']+|["'"'"']+$//g; t loop'
 }
 
+# 判断 CERT_DIR 中的证书是否确实签给指定域名（含有效期与公私钥配对校验）
+# 用途：复用旧域名时可免输 Token，但必须确认证书真的覆盖该域名，
+#       否则会把「IP 自签证书」误当成域名证书复用，最终 CERT_MODE 与实际情况不符。
+cert_covers_domain() {
+    local domain="${1:-}"
+    local crt="${CERT_DIR}/fullchain.cer"
+    local key="${CERT_DIR}/private.key"
+    [[ -z "$domain" ]] && return 1
+    [[ -s "$crt" && -s "$key" ]] || return 1
+
+    # 有效期：至少还剩 1 天
+    openssl x509 -in "$crt" -noout -checkend 86400 >/dev/null 2>&1 || return 1
+
+    # 证书主题/SAN 必须覆盖该域名
+    openssl x509 -in "$crt" -noout -checkhost "$domain" 2>/dev/null | grep -q "does match" || return 1
+
+    # 公私钥配对
+    local crt_pub key_pub
+    crt_pub=$(openssl x509 -in "$crt" -noout -pubkey 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
+    key_pub=$(openssl pkey -in "$key" -pubout 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
+    [[ -n "$crt_pub" && "$crt_pub" == "$key_pub" ]] || return 1
+
+    return 0
+}
+
 # 在线校验 Cloudflare API Token 有效性
 verify_cloudflare_token() {
     local token="${1:-}"
@@ -363,6 +388,20 @@ issue_cert_bundle() {
 
     mkdir -p "$CERT_DIR"
 
+    # 模式 A0: 有域名但无 Token —— 尝试复用本地已有的该域名证书（免输 Token 场景）
+    # 必须先于下面的失败降级逻辑判断，否则会把有效域名证书覆盖成自签证书
+    if [[ -n "$domain" && -z "$cf_token" ]]; then
+        if cert_covers_domain "$domain"; then
+            echo -e "${GREEN}本地已有覆盖 ${domain} 的有效证书，直接复用（无需重新申请）。${PLAIN}"
+            chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
+            chmod 644 "${CERT_DIR}"/* 2>/dev/null || true
+            CERT_MODE="domain"
+            echo -e "${GREEN}TLS 证书已就绪: ${CERT_DIR} (模式: ${CERT_MODE})${PLAIN}"
+            return 0
+        fi
+        echo -e "${YELLOW}本地无覆盖 ${domain} 的有效证书，且未提供 CF Token，将降级为 IP 自签。${PLAIN}"
+    fi
+
     # 模式 A: 自有域名 + CF Token，走 DNS-01 申请 Let's Encrypt
     if [[ -n "$domain" && -n "$cf_token" ]]; then
         echo -e "${BLUE}配置 acme.sh 证书环境...${PLAIN}"
@@ -399,6 +438,14 @@ issue_cert_bundle() {
             else
                 echo -e "${RED}域名证书与私钥不配对（acme 写入异常），将降级为自签证书。${PLAIN}"
             fi
+        fi
+    fi
+
+    # 域名证书还必须真的覆盖该域名，否则视为申请失败（防止 acme 返回旧证书/空证书）
+    if [[ "$ok" == true && -n "$domain" ]]; then
+        if ! openssl x509 -in "${CERT_DIR}/fullchain.cer" -noout -checkhost "$domain" 2>/dev/null | grep -q "does match"; then
+            echo -e "${RED}已签发的证书未覆盖域名 ${domain}，将降级为自签证书。${PLAIN}"
+            ok=false
         fi
     fi
 
@@ -1094,18 +1141,11 @@ install_node() {
             cf_token="$CF_TOKEN"
         fi
 
-        # 检查是否为沿用域名且本地已有配对且未过期的有效证书：若是，可免输 Token 直接复用！
+        # 检查本地是否已有「确实覆盖该域名」且配对有效的证书：若是，可免输 Token 直接复用
         local reuse_local_cert=false
-        if [[ "$hy_domain" == "$old_domain" ]] && [[ -s "${CERT_DIR}/fullchain.cer" && -s "${CERT_DIR}/private.key" ]]; then
-            if openssl x509 -in "${CERT_DIR}/fullchain.cer" -noout -checkend 86400 >/dev/null 2>&1; then
-                local d_crt_pub d_key_pub
-                d_crt_pub=$(openssl x509 -in "${CERT_DIR}/fullchain.cer" -noout -pubkey 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
-                d_key_pub=$(openssl pkey -in "${CERT_DIR}/private.key" -pubout 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
-                if [[ -n "$d_crt_pub" && "$d_crt_pub" == "$d_key_pub" ]]; then
-                    reuse_local_cert=true
-                    echo -e "${GREEN}检测到本地已有 ${hy_domain} 的有效证书，已自动复用（免输 CF Token）。${PLAIN}"
-                fi
-            fi
+        if cert_covers_domain "$hy_domain"; then
+            reuse_local_cert=true
+            echo -e "${GREEN}检测到本地已有 ${hy_domain} 的有效证书，已自动复用（免输 CF Token）。${PLAIN}"
         fi
 
         if [[ -z "$cf_token" && "$reuse_local_cert" != "true" ]]; then
@@ -1674,18 +1714,11 @@ ${GREEN}================== Hysteria 2 模块配置 ===================${PLAIN}"
                 fi
 
                 if [[ -n "$hy_domain" ]]; then
-                    # 检查是否可复用本地有效证书
+                    # 检查是否可复用本地覆盖该域名的有效证书
                     local reuse_menu_cert=false
-                    if [[ "$hy_domain" == "$old_hy_domain" ]] && [[ -s "${CERT_DIR}/fullchain.cer" && -s "${CERT_DIR}/private.key" ]]; then
-                        if openssl x509 -in "${CERT_DIR}/fullchain.cer" -noout -checkend 86400 >/dev/null 2>&1; then
-                            local d_crt_pub d_key_pub
-                            d_crt_pub=$(openssl x509 -in "${CERT_DIR}/fullchain.cer" -noout -pubkey 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
-                            d_key_pub=$(openssl pkey -in "${CERT_DIR}/private.key" -pubout 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
-                            if [[ -n "$d_crt_pub" && "$d_crt_pub" == "$d_key_pub" ]]; then
-                                reuse_menu_cert=true
-                                echo -e "${GREEN}检测到本地已有 ${hy_domain} 的有效证书，已自动复用（免输 CF Token）。${PLAIN}"
-                            fi
-                        fi
+                    if cert_covers_domain "$hy_domain"; then
+                        reuse_menu_cert=true
+                        echo -e "${GREEN}检测到本地已有 ${hy_domain} 的有效证书，已自动复用（免输 CF Token）。${PLAIN}"
                     fi
                     if [[ "$reuse_menu_cert" != "true" ]]; then
                         echo -e "\n${CYAN}------------------- Cloudflare API Token 获取指引 -------------------${PLAIN}"
@@ -1760,7 +1793,10 @@ echo -e "${CYAN}----------------------------------------------------------------
                     systemctl stop sing-box 2>/dev/null || true
                 fi
 
-                if [[ -n "$hy_domain" && -n "$cf_token" ]]; then
+                # 只要填了域名就交给 issue_cert_bundle：它内部会处理「无 Token 但本地已有
+                # 覆盖该域名的有效证书」的复用场景，不能再按 cf_token 是否为空分流，
+                # 否则复用证书时会被误判成自签模式，把有效域名证书覆盖掉。
+                if [[ -n "$hy_domain" ]]; then
                     # issue_cert_bundle 内部会设置全局 CERT_MODE，必须以它为准而非返回码
                     issue_cert_bundle "$hy_domain" "$cf_token" "$SERVER_IP" || true
                     if [[ "$CERT_MODE" == "domain" ]]; then

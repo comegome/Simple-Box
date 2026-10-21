@@ -104,14 +104,14 @@ Sing-box 状态: 运行中 | Caddy 订阅状态: 运行中
 
 ## ⌨️ 全局快捷指令
 
-安装完成后，在服务器任意目录下直接输入 **`sb`**（或 **`sbox`**）即可随时唤起管理控制台：
+安装完成后，在服务器任意目录下直接输入 **`simbo`** 即可随时唤起管理控制台：
 
 ```bash
-sb                  # 快速打开交互控制面板
-sb sub              # 查看在线订阅链接与 YAML
-sb link             # 查看单独节点 vless/hy2 链接与二维码
-sb update           # 一键静默升级 sing-box 官方最新内核
-sb del              # 彻底干净卸载并还原网络规则
+simbo               # 快速打开交互控制面板
+simbo sub           # 查看在线订阅链接与 YAML
+simbo link          # 查看单独节点 vless/hy2 链接与二维码
+simbo update        # 一键静默升级 sing-box 官方最新内核
+simbo del           # 彻底干净卸载并还原网络规则
 ```
 
 ---

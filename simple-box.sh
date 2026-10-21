@@ -550,8 +550,7 @@ EOF
     systemctl restart sing-box
 
     # 创建全局快捷指令
-    install -m 755 "$0" /usr/local/bin/sb 2>/dev/null || cp -f "$0" /usr/local/bin/sb
-    install -m 755 "$0" /usr/local/bin/sbox 2>/dev/null || cp -f "$0" /usr/local/bin/sbox
+    install -m 755 "$0" /usr/local/bin/simbo 2>/dev/null || cp -f "$0" /usr/local/bin/simbo
 
     # 部署 Caddy 订阅并组装完整客户端配置
     local hy_ports_display="${hy_port},${hy_range/:/-}"

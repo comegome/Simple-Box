@@ -116,10 +116,9 @@ manage_bbr() {
     echo -e " 0. 返回"
     echo -e "${GREEN}====================================================${PLAIN}"
 
-    local opt="1"
-    if [ -t 0 ]; then
-        read -p "请输入选项 [0-2]: " opt
-    fi
+    local opt=""
+    read -r -p "请输入选项 [0-2]: " opt || true
+    opt=${opt:-1}
 
     case "$opt" in
         1)

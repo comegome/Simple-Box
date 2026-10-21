@@ -603,9 +603,11 @@ generate_full_client_config() {
         echo "mode: rule" >> "$full_config_file"
     fi
 
-    # 分流规则自适应：若为 IP 模式，将 VPS 本机 IP 置顶为 DIRECT，防止节点失效时订阅死锁；若为域名，走代理加密隧道
-    if [[ "$domain_or_ip" == "$server_ip" ]]; then
+    # 分流规则防死锁：无论域名或 IP 均注入顶层直连，确保节点更新/失效时订阅拉取 100% 不死锁
+    if [[ "$domain_or_ip" == "$server_ip" || -z "$domain_or_ip" ]]; then
         sed -i "/^rules:/a \  - IP-CIDR,${server_ip}/32,DIRECT,no-resolve" "$full_config_file"
+    else
+        sed -i "/^rules:/a \  - DOMAIN,${domain_or_ip},DIRECT\n  - IP-CIDR,${server_ip}/32,DIRECT,no-resolve" "$full_config_file"
     fi
 
     local ports_line=""
@@ -1214,12 +1216,13 @@ show_subscription() {
 
     if [[ "$proto" == "http" ]]; then
         echo -e "${YELLOW}⚠️  安全与隐私提示 (IP 模式):${PLAIN}"
-        echo -e "   • 分流规则已将 VPS IP 设为直连，确保节点更新/失效时订阅更新绝不死锁。"
+        echo -e "   • 分流规则已将 VPS IP 设为直连，确保节点更新/失效时订阅拉取绝不死锁。"
         echo -e "   • ${RED}注意: 当前订阅通过 HTTP 明文传输，不受 TLS 保护${PLAIN}，请勿在公共 Wi-Fi / 不可信网络环境下更新。"
         echo -e "   • 若需全链路隐私防嗅探保护，请在菜单 [2] 中配置自有域名启用 HTTPS 模式。"
     else
         echo -e "${GREEN}🛡️  隐私安全提示 (域名 HTTPS 模式):${PLAIN}"
-        echo -e "   • 订阅内容由权威 CA 证书 (TLS 1.3) 强加密分发，防链路嗅探，受到完整隐私保护。"
+        echo -e "   • 分流规则已将订阅域名 (${host}) 设为直连，确保节点更新/失效时订阅拉取绝不死锁。"
+        echo -e "   • 订阅内容由权威 CA 证书 (TLS 1.3) 全程强加密分发，防链路嗅探，隐私受到完整保护。"
     fi
 
     if [[ -f "$YAML_PROVIDER" ]]; then
@@ -1836,9 +1839,9 @@ menu() {
             echo -e " 在线订阅: ${CYAN}${proto}://${host}:${port}/${SUB_TOKEN}/config.yaml${PLAIN}"
             echo -e " 节点列表: ${CYAN}${proto}://${host}:${port}/${SUB_TOKEN}/provider.yaml${PLAIN}"
             if [[ "$proto" == "http" ]]; then
-                echo -e " 订阅安全: ${YELLOW}直连分发 (未加密，建议在可信网络下更新)${PLAIN}"
+                echo -e " 订阅安全: ${YELLOW}直连分发 (HTTP 未加密，建议在可信网络下更新)${PLAIN}"
             else
-                echo -e " 订阅安全: ${GREEN}TLS 强加密保护 (权威 CA 证书)${PLAIN}"
+                echo -e " 订阅安全: ${GREEN}TLS 1.3 强加密保护 (权威 CA 证书，直连防死锁)${PLAIN}"
             fi
         fi
 

@@ -102,31 +102,53 @@ install_caddy() {
     systemctl enable caddy >/dev/null 2>&1 || true
 }
 
-# BBR 拥塞控制检测与一键开启
-enable_bbr() {
-    echo -e "${BLUE}检查并配置 TCP BBR 拥塞控制加速...${PLAIN}"
+# BBR 拥塞控制管理（开启与关闭）
+manage_bbr() {
     local cur_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
     local cur_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
 
-    if [[ "$cur_bbr" == "bbr" ]]; then
-        echo -e "${GREEN}系统当前已成功开启 BBR (算法: ${cur_bbr}, 队列: ${cur_qdisc})，无需重复配置！${PLAIN}"
-        return 0
+    echo -e "\n${GREEN}====================================================${PLAIN}"
+    echo -e "${GREEN}              TCP 拥塞控制管理 (BBR)                ${PLAIN}"
+    echo -e "${GREEN}====================================================${PLAIN}"
+    echo -e " 当前算法: ${CYAN}${cur_bbr}${PLAIN} | 队列规则: ${CYAN}${cur_qdisc}${PLAIN}"
+    echo -e " 1. 开启 / 优化 BBR 加速 (推荐: bbr + fq)"
+    echo -e " 2. 关闭 BBR 并恢复系统默认 (恢复为 cubic)"
+    echo -e " 0. 返回"
+    echo -e "${GREEN}====================================================${PLAIN}"
+
+    local opt="1"
+    if [ -t 0 ]; then
+        read -p "请输入选项 [0-2]: " opt
     fi
 
-    # 写入模块配置
-    mkdir -p /etc/sysctl.d
-    cat > /etc/sysctl.d/99-bbr.conf <<EOF
+    case "$opt" in
+        1)
+            if [[ "$cur_bbr" == "bbr" ]]; then
+                echo -e "${GREEN}当前已处于 BBR 状态，无需重复开启！${PLAIN}"
+            else
+                mkdir -p /etc/sysctl.d
+                cat > /etc/sysctl.d/99-bbr.conf <<EOF
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
-
-    sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
-    local new_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
-    if [[ "$new_bbr" == "bbr" ]]; then
-        echo -e "${GREEN}BBR 拥塞控制加速已成功开启并立即生效！${PLAIN}"
-    else
-        echo -e "${YELLOW}已应用 BBR 配置，若未生效请检查内核版本是否 >= 4.9 并尝试重启系统。${PLAIN}"
-    fi
+                sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
+                local new_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+                if [[ "$new_bbr" == "bbr" ]]; then
+                    echo -e "${GREEN}BBR 拥塞控制加速已成功开启并立即生效！${PLAIN}"
+                else
+                    echo -e "${YELLOW}已写入配置，若未生效请检查内核版本是否 >= 4.9 并重启系统。${PLAIN}"
+                fi
+            fi
+            ;;
+        2)
+            rm -f /etc/sysctl.d/99-bbr.conf
+            sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
+            sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || true
+            echo -e "${GREEN}已成功关闭 BBR，当前已还原为系统默认 (cubic)！${PLAIN}"
+            ;;
+        0) return 0 ;;
+        *) echo -e "${RED}无效选项！${PLAIN}" ;;
+    esac
 }
 
 # 获取并升级官方 sing-box 内核（带精准版本校验）
@@ -454,8 +476,10 @@ install_node() {
     local hy_skip_cert="false"
 
     if [[ -z "$HY_DOMAIN" ]]; then
-        echo -e "${CYAN}提示: 若有在 Cloudflare 托管的自有域名，可自动申请正规 CA 证书；${PLAIN}"
-        echo -e "${CYAN}      若无域名可直接回车，将自动生成 10年自签证书基于公网 IP 启用 Hysteria 2。${PLAIN}"
+        echo -e "${CYAN}重要提示:${PLAIN}"
+        echo -e "${CYAN}  1. 若使用自有域名，请确保已在 Cloudflare 添加 A 记录解析到本服务器 IP (${server_ip})${PLAIN}"
+        echo -e "${CYAN}  2. Cloudflare 代理状态必须为【仅限 DNS】(灰色云朵，切勿开启小黄云 CDN，否则阻断 UDP)${PLAIN}"
+        echo -e "${CYAN}  3. 若无域名可直接回车，将自动生成 10 年自签证书基于公网 IP 直连启用 Hysteria 2${PLAIN}"
         read -p "请输入你的自有域名 [留空使用自签证书，输入 skip 完全跳过]: " hy_domain
     fi
     hy_domain=${hy_domain:-$HY_DOMAIN}
@@ -842,7 +866,7 @@ menu() {
         echo -e " 2. 查看在线订阅链接与节点 YAML"
         echo -e " 3. 查看单独节点链接 (vless:// / hy2://) 与二维码"
         echo -e " 4. 检查并升级 sing-box 官方最新内核"
-        echo -e " 5. 开启 / 优化 TCP BBR 拥塞控制加速"
+        echo -e " 5. TCP BBR 拥塞控制管理 (开启 / 关闭)"
         echo -e " 6. 重启服务 (sing-box 与 Caddy)"
         echo -e " 7. 查看 sing-box 运行日志"
         echo -e " 8. 彻底干净卸载"
@@ -855,7 +879,7 @@ menu() {
             2) show_subscription ;;
             3) show_links ;;
             4) update_singbox_core ;;
-            5) enable_bbr ;;
+            5) manage_bbr ;;
             6) 
                 systemctl restart sing-box && systemctl restart caddy 2>/dev/null || true
                 echo -e "${GREEN}服务已重启！${PLAIN}"
@@ -881,7 +905,7 @@ case "$1" in
         ;;
     yaml|sub) show_subscription ;;
     link|url|qr) show_links ;;
-    bbr) enable_bbr ;;
+    bbr) manage_bbr ;;
     del|uninstall) uninstall_all ;;
     *) menu ;;
 esac

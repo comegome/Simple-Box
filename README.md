@@ -57,7 +57,7 @@ bash <(wget -qO- https://cdn.jsdelivr.net/gh/comegome/simple-box@main/simple-box
 simbo               # 打开交互式控制面板
 simbo sub           # 快速查看在线订阅链接与本地 YAML
 simbo link          # 快速查看单独节点链接 (vless:// / hy2://) 与二维码
-simbo bbr           # 一键开启 / 优化 TCP BBR 拥塞控制加速
+simbo bbr           # 管理 TCP BBR 拥塞控制 (开启 / 关闭切换)
 simbo update        # 一键静默升级 sing-box 官方最新内核
 simbo del           # 彻底干净卸载并还原网络规则
 ```
@@ -110,7 +110,7 @@ simbo del           # 彻底干净卸载并还原网络规则
  2. 查看在线订阅链接与节点 YAML
  3. 查看单独节点链接 (vless:// / hy2://) 与二维码
  4. 检查并升级 sing-box 官方最新内核
- 5. 开启 / 优化 TCP BBR 拥塞控制加速
+ 5. TCP BBR 拥塞控制管理 (开启 / 关闭)
  6. 重启服务 (sing-box 与 Caddy)
  7. 查看 sing-box 运行日志
  8. 彻底干净卸载

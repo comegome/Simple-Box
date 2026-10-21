@@ -34,10 +34,14 @@ bash <(curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/sim
 bash <(wget -qO- https://raw.githubusercontent.com/comegome/simple-box/main/simple-box.sh)
 ```
 
-### 2. 加速直链（国内机器 / 抗 DNS 污染）
+### 2. CDN 加速直链（国内机器 / 抗 DNS 污染）
 
 ```bash
-bash <(curl -fsSL https://raw.loc.us.kg/comegome/simple-box/main/simple-box.sh)
+bash <(curl -fsSL https://cdn.jsdelivr.net/gh/comegome/simple-box@main/simple-box.sh)
+```
+或使用 `wget`：
+```bash
+bash <(wget -qO- https://cdn.jsdelivr.net/gh/comegome/simple-box@main/simple-box.sh)
 ```
 
 ---

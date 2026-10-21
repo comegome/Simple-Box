@@ -38,32 +38,32 @@ get_arch() {
 
 # 端口与端口段合法性校验
 validate_port() {
-    local p="$1"
+    local p="${1:-}"
     [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
     (( p >= 1 && p <= 65535 ))
 }
 
 validate_range() {
-    local r="$1"
+    local r="${1:-}"
     [[ "$r" =~ ^([0-9]{1,5}):([0-9]{1,5})$ ]] || return 1
     local s="${BASH_REMATCH[1]}" e="${BASH_REMATCH[2]}"
     (( s >= 1 && e <= 65535 && e > s ))
 }
 
 validate_domain() {
-    local d="$1"
+    local d="${1:-}"
     [[ "$d" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$ ]]
 }
 
 # 剔除字符串首尾的空白字符与引号（清洗换行符、制表符、空格与单双引号任意层嵌套）
 trim_string() {
-    local val="$1"
+    local val="${1:-}"
     echo "$val" | tr -d '\r\n' | sed -E ':loop; s/^[[:space:]]+|[[:space:]]+$//g; s/^["'"'"']+|["'"'"']+$//g; t loop'
 }
 
 # 在线校验 Cloudflare API Token 有效性
 verify_cloudflare_token() {
-    local token="$1"
+    local token="${1:-}"
     token=$(trim_string "$token")
     [[ -z "$token" ]] && return 1
 
@@ -82,8 +82,8 @@ verify_cloudflare_token() {
 
 # 端口冲突检测
 check_port_occupied() {
-    local port="$1"
-    local proto="$2"
+    local port="${1:-}"
+    local proto="${2:-}"
     local in_use=""
     local lister="ss"
     command -v ss &>/dev/null || lister="netstat"
@@ -221,7 +221,7 @@ EOF
 
 # 获取并升级官方 sing-box 内核（带精准版本校验）
 update_singbox_core() {
-    local force_flag="$1"
+    local force_flag="${1:-}"
     echo -e "${BLUE}检查 sing-box 官方最新版本...${PLAIN}"
 
     local cur_ver="未安装"
@@ -290,9 +290,9 @@ update_singbox_core() {
 # 结果通过全局 CERT_MODE 回传: domain | selfsigned
 CERT_MODE=""
 issue_cert_bundle() {
-    local domain="$1"
-    local cf_token="$2"
-    local server_ip="$3"
+    local domain="${1:-}"
+    local cf_token="${2:-}"
+    local server_ip="${3:-}"
     local acme_bin="$HOME/.acme.sh/acme.sh"
     CERT_MODE="selfsigned"
 
@@ -359,7 +359,7 @@ issue_cert_bundle() {
 
 # 仅签发 IP 自签证书（独立函数，供子菜单复用）
 issue_self_signed_cert() {
-    local server_ip="$1"
+    local server_ip="${1:-}"
     mkdir -p "$CERT_DIR"
     [[ -z "$server_ip" ]] && { echo -e "${RED}缺少公网 IP，无法生成自签证书。${PLAIN}"; return 1; }
 
@@ -428,8 +428,8 @@ clear_port_hopping() {
 
 # 端口跳跃 iptables 规则配置
 setup_port_hopping() {
-    local hy_port="$1"
-    local range="$2"
+    local hy_port="${1:-}"
+    local range="${2:-}"
 
     echo -e "${BLUE}配置 Hysteria 2 端口跳跃 (UDP ${range} -> ${hy_port})...${PLAIN}"
     iptables -t nat -D PREROUTING -p udp --dport "$range" -j REDIRECT --to-ports "$hy_port" 2>/dev/null || true
@@ -479,7 +479,7 @@ reload_caddy_safe() {
 
 # 校验 Caddy 是否真的在目标端口监听（重载后调用，防止"配置成功但没生效"）
 verify_caddy_listening() {
-    local port="$1"
+    local port="${1:-}"
     local i
     for i in 1 2 3 4 5; do
         if ss -tln 2>/dev/null | grep -qE "[:.]${port} "; then
@@ -494,9 +494,9 @@ verify_caddy_listening() {
 
 # 部署 Caddy 订阅分发服务
 setup_caddy_subscription() {
-    local domain_or_ip="$1"
-    local token="$2"
-    local sub_port="$3"
+    local domain_or_ip="${1:-}"
+    local token="${2:-}"
+    local sub_port="${3:-}"
     local cert_mode="${4:-selfsigned}"
 
     install_caddy
@@ -567,15 +567,15 @@ EOF
 
 # 组装客户端订阅与独立链接
 generate_full_client_config() {
-    local domain_or_ip="$1"
-    local token="$2"
-    local node_prefix="$3"
-    local server_ip="$4"
-    local vl_port="$5"
-    local user_uuid="$6"
-    local vl_sni="$7"
-    local vl_pubkey="$8"
-    local vl_shortid="$9"
+    local domain_or_ip="${1:-}"
+    local token="${2:-}"
+    local node_prefix="${3:-}"
+    local server_ip="${4:-}"
+    local vl_port="${5:-}"
+    local user_uuid="${6:-}"
+    local vl_sni="${7:-}"
+    local vl_pubkey="${8:-}"
+    local vl_shortid="${9:-}"
     local hy_enabled="${10}"
     local hy_port="${11}"
     local hy_ports_display="${12}"
@@ -734,14 +734,14 @@ install_simbo_command() {
 # 部署与配置主函数
 # 集中生成 sing-box 服务端配置文件
 write_singbox_config() {
-    local vl_port="$1"
-    local vl_sni="$2"
-    local user_uuid="$3"
-    local vl_privkey="$4"
-    local vl_shortid="$5"
-    local hy_enabled="$6"
-    local hy_port="$7"
-    local hy_password="$8"
+    local vl_port="${1:-}"
+    local vl_sni="${2:-}"
+    local user_uuid="${3:-}"
+    local vl_privkey="${4:-}"
+    local vl_shortid="${5:-}"
+    local hy_enabled="${6:-}"
+    local hy_port="${7:-}"
+    local hy_password="${8:-}"
 
     cat > "$CONF_FILE" <<EOF
 {

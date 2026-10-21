@@ -2003,9 +2003,17 @@ menu() {
 }
 
 # 管道执行（curl ... | bash）时 stdin 就是脚本自身的输入流，交互式 read 会立即 EOF。
-# 若存在可用终端，把 stdin 重新接到 /dev/tty，保证菜单可以正常交互。
-if [[ -z "${BASH_SOURCE[0]:-}" && ! -t 0 && -r /dev/tty ]] && { [[ -z "${1:-}" ]] || [[ "${1:-}" == "menu" ]]; }; then
-    exec </dev/tty
+# 若确实存在可用控制终端，把 stdin 重新接到 /dev/tty，让菜单可正常交互。
+# 注意：必须先用子 shell 试探能否打开 /dev/tty；无控制终端时直接 exec 会失败，
+# 配合 set -e 会把整个脚本静默杀掉（表现为零输出、退出码 0）。
+_INTERACTIVE=false
+if [[ -z "${BASH_SOURCE[0]:-}" && ! -t 0 ]]; then
+    if (exec </dev/tty) 2>/dev/null; then
+        exec </dev/tty
+        _INTERACTIVE=true
+    fi
+elif [ -t 0 ]; then
+    _INTERACTIVE=true
 fi
 
 # 入口守卫：三种执行方式都要能进入主流程
@@ -2016,6 +2024,15 @@ _ENTRY_SRC="${BASH_SOURCE[0]:-}"
 if [[ -z "$_ENTRY_SRC" || "$_ENTRY_SRC" == "$0" ]]; then
     case "${1:-}" in
         install|reinstall) install_node || exit 1 ;;
-        *) menu ;;
+        *)
+            if [[ "$_INTERACTIVE" == "true" ]]; then
+                menu
+            else
+                echo -e "${RED}当前环境没有可用终端，无法打开交互式菜单。${PLAIN}"
+                echo -e "${YELLOW}请在真实终端中运行，或使用非交互模式：${PLAIN}"
+                echo -e "  curl -fsSL <脚本地址> | sudo bash -s install"
+                exit 1
+            fi
+            ;;
     esac
 fi

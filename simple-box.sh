@@ -480,7 +480,9 @@ install_node() {
         echo -e "${CYAN}  1. 若使用自有域名，请确保已在 Cloudflare 添加 A 记录解析到本服务器 IP (${server_ip})${PLAIN}"
         echo -e "${CYAN}  2. Cloudflare 代理状态必须为【仅限 DNS】(灰色云朵，切勿开启小黄云 CDN，否则阻断 UDP)${PLAIN}"
         echo -e "${CYAN}  3. 若无域名可直接回车，将自动生成 10 年自签证书基于公网 IP 直连启用 Hysteria 2${PLAIN}"
-        read -p "请输入你的自有域名 [直接回车默认使用 IP 自签证书，输入 skip 完全跳过]: " hy_domain
+                local cert_hint="直接回车使用 IP 自签证书"
+        [[ -f "${CERT_DIR}/fullchain.cer" ]] && cert_hint="直接回车继续使用当前证书 / IP 自签证书"
+        read -p "请输入你的自有域名 [${cert_hint}，输入 skip 完全跳过]: " hy_domain
     fi
     hy_domain=${hy_domain:-$HY_DOMAIN}
 
@@ -846,16 +848,16 @@ menu() {
 
         # 3. 打印系统面板
         echo -e " 操作系统: ${CYAN}${os_name} (${arch})${PLAIN}"
-        local domain_display="未配置"
+        local cert_display="未配置"
         if [[ -f "$ENV_FILE" ]]; then
             source "$ENV_FILE"
             if [[ -n "$HY_DOMAIN" && "$HY_DOMAIN" != "skip" ]]; then
-                domain_display="${HY_DOMAIN}"
+                cert_display="${HY_DOMAIN}"
             elif [[ "$HY_SKIP_CERT" == "true" ]]; then
-                domain_display="IP自签证书"
+                cert_display="IP 自签证书"
             fi
         fi
-        echo -e " 公网 IP : ${CYAN}${cur_ip}${PLAIN} | 绑定域名: ${CYAN}${domain_display}${PLAIN}"
+        echo -e " 公网 IP : ${CYAN}${cur_ip}${PLAIN} | TLS 证书: ${CYAN}${cert_display}${PLAIN}"
         echo -e " TCP 加速: ${bbr_status}"
         echo -e " Sing-box: ${sb_status}"
         echo -e " Caddy订阅: ${caddy_status}"

@@ -888,6 +888,9 @@ EOF
 }
 EOF
 
+    local sub_proto="http"
+    [[ "$CERT_MODE" == "domain" ]] && sub_proto="https"
+
     # 保存环境配置备忘
     cat > "$ENV_FILE" <<EOF
 NODE_PREFIX="${node_prefix}"
@@ -949,8 +952,6 @@ EOF
     local hy_ports_display="$hy_port"
     [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"
     generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_enabled" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
-    local sub_proto="http"
-    [[ "$CERT_MODE" == "domain" ]] && sub_proto="https"
     setup_caddy_subscription "$target_host" "$sub_token" "$sub_port" "$CERT_MODE"
 
     show_subscription

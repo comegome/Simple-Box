@@ -847,7 +847,16 @@ menu() {
 
         # 3. 打印系统面板
         echo -e " 操作系统: ${CYAN}${os_name} (${arch})${PLAIN}"
-        echo -e " 公网 IP : ${CYAN}${cur_ip}${PLAIN}"
+        local domain_display="未配置"
+        if [[ -f "$ENV_FILE" ]]; then
+            source "$ENV_FILE"
+            if [[ -n "$HY_DOMAIN" && "$HY_DOMAIN" != "skip" ]]; then
+                domain_display="${HY_DOMAIN}"
+            elif [[ "$HY_SKIP_CERT" == "true" ]]; then
+                domain_display="IP自签证书"
+            fi
+        fi
+        echo -e " 公网 IP : ${CYAN}${cur_ip}${PLAIN} | 绑定域名: ${CYAN}${domain_display}${PLAIN}"
         echo -e " TCP 加速: ${bbr_status}"
         echo -e " Sing-box: ${sb_status}"
         echo -e " Caddy订阅: ${caddy_status}"

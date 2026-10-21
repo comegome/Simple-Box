@@ -549,6 +549,10 @@ EOF
     systemctl enable --now sing-box
     systemctl restart sing-box
 
+    # 创建全局快捷指令
+    install -m 755 "$0" /usr/local/bin/sb 2>/dev/null || cp -f "$0" /usr/local/bin/sb
+    install -m 755 "$0" /usr/local/bin/sbox 2>/dev/null || cp -f "$0" /usr/local/bin/sbox
+
     # 部署 Caddy 订阅并组装完整客户端配置
     local hy_ports_display="${hy_port},${hy_range/:/-}"
     generate_full_client_config "$hy_domain" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password"

@@ -2,37 +2,19 @@
 
 > 极简、安全、透明的自用 sing-box 服务端一键管理脚本。
 
-专为追求**系统整洁、网络安全与纯净架构**的个人 VPS 用户设计。摒弃开源一键脚本中常见的防火墙滥开、内置未知二进制、明文 HTTP 暴露与多核心混部等隐患，全代码约 2000 行标准 Bash，逻辑简单、透明可审计。
+专为追求**系统整洁、网络安全与纯净架构**的个人 VPS 用户设计。摒弃开源一键脚本中常见的防火墙滥开、内置未知二进制、明文 HTTP 暴露与多核心混部等隐患，全代码标准 Bash，透明可审计。
 
 ---
 
-## 🖥️ 环境要求与兼容性
+## 🖥️ 硬性适用范围
 
-### 0. 硬性适用范围（请先确认）
+在开始前，请确认你的 VPS 与网络符合以下硬性边界：
 
-本脚本在设计上**只做两件事**，并为此主动砍掉了所有冗余分支：
-
-| 项目 | 支持范围 | 说明 |
+| 维度 | 支持范围 | 说明 |
 | :--- | :--- | :--- |
-| **网络协议栈** | **仅 IPv4** | sing-box 与 Caddy 均显式绑定 `0.0.0.0`，**不支持 IPv6**。纯 IPv6 或 IPv6-only 网络的客户端无法连接。 |
-| **TLS 证书来源** | **仅 Cloudflare DNS API** 或 **IP 自签证书** | 域名证书只支持 Cloudflare 托管的域名（DNS-01 验证）。**不支持**阿里云 / DNSPod / Route53 等其他 DNS 服务商，也不支持 HTTP-01（不开放 80 端口）。 |
-
-> **为什么砍掉 IPv6？** 脚本面向的是「单机自用、极简可靠」的场景。IPv6 会引入三份额外复杂度：`ip6tables` 端口跳跃镜像规则、双栈监听与客户端 AAAA 优先导致的超时排查、以及半残 IPv6（有地址但无路由）的静默失败。这些成本换来的收益在自用场景下极低，因此直接移除，代码里不再有任何 `ip6tables` 调用。
->
-> **为什么只支持 Cloudflare？** DNS-01 需要调用各服务商的 API 并处理不同的鉴权模型。只保留 Cloudflare 一家，可以做到 Token 输入后**当场在线校验有效性**（`/user/tokens/verify`），把「填错 Token 等到最后才失败」这个最常见的坑消灭在第一步。
-
-### 1. VPS 硬件最低配置要求
-* **CPU**：1 核心（支持 `x86_64` / AMD64 及 `aarch64` / ARM64）
-* **内存**：最低 256 MB（推荐 **512 MB 及以上**）
-  * *实测：sing-box 常驻约 45 MB，Caddy 常驻约 46 MB（PSS），合计不到 100 MB。*
-* **磁盘**：可用空间 $\ge$ 1 GB
-* **网络**：具备公网 IPv4（自签证书与节点信息均依赖公网 IP 探测）
-
-### 2. 支持的操作系统
-* **Ubuntu** $\ge$ 20.04（推荐 22.04 / 24.04 LTS）
-* **Debian** $\ge$ 11（Bullseye / Bookworm）
-* **CentOS / RHEL / Rocky Linux / AlmaLinux** $\ge$ 8
-* **Alpine Linux** $\ge$ 3.16
+| **网络协议栈** | **仅 IPv4** | sing-box 与 Caddy 均绑定 `0.0.0.0`，**不支持 IPv6**。 |
+| **TLS 证书来源** | **仅 Cloudflare DNS API** 或 **IP 自签证书** | 域名证书仅走 Cloudflare DNS-01 API（不占 80 端口）；无域名直接回车生成 10 年 IP ECC 证书。 |
+| **系统架构与内存** | **x86_64 / aarch64**，内存 $\ge$ 256MB | 支持 Ubuntu 20.04+、Debian 11+、CentOS/Rocky 8+、Alpine 3.16+。 |
 
 ---
 
@@ -40,58 +22,72 @@
 
 在任意满足要求的 VPS 上以 `root` 权限运行：
 
-### 1. 官方直链（海外 VPS 推荐）
+### 官方直链（海外 VPS 推荐）
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/simple-box.sh -o /tmp/simple-box.sh && sudo bash /tmp/simple-box.sh
 ```
 
-### 2. CDN 加速直链（国内机器 / 抗 DNS 污染）
+### CDN 加速直链（国内机器 / 抗 DNS 污染）
 
 ```bash
 curl -fsSL https://cdn.jsdelivr.net/gh/comegome/simple-box@main/simple-box.sh -o /tmp/simple-box.sh && sudo bash /tmp/simple-box.sh
 ```
 
-> ⚠️ **不要用 `sudo bash <(curl ...)`**：`sudo` 默认会关闭调用方打开的额外文件描述符，`<(...)` 生成的 `/dev/fd/63` 在子进程里已经不存在，于是报
-> `bash: /dev/fd/63: No such file or directory` 与 `curl: (23) Failure writing output to destination`。这是 `sudo` 的行为，不是脚本问题。
+> 💡 **为什么必须“先下载成文件再运行”？**
+> `sudo bash <(...)` 会因 `sudo` 默认关闭子进程文件描述符而报错 `/dev/fd/63: No such file or directory`；
+> `curl ... | sudo bash` 管道执行时，交互输入会与脚本正文争抢 stdin 导致提问错乱。
+> 唯有“先下载再运行”兼顾交互稳定与可审计性。
 >
-> ⚠️ **也不要用 `curl ... | sudo bash`**：bash 从 stdin 读取脚本正文，脚本里的交互提问会和脚本自身抢同一条输入流，安装过程会静默错乱。脚本会主动检测并拒绝这种执行方式。
->
-> 结论：**先下载成文件，再执行**。这是唯一稳妥的方式，也方便你在运行前审阅代码。
-
-### 3. 无人值守安装（无交互，全默认值）
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/simple-box.sh -o /tmp/simple-box.sh && sudo bash /tmp/simple-box.sh install
-```
+> 🤖 **无人值守模式（全默认值、无交互直接安装）：**
+> ```bash
+> curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/simple-box.sh -o /tmp/simple-box.sh && sudo bash /tmp/simple-box.sh install
+> ```
 
 ---
 
 ## ⌨️ 全局快捷指令
 
-安装完成后脚本会把自身落地到 `/usr/local/share/simple-box/simple-box.sh`，并注册软链 `/usr/local/bin/simbo`（管道执行 `bash <(curl ...)` 场景同样支持）。之后在服务器**任意路径**下直接输入 **`simbo`**：
+安装成功后，随时在终端任意目录下输入 **`simbo`** 即可打开管理控制台：
 
 ```bash
-simbo               # 打开 Simple-Box 极简交互控制面板
+simbo
 ```
 
 ---
 
-## 📖 Cloudflare 域名解析与 API Token 申请指南
+## 🛠️ 核心功能特性
 
-如果你希望为 Hysteria 2 绑定自有域名并申请受信任的 Let's Encrypt 证书，请按以下步骤操作（全程 **DNS-01 验证**，**无需 VPS 开放 80 端口**，即使防火墙关闭所有 Web 端口也能签发）。
+* **单内核纯净运行**：直接拉取官方 `SagerNet/sing-box` Release，无任何外置闭源二进制，常驻约 45 MB。
+* **双主力协议矩阵**：
+  * **VLESS-TCP-Reality-Vision**：日常主力，伪装大厂 SNI，低延迟、免证书维护。
+  * **Hysteria 2**：弱网冲刺，UDP/QUIC 单边加速，支持端口跳跃（Port Hopping）抵御 QoS。
+* **证书智能自适应**：
+  * **自动检测本地域名**：重新配置时自动检测既有域名，回车一键沿用（未过期证书自动免输 Token 复用）；
+  * **IP 自签证书**：无域名直接回车，签发 10 年 ECC 证书，客户端自动注入 `skip-cert-verify: true`；
+  * **域名模式**：Cloudflare DNS-01 API 签发正规 CA 证书，自动续期。
+* **Caddy 订阅安全分发**：
+  * **智能协议切换**：域名模式开启 HTTPS 绿锁；IP 模式自动降级为 HTTP 分发，彻底解决 ClashX.Meta 等客户端因阻断自签证书无法导入的问题；
+  * **订阅防死锁**：客户端配置顶层注入精准直连规则，节点失效也能正常刷新拉取订阅；
+  * **Web 隔离与零冲突**：Caddy 订阅仅监听专用端口（默认 8444），不占用 80 端口，与既有 Nginx 互不抢占。
+* **极简管理与彻底卸载**：TCP BBR 加速独立管控；卸载时彻底移除 sing-box、订阅服务与网络规则，无隐藏残留。
 
-> **不想折腾域名？** 在一键安装的域名提示处**直接按回车**即可。脚本会为本机公网 IP 生成 10 年期自签证书（含 SAN），Hysteria 2 与订阅站点照常工作，客户端自动带上 `skip-cert-verify: true`。
+---
+
+## 📖 详细指南与常见问题
+
+<details>
+<summary><b>📖 Cloudflare 域名解析与 API Token 申请指南（点击展开）</b></summary>
 
 ### 步骤 1：在 Cloudflare 添加 A 记录
-1. 登录 [Cloudflare 控制台](https://dash.cloudflare.com/)，点击进入你的域名；
+1. 登录 [Cloudflare 控制台](https://dash.cloudflare.com/)，进入你的域名；
 2. 左侧菜单 **DNS** $\to$ **记录 (Records)** $\to$ **添加记录 (Add record)**；
 3. 填写：
    * **类型 (Type)**：`A`
    * **名称 (Name)**：二级前缀（例如 `node`、`o2`，根域用 `@`）
    * **IPv4 地址**：这台 VPS 的公网 IPv4
    * **代理状态 (Proxy status)**：**【核心关键】必须为“仅限 DNS”（灰色云朵）！开启小黄云 CDN 会阻断 UDP，Hysteria 2 将完全无法连接。**
-4. **保存 (Save)**。
+4. 点击 **保存 (Save)**。
 
 ### 步骤 2：生成专属 API Token
 1. Cloudflare 右上角头像 $\to$ **配置文件 (Profile)**；
@@ -105,50 +101,17 @@ simbo               # 打开 Simple-Box 极简交互控制面板
 6. 复制生成的 Token（仅展示一次，妥善保存）。
 
 ### 步骤 3：在 VPS 终端填入
-运行 `simbo` 选 `[1] 安装 / 重置配置`，在域名提示处输入域名，随后粘贴 Token。脚本会全自动签发 ECC-256 证书，并由 acme.sh 的 cron 每 60 天静默续期。
+运行 `simbo` 进行安装或在 Hysteria 2 模块输入域名后，按提示粘贴 Token。脚本会自动当场在线校验有效性并签发 ECC 证书。
+</details>
 
----
+<details>
+<summary><b>🖥️ 控制台菜单与常用配置项速查表（点击展开）</b></summary>
 
-## 🛠️ 功能特性
-
-* **单内核纯净运行**：仅使用官方 `SagerNet/sing-box` Release，无任何未知或第三方闭源二进制，实测常驻约 45 MB。
-* **双主力协议矩阵**：
-  * **VLESS-TCP-Reality-Vision**：日常主力。x25519 密钥对伪装大厂 SNI，免证书维护，延迟低、无额外加密开销。
-  * **Hysteria 2**：弱网冲刺。UDP/QUIC 单边拥塞控制，支持**端口跳跃（Port Hopping）**，抵御单端口 UDP QoS。
-* **三档证书策略**：
-  * **域名证书**：Cloudflare DNS API 申请 Let's Encrypt，无需 80 端口，自动续期；
-  * **IP 自签证书**：直接回车即可，为公网 IP 签发 10 年 ECC 证书（含 SAN），客户端自动 `skip-cert-verify: true`；
-  * **跳过 Hy2**：输入 `skip`，仅部署 Reality（订阅站点仍用自签证书保护）。
-  * 域名证书申请失败时**自动降级**为 IP 自签证书，节点不会因证书问题瘫痪。
-* **TCP BBR 管理**：检测 / 开启 / 关闭三态管理，写入独立 `/etc/sysctl.d/99-bbr.conf`，不改动系统其它参数。
-* **Caddy 安全订阅分发**：
-  * 未安装 Caddy 时自动安装官方版本；
-  * **协议智能自适应**：域名模式自动启用 HTTPS 绿锁分发；IP 自签模式自动启用 HTTP 分发，**彻底解决 ClashX.Meta 等客户端因阻断自签名证书而无法导入订阅的死结**；
-  * **订阅防死锁**：生成的客户端配置会在 `rules:` 最顶端注入一条精确直连——域名模式为 `DOMAIN,<你的域名>,DIRECT`，IP 模式为 `IP-CIDR,<VPS_IP>/32,DIRECT,no-resolve`。这样即便节点端口/密钥变更导致旧节点失效，客户端「更新订阅」也不会被送进已失效的代理而陷入死循环；域名模式下该直连仍受权威 CA 的 TLS 1.3 加密保护，不泄露 Token 与节点配置；
-  * 自定义监听端口（默认 8444），与既有 Nginx/Apache 的 80/443 完全隔离；
-  * 随机 Token 路径隔离，未授权路径一律 404，安全防扫描。
-* **三种导出形态（自动输出）**：
-  * **完整托管订阅**：内置 MIPS TUN、纯 IP DoH、ARC 缓存与精准分流模板，导入即用；
-  * **纯节点 Provider**：供自建分流配置引用；
-  * **原生分享链接 + 二维码**：生成 `vless://` / `hysteria2://` URI，终端直接渲染 ANSI 二维码。
-* **输入校验与全端口防冲突互检**：
-  * 端口与跳跃范围做合法性校验（1-65535、起止有序）；
-  * **全端口互检**：Reality 端口、Hy2 主端口、订阅端口之间严禁重复；端口跳跃范围严禁包含任何已设定端口，从源头杜绝流量误截胡；
-  * 端口被外部服务占用时拦截并要求更换，被自身 sing-box / caddy 占用时平滑接管；
-  * 节点名前缀自动剔除会破坏 YAML/URI 的引号字符。
-* **启动前配置校验**：写入配置后先跑 `sing-box check`，通过才重启服务，避免带病启动。
-* **内核升级精准比对**：本地版本与 GitHub 最新 Tag 比对，相同则跳过下载；下载 / 解压失败保留原内核。
-* **彻底干净卸载**：停止服务、删除 systemd 单元、清理 iptables 端口跳跃规则、移除 Caddy 站点与 acme 续期任务、删除配置目录与全局指令。
-
----
-
-## 🖥️ 交互菜单与首页看板
-
-直接输入 `simbo` 进入控制台，首页实时呈现系统与节点状态，每个操作结束后按回车返回主菜单：
+### 控制台主界面看板预览
 
 ```text
 ====================================================
-        Simple-Box Manager - 极简安全控制台
+        Simple-Box Manager - 极简安全控制台        
 ====================================================
  操作系统: Ubuntu 24.04.5 LTS (amd64)
  公网 IP : 203.0.113.10 | TLS 证书: IP 自签证书
@@ -172,62 +135,56 @@ simbo               # 打开 Simple-Box 极简交互控制面板
 ====================================================
 ```
 
-`TLS 证书` 字段显示两种状态：`<你的域名> (CA 证书)` / `IP 自签证书`（尚未安装时显示 `未配置`）。
+### 安装流程关键输入项
 
-### 安装流程的输入项
-
-| 提示 | 默认 | 说明 |
+| 配置项 | 默认值 | 行为说明 |
 | :--- | :--- | :--- |
-| Reality 监听端口 | `443` | 1-65535，被外部占用则要求重填 |
-| Reality 伪装域名 | `gateway.icloud.com` | 需支持 TLS 1.3 的站点，不能填本机 IP |
-| 域名 | 回车 = IP 自签 | `skip` 只装 Reality；`keep` 沿用已配置域名 |
-| CF API Token | — | 仅在填了域名时询问，留空自动降级为自签 |
-| Hy2 UDP 端口 | `8443` | 1-65535 |
-| 端口跳跃范围 | `20000:40000` | 格式 `起:止`；输入 `none` 关闭跳跃 |
-| Caddy 订阅端口 | `8444` | 1-65535 |
-| 节点名前缀 | `Node` | 会剔除引号字符 |
+| **Reality 监听端口** | `443` | 1-65535，被外部占用会提示更换；与 Nginx 共存时可改为其他端口 |
+| **Reality 伪装域名** | `gateway.icloud.com` | 需支持 TLS 1.3 的大厂 SNI 站点，禁止填本机 IP |
+| **Hysteria 2 域名** | 自动检测旧域名 | 检测到旧域名可一键回车沿用；直接回车 = IP 自签；`skip` = 跳过 Hy2 |
+| **Cloudflare Token** | — | 仅配置域名且无本地有效证书时需要，留空自动降级为自签 |
+| **Hy2 主监听端口** | `8443` | UDP 端口，与 Reality 端口互斥 |
+| **端口跳跃范围** | `20000:40000` | 格式 `起:止`；输入 `none` 关闭端口跳跃 |
+| **Caddy 订阅端口** | `8444` | TCP 端口，独立分发订阅，不抢占 80 端口 |
+| **节点名称前缀** | `Node` | 节点显示前缀，自动过滤特殊字符 |
+</details>
 
----
+<details>
+<summary><b>❓ 常见问题解答 (FAQ)（点击展开）</b></summary>
 
-## 🧪 安装后自检
+#### Q1：如果机器上已有 Nginx，或者安装本脚本后再安装 Nginx，会有冲突吗？
+**绝大部分情况下互不干扰，只需注意一个关键点：**
+1. **80 端口零冲突**：Simple-Box 的 Caddy 专用于订阅分发，只监听在 8444 端口（通过 `bind tcp4/0.0.0.0`），脚本会自动清除 Caddy 默认占用的 80 端口，**80 端口完全留给 Nginx 使用**。
+2. **443 端口注意事项**：
+   - 如果你的 Nginx 已经配置了 HTTPS 网站占用了 443 端口，安装 Simple-Box 时 Reality 端口输入不能选 443（脚本会自动检测并提示已被占用），请将 Reality 端口改为其他端口（如 `20443`、`34443` 等）。
+   - 如果先安装了 Simple-Box（Reality 默认占用了 443），后续在 Nginx 里配置监听 443 的 HTTPS 站点时，Nginx 会报端口被占；此时在 `simbo` 控制台选项 1 中将 Reality 端口改成其他端口即可。
+3. **证书申请零冲突**：Simple-Box 走 Cloudflare DNS API 验证，不需要占用 80 端口做 HTTP-01 验证，完全不会与 Certbot 或 Nginx 的证书续签产生冲突。
+
+#### Q2：没有域名能用 Hysteria 2 吗？为什么自签模式下订阅是 HTTP？
+能！安装时域名询问直接回车即可启用 IP 自签证书，客户端节点自带 `skip-cert-verify: true`，连接速度与正规证书完全一致。
+**关于订阅**：主流客户端（ClashX.Meta / Clash Verge / Shadowrocket 等）在拉取订阅时，底层的 TLS 客户端会硬性阻断未受信任的自签证书导致无法导入。因此在自签模式下，Caddy 订阅站点自动走 HTTP 分发（配合 24 位高强度随机 Token 路径隔离防护），免除用户手动安装系统 CA 的麻烦；绑定正规域名后则会自动升级为带 CA 证书的标准 HTTPS。
+
+#### Q3：能用 IPv6 连接节点吗？
+不能。Simple-Box 为追求极简与可靠，彻底移除了 IPv6 双栈与相关复杂的 ip6tables 规则。所有服务显式绑定 IPv4。如果你的网络或机器仅有 IPv6，请勿使用本脚本。
+
+#### Q4：域名不在 Cloudflare，能申请正规证书吗？
+不能。域名证书仅支持 Cloudflare DNS-01 API。若域名在其他提供商，建议直接回车使用 IP 自签模式，或者将域名 NS 托管至 Cloudflare。
+
+#### Q5：域名证书申请失败会怎样？
+脚本会自动降级为 10 年期 IP 自签证书兜底完成安装，保证节点立即可用；后续检查 CF Token 权限后，在 `simbo` 选项 2 中随时可重新配置升级为域名证书。
+</details>
+
+<details>
+<summary><b>🧪 安装后状态自检命令（点击展开）</b></summary>
 
 ```bash
-systemctl status sing-box caddy --no-pager    # 服务状态
-sing-box check -c /etc/sing-box/config.json   # 配置合法性
-ss -tlnp | grep -E ':(443|8444)'              # Reality 与订阅端口
-ss -ulnp | grep 8443                          # Hy2 端口
-iptables -t nat -L PREROUTING -n --line-numbers | grep 8443   # 端口跳跃
-curl -k https://<域名或IP>:8444/<token>/provider.yaml     # 订阅可达性
+systemctl status sing-box caddy --no-pager        # 检查服务运行状态
+sing-box check -c /etc/sing-box/config.json       # 校验 sing-box 配置完整性
+ss -tlnp | grep -E ':(443|8444)'                  # 检查 Reality 与 Caddy 订阅端口
+ss -ulnp | grep 8443                              # 检查 Hysteria 2 UDP 端口
+iptables -t nat -L PREROUTING -n --line-numbers   # 检查端口跳跃 REDIRECT 规则
 ```
-
----
-
-## ❓ 常见问题
-
-**Q：能用 IPv6 连节点吗？**
-不能。脚本只监听 IPv4（`0.0.0.0`），端口跳跃也只配置 IPv4 的 `iptables` 规则。如果你的 VPS 只有 IPv6 出口，或在纯 IPv6 网络下使用，本脚本不适用。
-
-**Q：域名不在 Cloudflare，能用正规证书吗？**
-不能。域名证书只走 Cloudflare DNS API 的 DNS-01 验证（不占用 80 端口）。域名在阿里云 / DNSPod / Route53 等其它服务商时，请使用 IP 自签证书模式（安装时域名处直接回车），或在 Cloudflare 托管该域名后再申请。
-
-**Q：没有域名能用 Hysteria 2 吗？为什么自签模式下订阅是 HTTP？**
-能。安装时域名处直接回车即可启用 IP 自签证书，客户端节点自带 `skip-cert-verify: true`，连接速度与正规证书无差异。
-关于订阅：因为主流客户端（ClashX.Meta / Clash Verge / Shadowrocket 等）在点击“下载订阅 URL”时，都会严格校验并阻断未受信任的自签 HTTPS 证书。因此在自签模式下，脚本会自动将 Caddy 订阅配置为 HTTP 分发（配合 24 位随机 Token 严格防护），让客户端无需手动安装系统 CA 即可一键直接导入。绑定正规域名后则会自动无缝升级为标准 HTTPS。
-
-**Q：域名证书申请失败会怎样？**
-脚本会自动降级为 IP 自签证书并继续完成安装，节点立即可用；修正 Token 后重跑 `simbo` 选 `[1]` 即可升级为域名证书。
-
-**Q：80 端口被占用 / 服务器未备案会影响签证书吗？**
-不会。本脚本使用 DNS-01 验证，全程走 Cloudflare API，不触碰 80/443。
-
-**Q：能和 Nginx / 已有站点共存吗？**
-能。订阅站点监听独立端口（默认 8444），不占用 80/443；安装时会检测端口冲突。
-
-**Q：端口跳跃要开吗？**
-UDP 被 QoS 限速时开启更稳。输入 `none` 可关闭，客户端将只连单一 UDP 端口。
-
-**Q：重置配置时会不会丢掉现有节点？**
-端口、伪装域名、节点前缀都会以当前配置作为默认值，直接回车即沿用；但 UUID、密码、订阅 Token 每次安装都会重新生成，旧订阅链接会失效，需重新导入。
+</details>
 
 ---
 

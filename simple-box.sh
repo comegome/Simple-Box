@@ -575,7 +575,8 @@ setup_caddy_subscription() {
 
     mkdir -p "/etc/caddy/sites"
     
-    if [ ! -f /etc/caddy/Caddyfile ]; then
+    # 若 Caddy 为本脚本安装，或 Caddyfile 尚不存在：写入纯净配置，绝不监听 80 端口（杜绝与 Nginx/Apache 冲突）
+    if [ ! -f /etc/caddy/Caddyfile ] || [[ -f "${CONF_DIR}/.caddy_installed_by_script" ]]; then
         echo -e "import sites/*.caddy\n" > /etc/caddy/Caddyfile
         : > "${CONF_DIR}/.caddyfile_created_by_script" 2>/dev/null || true
     elif ! grep -q "import sites/\*\.caddy" /etc/caddy/Caddyfile; then
@@ -1032,36 +1033,42 @@ install_node() {
     local hy_skip_cert="false"
     local cert_fell_back=""
 
-    echo -e "${CYAN}提示:${PLAIN}"
-    echo -e "${CYAN}  1. 用自有域名: 需先在 Cloudflare 添加 A 记录指向本机 IP (${server_ip})${PLAIN}"
-    echo -e "${CYAN}  2. CF 代理状态必须为【仅限 DNS】(灰色云朵)，小黄云会阻断 UDP${PLAIN}"
-    echo -e "${CYAN}  3. 直接回车 = IP 自签证书；skip = 只装 Reality${PLAIN}"
-    [[ -n "$old_domain" ]] && echo -e "${CYAN}  4. 当前已有域名 ${old_domain}，输入 keep 可沿用${PLAIN}"
+    local hy_domain=""
 
-    local hy_domain
-    while true; do
-        read -r -p "请输入域名 [回车=IP自签]: " hy_domain || hy_domain=""
-        [[ -z "$hy_domain" ]] && hy_domain="ip"
-
-        case "${hy_domain,,}" in
-            ip|self|selfsigned) hy_domain=""; break ;;
-            none|skip)          hy_domain="skip"; break ;;
-            keep)
-                if [[ -n "$old_domain" ]]; then
-                    hy_domain="$old_domain"
-                    echo -e "${BLUE}沿用已有域名: ${hy_domain}${PLAIN}"
-                    break
-                fi
-                echo -e "${YELLOW}当前没有已配置的域名，回退为 IP 自签证书。${PLAIN}"
-                hy_domain=""; break
-                ;;
-        esac
-
-        if [[ "$hy_domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$ ]]; then
-            break
+    # 1. 优先检测本地已存在的域名配置
+    if [[ -n "$old_domain" && "$old_domain" != "skip" ]]; then
+        echo -e "${GREEN}检测到当前已配置域名: ${CYAN}${old_domain}${PLAIN}"
+        local reuse_domain=""
+        read -r -p "是否继续使用此域名？[Y/n (回车沿用，输入 n 更换域名或使用 IP)]: " reuse_domain || reuse_domain=""
+        if [[ -z "$reuse_domain" || "${reuse_domain,,}" == "y" || "${reuse_domain,,}" == "yes" ]]; then
+            hy_domain="$old_domain"
+            echo -e "${BLUE}已选择沿用当前域名: ${hy_domain}${PLAIN}"
         fi
-        echo -e "${RED}域名格式非法: ${hy_domain}（示例: node.example.com）${PLAIN}"
-    done
+    fi
+
+    # 2. 若无已配置域名，或用户输入 n 放弃沿用，则提示输入
+    if [[ -z "$hy_domain" ]]; then
+        echo -e "${CYAN}提示:${PLAIN}"
+        echo -e "${CYAN}  1. 使用自有域名: 需在 Cloudflare 将域名 A 记录解析至本机 IP (${server_ip})${PLAIN}"
+        echo -e "${CYAN}  2. CF 代理状态必须为【仅限 DNS】(灰色云朵)，小黄云 CDN 会阻断 UDP${PLAIN}"
+        echo -e "${CYAN}  3. 直接回车 = 使用 IP 自签证书（10 年 ECC，客户端自动开启 skip-cert-verify）${PLAIN}"
+        echo -e "${CYAN}  4. 输入 skip = 跳过 Hysteria 2，仅部署 VLESS-Reality${PLAIN}"
+
+        while true; do
+            read -r -p "请输入域名 [回车=IP自签, skip=跳过Hy2]: " hy_domain || hy_domain=""
+            hy_domain=$(trim_string "$hy_domain")
+
+            case "${hy_domain,,}" in
+                ""|ip|self|selfsigned) hy_domain=""; break ;;
+                none|skip)            hy_domain="skip"; break ;;
+            esac
+
+            if validate_domain "$hy_domain"; then
+                break
+            fi
+            echo -e "${RED}域名格式非法: ${hy_domain}（示例: node.example.com）${PLAIN}"
+        done
+    fi
 
     local target_host="$hy_domain"
     local cf_token=""
@@ -1079,7 +1086,22 @@ install_node() {
         if [[ -n "${CF_TOKEN:-}" ]]; then
             cf_token="$CF_TOKEN"
         fi
-        if [[ -z "$cf_token" ]]; then
+
+        # 检查是否为沿用域名且本地已有配对且未过期的有效证书：若是，可免输 Token 直接复用！
+        local reuse_local_cert=false
+        if [[ "$hy_domain" == "$old_domain" ]] && [[ -s "${CERT_DIR}/fullchain.cer" && -s "${CERT_DIR}/private.key" ]]; then
+            if openssl x509 -in "${CERT_DIR}/fullchain.cer" -noout -checkend 86400 >/dev/null 2>&1; then
+                local d_crt_pub d_key_pub
+                d_crt_pub=$(openssl x509 -in "${CERT_DIR}/fullchain.cer" -noout -pubkey 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
+                d_key_pub=$(openssl pkey -in "${CERT_DIR}/private.key" -pubout 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
+                if [[ -n "$d_crt_pub" && "$d_crt_pub" == "$d_key_pub" ]]; then
+                    reuse_local_cert=true
+                    echo -e "${GREEN}检测到本地已有 ${hy_domain} 的有效证书，已自动复用（免输 CF Token）。${PLAIN}"
+                fi
+            fi
+        fi
+
+        if [[ -z "$cf_token" && "$reuse_local_cert" != "true" ]]; then
             echo -e "\n${CYAN}------------------- Cloudflare API Token 获取指引 -------------------${PLAIN}"
 echo -e "${CYAN} 1. 登录 CF -> 右上角头像 -> [配置文件] -> 左侧导航 [API 令牌]${PLAIN}"
 echo -e "${CYAN} 2. 点击 [创建令牌] -> 找到 [编辑区域 DNS (Edit zone DNS)] 点击 [使用模板]${PLAIN}"
@@ -1633,45 +1655,78 @@ ${GREEN}================== Hysteria 2 模块配置 ===================${PLAIN}"
                 local target_host="$SERVER_IP"
                 local hy_skip_cert="true"
 
-                while true; do
-                    echo -e "\n请输入你的自有域名 (直接回车继续使用 IP 自签证书):"
-                    read -r -p "域名: " hy_domain || hy_domain=""
-                    hy_domain=$(trim_string "$hy_domain")
-                    if [[ -z "$hy_domain" ]]; then
-                        echo -e "${GREEN}选择使用 IP 自签证书。${PLAIN}"
+                local old_hy_domain="${HY_DOMAIN:-}"
+                # 1. 优先检测当前已配置域名
+                if [[ -n "$old_hy_domain" && "$old_hy_domain" != "skip" ]]; then
+                    echo -e "${GREEN}检测到当前已配置域名: ${CYAN}${old_hy_domain}${PLAIN}"
+                    local reuse_d=""
+                    read -r -p "是否继续使用该域名？[Y/n (回车沿用，输入 n 更换域名或使用 IP)]: " reuse_d || reuse_d=""
+                    if [[ -z "$reuse_d" || "${reuse_d,,}" == "y" || "${reuse_d,,}" == "yes" ]]; then
+                        hy_domain="$old_hy_domain"
+                        echo -e "${BLUE}已选择沿用当前域名: ${hy_domain}${PLAIN}"
+                    fi
+                fi
+
+                # 2. 若未沿用，提示输入
+                if [[ -z "$hy_domain" ]]; then
+                    while true; do
+                        echo -e "\n请输入自有域名 (直接回车使用 IP 自签证书):"
+                        read -r -p "域名 [回车=IP自签]: " hy_domain || hy_domain=""
+                        hy_domain=$(trim_string "$hy_domain")
+                        if [[ -z "$hy_domain" ]]; then
+                            echo -e "${GREEN}选择使用 IP 自签证书。${PLAIN}"
+                            break
+                        fi
+                        if ! validate_domain "$hy_domain"; then
+                            echo -e "${RED}域名格式不合法（示例: node.example.com），请重新输入。${PLAIN}"; continue
+                        fi
                         break
+                    done
+                fi
+
+                if [[ -n "$hy_domain" ]]; then
+                    # 检查是否可复用本地有效证书
+                    local reuse_menu_cert=false
+                    if [[ "$hy_domain" == "$old_hy_domain" ]] && [[ -s "${CERT_DIR}/fullchain.cer" && -s "${CERT_DIR}/private.key" ]]; then
+                        if openssl x509 -in "${CERT_DIR}/fullchain.cer" -noout -checkend 86400 >/dev/null 2>&1; then
+                            local d_crt_pub d_key_pub
+                            d_crt_pub=$(openssl x509 -in "${CERT_DIR}/fullchain.cer" -noout -pubkey 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
+                            d_key_pub=$(openssl pkey -in "${CERT_DIR}/private.key" -pubout 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
+                            if [[ -n "$d_crt_pub" && "$d_crt_pub" == "$d_key_pub" ]]; then
+                                reuse_menu_cert=true
+                                echo -e "${GREEN}检测到本地已有 ${hy_domain} 的有效证书，已自动复用（免输 CF Token）。${PLAIN}"
+                            fi
+                        fi
                     fi
-                    if ! validate_domain "$hy_domain"; then
-                        echo -e "${RED}域名格式不合法（示例: node.example.com），请重新输入。${PLAIN}"; continue
-                    fi
-                    echo -e "\n${CYAN}------------------- Cloudflare API Token 获取指引 -------------------${PLAIN}"
+                    if [[ "$reuse_menu_cert" != "true" ]]; then
+                        echo -e "\n${CYAN}------------------- Cloudflare API Token 获取指引 -------------------${PLAIN}"
 echo -e "${CYAN} 1. 登录 CF -> 右上角头像 -> [配置文件] -> 左侧导航 [API 令牌]${PLAIN}"
 echo -e "${CYAN} 2. 点击 [创建令牌] -> 找到 [编辑区域 DNS (Edit zone DNS)] 点击 [使用模板]${PLAIN}"
 echo -e "${CYAN} 3. 区域资源选择: [包括] -> [特定区域] -> 选择你的域名${PLAIN}"
 echo -e "${CYAN} 4. 底部点击 [继续以显示摘要] -> 最终确认页点击 [创建令牌] 并复制生成的令牌${PLAIN}"
 echo -e "${CYAN}---------------------------------------------------------------------${PLAIN}"
-                    while true; do
-                        read -r -p "请输入 Cloudflare API Token: " cf_token || cf_token=""
-                        cf_token=$(trim_string "$cf_token")
-                        if [[ -z "$cf_token" ]]; then
-                            echo -e "${YELLOW}未输入 Token，将自动使用 IP 自签证书。${PLAIN}"
-                            hy_domain=""
-                            break
-                        fi
-                        if verify_cloudflare_token "$cf_token"; then
-                            break
-                        fi
-                        local retry=""
-                        read -r -p "是否重新输入 Token？[Y/n (回车重试，输入 n 使用 IP 自签)]: " retry || retry=""
-                        if [[ "${retry,,}" == "n" ]]; then
-                            echo -e "${YELLOW}已放弃域名证书，将自动使用 IP 自签证书。${PLAIN}"
-                            hy_domain=""
-                            cf_token=""
-                            break
-                        fi
-                    done
-                    break
-                done
+                        while true; do
+                            read -r -p "请输入 Cloudflare API Token: " cf_token || cf_token=""
+                            cf_token=$(trim_string "$cf_token")
+                            if [[ -z "$cf_token" ]]; then
+                                echo -e "${YELLOW}未输入 Token，将自动使用 IP 自签证书。${PLAIN}"
+                                hy_domain=""
+                                break
+                            fi
+                            if verify_cloudflare_token "$cf_token"; then
+                                break
+                            fi
+                            local retry=""
+                            read -r -p "是否重新输入 Token？[Y/n (回车重试，输入 n 使用 IP 自签)]: " retry || retry=""
+                            if [[ "${retry,,}" == "n" ]]; then
+                                echo -e "${YELLOW}已放弃域名证书，将自动使用 IP 自签证书。${PLAIN}"
+                                hy_domain=""
+                                cf_token=""
+                                break
+                            fi
+                        done
+                    fi
+                fi
 
                 local hy_port
                 while true; do

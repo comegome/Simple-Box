@@ -1983,7 +1983,7 @@ ${GREEN}================ 配置Clash 订阅地址 ================${PLAIN}"
 menu_singbox_manage() {
     while true; do
         [ -t 1 ] && clear
-        echo -e "\n${GREEN}=================== sing-box 内核管理 ===================${PLAIN}"
+        echo -e "\n${GREEN}=================== 管理 sing-box 内核 ===================${PLAIN}"
         echo -e " 1. 重启 / 启动 sing-box 服务"
         echo -e " 2. 检查并更新 sing-box 内核"
         echo -e " 3. 查看实时运行日志"
@@ -2038,9 +2038,9 @@ menu() {
         [[ -z "${cur_ip:-}" ]] && cur_ip=$(curl -s4m3 https://icanhazip.com 2>/dev/null || echo "检测中...")
         bbr_status=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "关闭")
         if [[ "$bbr_status" == "bbr" ]]; then
-            bbr_status="${GREEN}已开启 (bbr)${PLAIN}"
+            bbr_status="${GREEN}已开启${PLAIN}"
         else
-            bbr_status="${YELLOW}未开启 (${bbr_status})${PLAIN}"
+            bbr_status="${YELLOW}未开启${PLAIN}"
         fi
 
         # 2. 服务运行状态与版本提取
@@ -2065,7 +2065,7 @@ menu() {
                && command -v caddy &>/dev/null && systemctl is-active --quiet caddy; then
                 local p_tag="HTTP"
                 [[ "${SUB_PROTO:-}" == "https" ]] && p_tag="HTTPS"
-                caddy_status="${GREEN}运行中 (端口: ${sub_port} [${p_tag}])${PLAIN}"
+                caddy_status="${GREEN}运行中 (${p_tag}:${sub_port})${PLAIN}"
             elif command -v caddy &>/dev/null && systemctl is-active --quiet caddy; then
                 caddy_status="${YELLOW}无订阅站点${PLAIN}"
             else
@@ -2085,21 +2085,20 @@ menu() {
                 cert_display="IP 自签证书"
             fi
         fi
-        echo -e " 公网 IP : ${CYAN}${cur_ip}${PLAIN} | TLS 证书: ${CYAN}${cert_display}${PLAIN}"
-        echo -e " TCP 加速: ${bbr_status}"
-        echo -e " sing-box: ${sb_status}"
-        echo -e " Caddy订阅: ${caddy_status}"
+        echo -e " IP 地址: ${CYAN}${cur_ip}${PLAIN} | TLS 证书: ${CYAN}${cert_display}${PLAIN}"
+        echo -e " BBR 加速: ${bbr_status}"
+        echo -e " sing-box 内核: ${sb_status}"
+        echo -e " Caddy 代理: ${caddy_status}"
         
         if [[ -f "$ENV_FILE" ]]; then
-            local p_hy="未启用"
-            if [ "${HY_ENABLED:-true}" = true ]; then
-                if [[ -n "${HY_RANGE:-}" ]]; then
-                    p_hy="UDP ${HY_PORT:-8443} [跳跃: ${HY_RANGE}]"
-                else
-                    p_hy="UDP ${HY_PORT:-8443} [无跳跃]"
-                fi
+            local p_hy=""
+            if [[ -n "${HY_RANGE:-}" ]]; then
+                p_hy="UDP ${HY_PORT:-8443} [跳跃: ${HY_RANGE}]"
+            else
+                p_hy="UDP ${HY_PORT:-8443} [无跳跃]"
             fi
-            echo -e " 当前节点: ${BLUE}Reality: TCP ${VL_PORT:-443} | Hy2: ${p_hy}${PLAIN}"
+            echo -e " VLESS-Reality: ${BLUE}TCP ${VL_PORT:-443} [伪装: ${VL_SNI:-未配置}]${PLAIN}"
+            echo -e " Hysteria 2: ${BLUE}${p_hy}${PLAIN}"
             
             local proto=${SUB_PROTO:-http}
             local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
@@ -2120,7 +2119,7 @@ menu() {
         echo -e " 3. 配置Clash 订阅地址"
         echo -e " 4. 查看节点原生分享链接"
         echo -e " 5. 打开 / 关闭 TCP BBR 加速"
-        echo -e " 6. sing-box 内核管理"
+        echo -e " 6. 管理 sing-box 内核"
         echo -e " 7. 重新安装Simple-Box"
         echo -e " 8. 卸载 Simple-Box 脚本"
         echo -e " 0. 退出控制台"

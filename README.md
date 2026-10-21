@@ -114,11 +114,12 @@ simbo
             Simple-Box Manager - 控制台            
 ====================================================
  操作系统: Ubuntu 24.04.5 LTS (amd64)
- 公网 IP : 203.0.113.10 | TLS 证书: IP 自签证书
- TCP 加速: 已开启 (bbr)
- sing-box: 运行中 (v1.14.3)
- Caddy订阅: 运行中 (端口: 8444 [HTTP])
- 当前节点: Reality: TCP 443 | Hy2: UDP 8443 [跳跃: 20000:40000]
+ IP 地址: 203.0.113.10 | TLS 证书: IP 自签证书
+ BBR 加速: 已开启
+ sing-box 内核: 运行中 (v1.14.3)
+ Caddy 代理: 运行中 (HTTP:8444)
+ VLESS-Reality: TCP 443 [伪装: gateway.icloud.com]
+ Hysteria 2: UDP 8443 [跳跃: 20000:40000]
 ----------------------------------------------------
  在线订阅: http://203.0.113.10:8444/2dac50852729bf55bb61833d/config.yaml
  节点列表: http://203.0.113.10:8444/2dac50852729bf55bb61833d/provider.yaml
@@ -128,7 +129,7 @@ simbo
  3. 配置Clash 订阅地址
  4. 查看节点原生分享链接
  5. 打开 / 关闭 TCP BBR 加速
- 6. sing-box 内核管理
+ 6. 管理 sing-box 内核
  7. 重新安装Simple-Box
  8. 卸载 Simple-Box 脚本
  0. 退出控制台

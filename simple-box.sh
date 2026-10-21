@@ -242,7 +242,7 @@ manage_bbr() {
             target_action="disable"
         fi
 
-        echo -e "\n${GREEN}================== TCP BBR 加速管理 ===================${PLAIN}"
+        echo -e "\n${GREEN}================ 打开 / 关闭 TCP BBR 加速 ================${PLAIN}"
         echo -e " 当前状态: ${bbr_tag} | 队列规则: ${CYAN}${cur_qdisc}${PLAIN}"
         echo -e "${GREEN}-------------------------------------------------------${PLAIN}"
         echo -e " 1. ${action_desc}"
@@ -1359,7 +1359,7 @@ EOF
     fi
 
     echo -e "\n${GREEN}===================================================================${PLAIN}"
-    echo -e "${GREEN}🎉 Simple-Box 安装就绪！随时在终端输入 ${YELLOW}simbo${GREEN} 即可打开管理控制台。${PLAIN}"
+    echo -e "${GREEN}🎉 Simple-Box 安装就绪！随时在终端输入 ${YELLOW}simbo${GREEN} 即可打开控制台。${PLAIN}"
     echo -e "${GREEN}===================================================================${PLAIN}\n"
 }
 
@@ -1550,7 +1550,7 @@ uninstall_all() {
     echo -e "${YELLOW}本脚本自身的入口 (simbo) 也已删除，控制台即将退出。${PLAIN}"
     echo -e "${YELLOW}如需重装，请重新执行一键安装命令。${PLAIN}"
     echo -e "${CYAN}注: TCP BBR 是内核级 sysctl 设置（/etc/sysctl.d/99-bbr.conf），不属于本脚本，卸载不会还原。${PLAIN}"
-    echo -e "${CYAN}    如需恢复系统默认，请在卸载前先用「TCP BBR 加速管理」关闭，或手动删除该文件。${PLAIN}"
+    echo -e "${CYAN}    如需恢复系统默认，请在卸载前先用「打开 / 关闭 TCP BBR 加速」关闭，或手动删除该文件。${PLAIN}"
     # 卸载后目录与入口都已不存在，继续停留在菜单毫无意义（面板还会读到已删除的配置）
     UNINSTALL_DONE=true
 }
@@ -1571,8 +1571,8 @@ menu_reality_module() {
     while true; do
         [ -t 1 ] && clear
         echo -e "
-${GREEN}================= VLESS-Reality 模块配置 =================${PLAIN}"
-        echo -e " 1. 重置并更新 Reality 参数"
+${GREEN}================= 配置 VLESS-Reality 模块 =================${PLAIN}"
+        echo -e " 1. 重置并更新 VLESS-Reality 参数"
         echo -e " 0. 返回主菜单"
         echo -e "${GREEN}==========================================================${PLAIN}"
         local opt=""
@@ -1670,7 +1670,7 @@ menu_hy2_module() {
     while true; do
         [ -t 1 ] && clear
         echo -e "
-${GREEN}================== Hysteria 2 模块配置 ===================${PLAIN}"
+${GREEN}================== 配置 Hysteria 2 模块 ===================${PLAIN}"
         echo -e " 1. 重置并更新 Hysteria 2 参数"
         echo -e " 0. 返回主菜单"
         echo -e "${GREEN}==========================================================${PLAIN}"
@@ -1848,7 +1848,7 @@ echo -e "${CYAN}----------------------------------------------------------------
                 # 老版本 env.conf 没有 VL_PRIVKEY，缺失时无法重建 Reality，必须先补齐
                 if [[ -z "$vl_privkey" ]]; then
                     echo -e "${RED}环境配置缺少 Reality 私钥 (VL_PRIVKEY)，无法安全重建。${PLAIN}"
-                    echo -e "${YELLOW}请进入 [1] VLESS-Reality 模块配置 重新生成一次密钥，再回到此处。${PLAIN}"
+                    echo -e "${YELLOW}请进入 [1] 配置 VLESS-Reality 模块 重新生成一次密钥，再回到此处。${PLAIN}"
                     systemctl start sing-box 2>/dev/null || true
                     read -r -p "按回车键返回..." dummy || true
                     continue
@@ -1887,15 +1887,15 @@ menu_sub_module() {
     while true; do
         [ -t 1 ] && clear
         echo -e "
-${GREEN}================ 在线订阅站点模块配置 ================${PLAIN}"
-        echo -e " 1. 重置并更新在线订阅参数 (改端口 / 刷新 Token)"
+${GREEN}================ 配置Clash 订阅地址 ================${PLAIN}"
+        echo -e " 1. Clash 订阅地址参数"
         echo -e " 0. 返回主菜单"
         echo -e "${GREEN}======================================================${PLAIN}"
         local opt=""
         read -r -p "请输入选项 [0-1]: " opt || opt=""
         case "$opt" in
             1)
-                echo -e "\n${YELLOW}=== 重置并更新在线订阅参数 ===${PLAIN}"
+                echo -e "\n${YELLOW}=== Clash 订阅地址参数 ===${PLAIN}"
                 local sub_port
                 while true; do
                     read -r -p "请输入新的订阅监听端口 [默认 ${SUB_PORT}]: " sub_port || sub_port=""
@@ -2021,7 +2021,7 @@ menu() {
     while true; do
         [ -t 1 ] && clear
         echo -e "${GREEN}====================================================${PLAIN}"
-        echo -e "${GREEN}        Simple-Box Manager - 极简安全控制台        ${PLAIN}"
+        echo -e "${GREEN}            Simple-Box Manager - 控制台             ${PLAIN}"
         echo -e "${GREEN}====================================================${PLAIN}"
         
         # 1. 宿主机基本信息提取
@@ -2115,15 +2115,15 @@ menu() {
         fi
 
         echo -e "${GREEN}----------------------------------------------------${PLAIN}"
-        echo -e " 1. VLESS-Reality 模块配置"
-        echo -e " 2. Hysteria 2 模块配置"
-        echo -e " 3. 在线订阅站点模块配置"
-        echo -e " 4. 查看节点链接与二维码 (URI/QR Code)"
-        echo -e " 5. TCP BBR 加速管理"
+        echo -e " 1. 配置 VLESS-Reality 模块"
+        echo -e " 2. 配置 Hysteria 2 模块"
+        echo -e " 3. 配置Clash 订阅地址"
+        echo -e " 4. 查看节点原生分享链接"
+        echo -e " 5. 打开 / 关闭 TCP BBR 加速"
         echo -e " 6. sing-box 内核管理"
         echo -e " 7. 重新安装Simple-Box"
         echo -e " 8. 卸载 Simple-Box 脚本"
-        echo -e " 0. 退出管理控制台"
+        echo -e " 0. 退出控制台"
         echo -e "${GREEN}====================================================${PLAIN}"
         
         local opt=""

@@ -48,7 +48,7 @@ curl -fsSL https://cdn.jsdelivr.net/gh/comegome/simple-box@main/simple-box.sh -o
 
 ## ⌨️ 全局快捷指令
 
-安装成功后，随时在终端任意目录下输入 **`simbo`** 即可打开管理控制台：
+安装成功后，随时在终端任意目录下输入 **`simbo`** 即可打开控制台：
 
 ```bash
 simbo
@@ -111,7 +111,7 @@ simbo
 
 ```text
 ====================================================
-        Simple-Box Manager - 极简安全控制台        
+            Simple-Box Manager - 控制台            
 ====================================================
  操作系统: Ubuntu 24.04.5 LTS (amd64)
  公网 IP : 203.0.113.10 | TLS 证书: IP 自签证书
@@ -123,15 +123,15 @@ simbo
  在线订阅: http://203.0.113.10:8444/2dac50852729bf55bb61833d/config.yaml
  节点列表: http://203.0.113.10:8444/2dac50852729bf55bb61833d/provider.yaml
 ----------------------------------------------------
- 1. VLESS-Reality 模块配置
- 2. Hysteria 2 模块配置
- 3. 在线订阅站点模块配置
- 4. 查看节点链接与二维码 (URI/QR Code)
- 5. TCP BBR 加速管理
+ 1. 配置 VLESS-Reality 模块
+ 2. 配置 Hysteria 2 模块
+ 3. 配置Clash 订阅地址
+ 4. 查看节点原生分享链接
+ 5. 打开 / 关闭 TCP BBR 加速
  6. sing-box 内核管理
  7. 重新安装Simple-Box
  8. 卸载 Simple-Box 脚本
- 0. 退出管理控制台
+ 0. 退出控制台
 ====================================================
 ```
 

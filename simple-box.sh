@@ -407,9 +407,6 @@ clear_port_hopping() {
             | grep -F -- "--dport $r " | grep -oP -- '--to-ports \K[0-9]+' | head -1 || true)
         if [[ -n "$tport" ]]; then
             iptables -t nat -D PREROUTING -p udp --dport "$r" -j REDIRECT --to-ports "$tport" 2>/dev/null || true
-            if command -v ip6tables &>/dev/null; then
-                ip6tables -t nat -D PREROUTING -p udp --dport "$r" -j REDIRECT --to-ports "$tport" 2>/dev/null || true
-            fi
         fi
     done
     if command -v netfilter-persistent &>/dev/null; then
@@ -425,10 +422,6 @@ setup_port_hopping() {
     echo -e "${BLUE}配置 Hysteria 2 端口跳跃 (UDP ${range} -> ${hy_port})...${PLAIN}"
     iptables -t nat -D PREROUTING -p udp --dport "$range" -j REDIRECT --to-ports "$hy_port" 2>/dev/null || true
     iptables -t nat -A PREROUTING -p udp --dport "$range" -j REDIRECT --to-ports "$hy_port"
-    if command -v ip6tables &>/dev/null; then
-        ip6tables -t nat -D PREROUTING -p udp --dport "$range" -j REDIRECT --to-ports "$hy_port" 2>/dev/null || true
-        ip6tables -t nat -A PREROUTING -p udp --dport "$range" -j REDIRECT --to-ports "$hy_port" 2>/dev/null || true
-    fi
 
     if command -v netfilter-persistent &>/dev/null; then
         netfilter-persistent save >/dev/null 2>&1 || true
@@ -512,6 +505,7 @@ setup_caddy_subscription() {
         cat > "/etc/caddy/sites/simple-box-sub.caddy" <<EOF
 # Simple-Box HTTPS 订阅分发站点 (域名 CA 证书)
 :${sub_port} {
+    bind 0.0.0.0
     tls ${CERT_DIR}/fullchain.cer ${CERT_DIR}/private.key
 
     @sub path /${token}/config.yaml /${token}/provider.yaml /${token}/links.txt
@@ -530,7 +524,7 @@ EOF
         echo -e "${BLUE}配置 Caddy HTTP 订阅分发站点 (端口 ${sub_port}, 客户端直接导入免证书报错)...${PLAIN}"
         cat > "/etc/caddy/sites/simple-box-sub.caddy" <<EOF
 # Simple-Box HTTP 订阅分发站点 (IP 自签兼容模式)
-http://:${sub_port} {
+http://0.0.0.0:${sub_port} {
     @sub path /${token}/config.yaml /${token}/provider.yaml /${token}/links.txt
     handle @sub {
         root * ${WEB_DIR}
@@ -741,7 +735,7 @@ write_singbox_config() {
     {
       "type": "vless",
       "tag": "vless-reality-in",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": ${vl_port},
       "users": [
         {
@@ -773,7 +767,7 @@ EOF
     {
       "type": "hysteria2",
       "tag": "hy2-in",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": ${hy_port},
       "users": [
         {
@@ -1259,9 +1253,6 @@ uninstall_all() {
         if [[ -n "${HY_RANGE:-}" && -n "${HY_PORT:-}" ]]; then
             echo -e "${BLUE}精准清理端口跳跃规则...${PLAIN}"
             iptables -t nat -D PREROUTING -p udp --dport "$HY_RANGE" -j REDIRECT --to-ports "$HY_PORT" 2>/dev/null || true
-            if command -v ip6tables &>/dev/null; then
-                ip6tables -t nat -D PREROUTING -p udp --dport "$HY_RANGE" -j REDIRECT --to-ports "$HY_PORT" 2>/dev/null || true
-            fi
             if command -v netfilter-persistent &>/dev/null; then
                 netfilter-persistent save >/dev/null 2>&1 || true
             fi

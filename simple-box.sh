@@ -1384,6 +1384,7 @@ show_links() {
 # 彻底干净卸载
 uninstall_all() {
     echo -e "${YELLOW}警告: 即将彻底卸载 sing-box 并清除所有节点、订阅与证书配置！${PLAIN}"
+    echo -e "${YELLOW}      同时会删除 ${CONF_DIR}、/usr/local/share/simple-box 以及 simbo 入口本身。${PLAIN}"
     local confirm=""
     read -r -p "确认卸载吗？(y/N): " confirm || confirm=""
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && echo "已取消。" && return 0
@@ -1420,12 +1421,17 @@ uninstall_all() {
         fi
     fi
 
-    rm -f /usr/local/bin/sing-box /usr/local/bin/sing-box.bak.* 2>/dev/null || true
+    rm -f /usr/local/bin/sing-box
+    rm -f /usr/local/bin/sing-box.bak.* 2>/dev/null || true
     rm -f /usr/local/bin/simbo
     rm -rf /usr/local/share/simple-box
     rm -rf "$CONF_DIR"
 
     echo -e "${GREEN}sing-box 与订阅配置已彻底干净卸载！${PLAIN}"
+    echo -e "${YELLOW}本脚本自身的入口 (simbo) 也已删除，控制台即将退出。${PLAIN}"
+    echo -e "${YELLOW}如需重装，请重新执行一键安装命令。${PLAIN}"
+    # 卸载后目录与入口都已不存在，继续停留在菜单毫无意义（面板还会读到已删除的配置）
+    UNINSTALL_DONE=true
 }
 
 # 交互控制台主循环
@@ -1899,16 +1905,22 @@ menu() {
             fi
         fi
 
-        local caddy_status="${RED}未运行${PLAIN}"
+        local caddy_status="${RED}未配置${PLAIN}"
         local sub_port="8444"
         if [[ -f "$ENV_FILE" ]]; then
             set +e; source "$ENV_FILE"; set -e
             sub_port=${SUB_PORT:-8444}
-        fi
-        if command -v caddy &>/dev/null && systemctl is-active --quiet caddy; then
-            local p_tag="HTTP"
-            [[ "${SUB_PROTO:-}" == "https" ]] && p_tag="HTTPS"
-            caddy_status="${GREEN}运行中 (端口: ${sub_port} [${p_tag}])${PLAIN}"
+            # 只有本脚本的站点配置存在时才报告订阅在运行，避免卸载后误显示
+            if [[ -f /etc/caddy/sites/simple-box-sub.caddy ]] \
+               && command -v caddy &>/dev/null && systemctl is-active --quiet caddy; then
+                local p_tag="HTTP"
+                [[ "${SUB_PROTO:-}" == "https" ]] && p_tag="HTTPS"
+                caddy_status="${GREEN}运行中 (端口: ${sub_port} [${p_tag}])${PLAIN}"
+            elif command -v caddy &>/dev/null && systemctl is-active --quiet caddy; then
+                caddy_status="${YELLOW}无订阅站点${PLAIN}"
+            else
+                caddy_status="${RED}未运行${PLAIN}"
+            fi
         fi
 
         # 3. 打印系统面板
@@ -1974,7 +1986,13 @@ menu() {
             5) manage_bbr || true ;;
             6) menu_singbox_manage || true ;;
             7) install_node || true ;;
-            8) uninstall_all || true ;;
+            8)
+                uninstall_all || true
+                # 卸载已彻底完成：脚本与配置目录均被删除，直接退出
+                if [[ "${UNINSTALL_DONE:-false}" == "true" ]]; then
+                    exit 0
+                fi
+                ;;
             0) echo -e "${GREEN}已退出。随时输入 simbo 即可重新打开面板。${PLAIN}"; exit 0 ;;
             *) echo -e "${RED}无效选项！${PLAIN}"; sleep 1 ;;
         esac

@@ -2028,9 +2028,16 @@ if [[ -z "$_ENTRY_SRC" || "$_ENTRY_SRC" == "$0" ]]; then
     case "${1:-}" in
         install|reinstall) install_node || exit 1 ;;
         "")
-            # 未安装时直接进入安装向导，而不是弹出一个全是「未配置 / 未运行」的空面板
-            if [[ ! -f "$ENV_FILE" && ! -f /usr/local/bin/sing-box ]]; then
-                echo -e "${YELLOW}未检测到已安装的 Simple-Box，正在进入安装向导...${PLAIN}"
+            # 判定依据只能是「配置是否存在」，不能看二进制：
+            # 卸载会删配置目录，但残留的 sing-box 二进制（或旧版本卸载未清理）会让
+            # 「二进制在、配置没了」这种半残状态被误判成已安装，于是直接弹空面板，
+            # 表现为「假安装」—— 瞬间进菜单、全是未配置/未运行。
+            if [[ ! -f "$ENV_FILE" ]]; then
+                if [[ -f /usr/local/bin/sing-box ]]; then
+                    echo -e "${YELLOW}检测到残留的 sing-box 内核但无配置，视为未安装，正在进入安装向导...${PLAIN}"
+                else
+                    echo -e "${YELLOW}未检测到已安装的 Simple-Box，正在进入安装向导...${PLAIN}"
+                fi
                 install_node || exit 1
             else
                 menu

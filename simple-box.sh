@@ -36,15 +36,39 @@ get_arch() {
     esac
 }
 
+# 端口与端口段合法性校验
+validate_port() {
+    local p="$1"
+    [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
+    (( p >= 1 && p <= 65535 ))
+}
+
+validate_range() {
+    local r="$1"
+    [[ "$r" =~ ^([0-9]{1,5}):([0-9]{1,5})$ ]] || return 1
+    local s="${BASH_REMATCH[1]}" e="${BASH_REMATCH[2]}"
+    (( s >= 1 && e <= 65535 && e > s ))
+}
+
 # 端口冲突检测
 check_port_occupied() {
     local port="$1"
     local proto="$2"
     local in_use=""
+    local lister="ss"
+    command -v ss &>/dev/null || lister="netstat"
     if [[ "$proto" == "tcp" ]]; then
-        in_use=$(ss -tlnp 2>/dev/null | grep -E "[: ]${port} " || true)
+        if [[ "$lister" == "ss" ]]; then
+            in_use=$(ss -tlnp 2>/dev/null | grep -E "[: ]${port} " || true)
+        else
+            in_use=$(netstat -tlnp 2>/dev/null | grep -E "[: ]${port} " || true)
+        fi
     elif [[ "$proto" == "udp" ]]; then
-        in_use=$(ss -ulnp 2>/dev/null | grep -E "[: ]${port} " || true)
+        if [[ "$lister" == "ss" ]]; then
+            in_use=$(ss -ulnp 2>/dev/null | grep -E "[: ]${port} " || true)
+        else
+            in_use=$(netstat -ulnp 2>/dev/null | grep -E "[: ]${port} " || true)
+        fi
     fi
     if [[ -n "$in_use" ]]; then
         if echo "$in_use" | grep -q "sing-box"; then
@@ -76,9 +100,12 @@ install_deps() {
             export DEBIAN_FRONTEND=noninteractive
             echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections 2>/dev/null || true
             echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections 2>/dev/null || true
-            apt-get update -qq && apt-get install -y -qq "${missing[@]}" iptables-persistent
+            apt-get update -qq || echo -e "${YELLOW}apt-get update 失败，尝试直接安装。${PLAIN}"
+            apt-get install -y -qq "${missing[@]}" iptables-persistent \
+                || echo -e "${YELLOW}部分依赖安装失败，将尝试继续（缺少 qrencode 仅影响二维码显示）。${PLAIN}"
         elif command -v yum &>/dev/null; then
-            yum install -y epel-release && yum install -y "${missing[@]}"
+            yum install -y epel-release >/dev/null 2>&1 || true
+            yum install -y "${missing[@]}" || echo -e "${YELLOW}部分依赖安装失败，将尝试继续。${PLAIN}"
         fi
     fi
 }
@@ -177,11 +204,21 @@ update_singbox_core() {
         fi
     fi
 
-    local url="https://github.com/SagerNet/sing-box/releases/download/${tag}/sing-box-${version:-$latest_ver}-linux-${arch}.tar.gz"
+    local url="https://github.com/SagerNet/sing-box/releases/download/${tag}/sing-box-${latest_ver}-linux-${arch}.tar.gz"
     local tmp_dir=$(mktemp -d)
-    
+    local tmp_tar="${tmp_dir}/sing-box.tar.gz"
+
     echo -e "${BLUE}正在下载并更新内核...${PLAIN}"
-    curl -sSL "$url" | tar -xz -C "$tmp_dir" --strip-components=1
+    if ! curl -fsSL "$url" -o "$tmp_tar"; then
+        echo -e "${RED}内核下载失败（网络不通或该版本无 ${arch} 构建），已保留现有版本。${PLAIN}"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
+    if ! tar -xzf "$tmp_tar" -C "$tmp_dir" --strip-components=1 2>/dev/null; then
+        echo -e "${RED}内核压缩包解压失败，已保留现有版本。${PLAIN}"
+        rm -rf "$tmp_dir"
+        return 1
+    fi
     if [[ -f "$tmp_dir/sing-box" ]]; then
         install -m 755 "$tmp_dir/sing-box" /usr/local/bin/sing-box
         rm -rf "$tmp_dir"
@@ -198,59 +235,75 @@ update_singbox_core() {
 }
 
 # 证书管理（支持 CF API 证书与无域名自签证书）
+# 结果通过全局 CERT_MODE 回传: domain | selfsigned
+CERT_MODE=""
 issue_cert_bundle() {
     local domain="$1"
     local cf_token="$2"
     local server_ip="$3"
     local acme_bin="$HOME/.acme.sh/acme.sh"
+    CERT_MODE="selfsigned"
 
     mkdir -p "$CERT_DIR"
 
-    # 模式 A: 用户提供了自有域名与 CF Token
+    # 模式 A: 自有域名 + CF Token，走 DNS-01 申请 Let's Encrypt
     if [[ -n "$domain" && -n "$cf_token" ]]; then
         echo -e "${BLUE}配置 acme.sh 证书环境...${PLAIN}"
-        if [ ! -f "$acme_bin" ]; then
-            curl -sSL https://get.acme.sh | sh -s email="admin@${domain}"
+        if [[ ! -f "$acme_bin" ]]; then
+            curl -sSL https://get.acme.sh | sh -s email="admin@${domain}" || true
         fi
-
-        export CF_Token="$cf_token"
-        if [[ -f "$HOME/.acme.sh/${domain}_ecc/fullchain.cer" && -f "$HOME/.acme.sh/${domain}_ecc/${domain}.key" ]]; then
-            echo -e "${GREEN}检测到本地已有 ${domain} 的有效证书，直接同步部署...${PLAIN}"
+        if [[ ! -f "$acme_bin" ]]; then
+            echo -e "${RED}acme.sh 安装失败（无法访问 get.acme.sh）。${PLAIN}"
         else
-            echo -e "${BLUE}通过 Cloudflare DNS API 申请全新证书...${PLAIN}"
-            "$acme_bin" --set-default-ca --server letsencrypt
-            "$acme_bin" --issue --dns dns_cf -d "$domain" --dnssleep 20 --keylength ec-256 --force
+            export CF_Token="$cf_token"
+            if [[ -f "$HOME/.acme.sh/${domain}_ecc/fullchain.cer" && -f "$HOME/.acme.sh/${domain}_ecc/${domain}.key" ]]; then
+                echo -e "${GREEN}检测到本地已有 ${domain} 的证书，直接同步部署...${PLAIN}"
+            else
+                echo -e "${BLUE}通过 Cloudflare DNS API 申请证书（DNS-01，无需 80 端口）...${PLAIN}"
+                "$acme_bin" --set-default-ca --server letsencrypt || true
+                "$acme_bin" --issue --dns dns_cf -d "$domain" --dnssleep 20 --keylength ec-256 --force || true
+            fi
+            "$acme_bin" --install-cert -d "$domain" --ecc \
+                --fullchain-file "${CERT_DIR}/fullchain.cer" \
+                --key-file "${CERT_DIR}/private.key" \
+                --reloadcmd "systemctl reload sing-box 2>/dev/null || true; systemctl reload caddy 2>/dev/null || true" || true
         fi
+    fi
 
-        "$acme_bin" --install-cert -d "$domain" --ecc \
-            --fullchain-file "${CERT_DIR}/fullchain.cer" \
-            --key-file "${CERT_DIR}/private.key" \
-            --reloadcmd "systemctl reload sing-box 2>/dev/null || true; systemctl reload caddy 2>/dev/null || true"
+    # 校验：域名证书是否真的落地（含有效期）
+    local ok=false
+    if [[ -s "${CERT_DIR}/fullchain.cer" && -s "${CERT_DIR}/private.key" ]]; then
+        if openssl x509 -in "${CERT_DIR}/fullchain.cer" -noout -checkend 0 >/dev/null 2>&1; then
+            ok=true
+        fi
+    fi
+
+    if [[ "$ok" == true && -n "$domain" && -n "$cf_token" ]]; then
+        CERT_MODE="domain"
+        echo -e "${GREEN}域名证书部署成功: ${domain}${PLAIN}"
     else
-        # 模式 B: 无自有域名，降级为 10年 ECC 自签证书 (针对公网 IP 签发)
-        echo -e "${YELLOW}未配置自有域名，正在为服务器 IP (${server_ip}) 生成 10 年自签 ECC 证书...${PLAIN}"
+        [[ -n "$domain" ]] && {
+            echo -e "${RED}域名证书申请失败（Token 权限、域名拼写或 CF 网络问题）。${PLAIN}"
+            echo -e "${YELLOW}已自动降级为 10 年期 IP 自签证书，保证节点立即可用。${PLAIN}"
+        }
+        # 模式 B: 为公网 IP 生成 10 年自签 ECC 证书
+        [[ -z "$domain" ]] && echo -e "${YELLOW}为服务器 IP (${server_ip}) 生成 10 年期自签 ECC 证书...${PLAIN}"
+        rm -f "${CERT_DIR}/fullchain.cer" "${CERT_DIR}/private.key"
         openssl ecparam -genkey -name prime256v1 -out "${CERT_DIR}/private.key" >/dev/null 2>&1
         openssl req -new -x509 -days 3650 -key "${CERT_DIR}/private.key" -out "${CERT_DIR}/fullchain.cer" \
             -subj "/CN=${server_ip}" -addext "subjectAltName=IP:${server_ip},IP:127.0.0.1" >/dev/null 2>&1
+        CERT_MODE="selfsigned"
     fi
 
     chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
     chmod 644 "${CERT_DIR}"/* 2>/dev/null || true
 
-    if [[ ! -f "${CERT_DIR}/fullchain.cer" || ! -f "${CERT_DIR}/private.key" ]]; then
-        echo -e "${RED}警告: Cloudflare 证书申请未成功 (请检查 Token 权限或域名拼写)！${PLAIN}"
-        echo -e "${YELLOW}触发安全防护机制: 自动平滑降级为 10 年期 IP 自签证书，确保节点立即可用...${PLAIN}"
-        openssl ecparam -genkey -name prime256v1 -out "${CERT_DIR}/private.key" >/dev/null 2>&1
-        openssl req -new -x509 -days 3650 -key "${CERT_DIR}/private.key" -out "${CERT_DIR}/fullchain.cer" \
-            -subj "/CN=${server_ip}" -addext "subjectAltName=IP:${server_ip},IP:127.0.0.1" >/dev/null 2>&1
-        TARGET_HOST="$server_ip"
-        target_host="$server_ip"
-        hy_skip_cert="true"
-        hy_domain=""
+    if [[ ! -s "${CERT_DIR}/fullchain.cer" || ! -s "${CERT_DIR}/private.key" ]]; then
+        echo -e "${RED}致命错误: 证书文件未能生成，请检查 openssl 是否可用。${PLAIN}"
+        return 1
     fi
-    chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
-    chmod 644 "${CERT_DIR}"/* 2>/dev/null || true
-    echo -e "${GREEN}TLS 证书环境已就绪安装至 ${CERT_DIR}！${PLAIN}"
+    echo -e "${GREEN}TLS 证书已就绪: ${CERT_DIR} (模式: ${CERT_MODE})${PLAIN}"
+    return 0
 }
 
 # 端口跳跃 iptables 规则配置
@@ -319,7 +372,12 @@ EOF
     fi
 
     chmod 755 "$WEB_DIR" 2>/dev/null || true
-    systemctl restart caddy
+    if ! command -v caddy &>/dev/null; then
+        echo -e "${RED}Caddy 未安装成功，在线订阅不可用。${PLAIN}"
+        echo -e "${YELLOW}节点本身不受影响；可稍后手动安装 Caddy 再重跑本项。${PLAIN}"
+        return 0
+    fi
+    systemctl restart caddy || echo -e "${RED}Caddy 重启失败，请查看 journalctl -u caddy。${PLAIN}"
 }
 
 # 组装客户端订阅与独立链接
@@ -354,6 +412,9 @@ generate_full_client_config() {
         echo "mode: rule" >> "$full_config_file"
     fi
 
+    local ports_line=""
+    [[ -n "$hy_ports_display" && "$hy_ports_display" == *,* ]] && ports_line="    ports: \"${hy_ports_display}\""
+
     cat >> "$full_config_file" <<EOF
 
 # ==================== Simple-Box 动态生成节点 ====================
@@ -380,7 +441,7 @@ EOF
     type: hysteria2
     server: ${domain_or_ip}
     port: ${hy_port}
-    ports: "${hy_ports_display}"
+${ports_line}
     password: "${hy_password}"
     sni: ${domain_or_ip}
     skip-cert-verify: ${hy_skip_cert}
@@ -401,7 +462,7 @@ EOF
       - "${node_prefix}-Hysteria2"
 EOF
     fi
-    echo "      - "DIRECT"" >> "$full_config_file"
+    printf '      - "DIRECT"\n' >> "$full_config_file"
 
     # 2. 组装纯 Provider 片段
     local provider_file="${WEB_DIR}/sub_${token}/provider.yaml"
@@ -429,7 +490,7 @@ EOF
     type: hysteria2
     server: ${domain_or_ip}
     port: ${hy_port}
-    ports: "${hy_ports_display}"
+${ports_line}
     password: "${hy_password}"
     sni: ${domain_or_ip}
     skip-cert-verify: ${hy_skip_cert}
@@ -445,54 +506,124 @@ EOF
     if [ "$hy_enabled" = true ]; then
         local insecure_flag="0"
         [[ "$hy_skip_cert" == "true" ]] && insecure_flag="1"
-        local hy2_link="hysteria2://${hy_password}@${domain_or_ip}:${hy_port}/?sni=${domain_or_ip}&insecure=${insecure_flag}&mport=${hy_ports_display}#${node_prefix}-Hysteria2"
+        local mport_param=""
+        [[ -n "$hy_ports_display" && "$hy_ports_display" == *,* ]] && mport_param="&mport=${hy_ports_display}"
+        local hy2_link="hysteria2://${hy_password}@${domain_or_ip}:${hy_port}/?sni=${domain_or_ip}&insecure=${insecure_flag}${mport_param}#${node_prefix}-Hysteria2"
         echo "$hy2_link" >> "$links_out"
     fi
     cp -f "$links_out" "$LINKS_FILE"
 }
 
+# 注册全局 simbo 指令（兼容 bash <(curl ...) 管道执行）
+install_simbo_command() {
+    local share_dir="/usr/local/share/simple-box"
+    local target="${share_dir}/simple-box.sh"
+
+    mkdir -p "$share_dir"
+
+    if [[ -f "$0" && -r "$0" ]]; then
+        # 本地脚本文件直接复制
+        install -m 755 "$0" "$target" 2>/dev/null || cp -f "$0" "$target" 2>/dev/null || true
+    fi
+
+    # 管道执行（$0 为 /dev/fd/xx）或复制失败时，从仓库拉取一份落地
+    if [[ ! -s "$target" ]]; then
+        curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/simple-box.sh -o "$target" 2>/dev/null || true
+        chmod 755 "$target" 2>/dev/null || true
+    fi
+
+    if [[ -s "$target" ]]; then
+        ln -sf "$target" /usr/local/bin/simbo
+        echo -e "${GREEN}已注册全局指令: simbo${PLAIN}"
+    else
+        echo -e "${YELLOW}未能自动注册 simbo 指令，可稍后手动: curl -fsSL <脚本地址> -o /usr/local/bin/simbo${PLAIN}"
+    fi
+}
+
 # 部署与配置主函数
 install_node() {
     install_deps
-    [[ ! -f /usr/local/bin/sing-box ]] && update_singbox_core "force"
+
+    if [[ ! -f /usr/local/bin/sing-box ]]; then
+        update_singbox_core "force" || { echo -e "${RED}内核安装失败，无法继续。${PLAIN}"; return 1; }
+    fi
 
     mkdir -p "$CONF_DIR" "$WEB_DIR"
-    local server_ip=$(curl -s4m5 https://icanhazip.com || curl -s4m5 https://api.ipify.org || echo "YOUR_SERVER_IP")
+
+    # 读取既有配置，作为重置时的默认值（直接回车即沿用）
+    local old_vl_port="" old_vl_sni="" old_hy_port="" old_hy_range="" old_sub_port="" old_prefix="" old_domain=""
+    if [[ -f "$ENV_FILE" ]]; then
+        source "$ENV_FILE"
+        old_vl_port="$VL_PORT"; old_vl_sni="$VL_SNI"; old_hy_port="$HY_PORT"
+        old_hy_range="$HY_RANGE"; old_sub_port="$SUB_PORT"; old_prefix="$NODE_PREFIX"
+        [[ "$HY_SKIP_CERT" != "true" ]] && old_domain="$HY_DOMAIN"
+    fi
+
+    local server_ip
+    server_ip=$(curl -s4m5 https://icanhazip.com || curl -s4m5 https://api.ipify.org || true)
+    server_ip=${server_ip:-}
+    if ! [[ "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+        echo -e "${RED}无法探测本机公网 IPv4（curl icanhazip/ipify 均失败）。${PLAIN}"
+        echo -e "${YELLOW}自签证书需要真实公网 IP，请检查网络后重试。${PLAIN}"
+        return 1
+    fi
 
     echo -e "\n${YELLOW}=== 1. 配置 VLESS-Reality 参数 ===${PLAIN}"
+    local vl_port
     while true; do
-        if [[ -z "$VL_PORT" ]]; then
-            read -p "请输入 Reality 监听端口 [默认 443]: " vl_port
+        read -r -p "请输入 Reality 监听端口 [默认 ${old_vl_port:-443}]: " vl_port || vl_port=""
+        vl_port=${vl_port:-${old_vl_port:-443}}
+        if ! validate_port "$vl_port"; then
+            echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
         fi
-        vl_port=${vl_port:-${VL_PORT:-443}}
-        if check_port_occupied "$vl_port" "tcp"; then
-            break
-        else
-            echo -e "${YELLOW}请更换其他未占用的端口！${PLAIN}"
-            VL_PORT=""
-            vl_port=""
-        fi
+        if check_port_occupied "$vl_port" "tcp"; then break; fi
+        echo -e "${YELLOW}请更换其他未占用的端口！${PLAIN}"
     done
 
-    if [[ -z "$VL_SNI" ]]; then
-        read -p "请输入 Reality 借壳伪装域名 [默认 gateway.icloud.com]: " vl_sni
+    local vl_sni
+    read -r -p "请输入 Reality 借壳伪装域名 [默认 ${old_vl_sni:-gateway.icloud.com}]: " vl_sni || vl_sni=""
+    vl_sni=${vl_sni:-${old_vl_sni:-gateway.icloud.com}}
+    if [[ "$vl_sni" == "$server_ip" ]]; then
+        echo -e "${RED}Reality 伪装域名不能是本机 IP（必须为可正常访问 TLS 1.3 的站点）。${PLAIN}"
+        return 1
     fi
-    vl_sni=${vl_sni:-${VL_SNI:-gateway.icloud.com}}
 
     echo -e "\n${YELLOW}=== 2. 配置 Hysteria 2 参数 ===${PLAIN}"
     local hy_enabled=true
     local hy_skip_cert="false"
+    local cert_fell_back=""
 
-    if [[ -z "$HY_DOMAIN" ]]; then
-        echo -e "${CYAN}重要提示:${PLAIN}"
-        echo -e "${CYAN}  1. 若使用自有域名，请确保已在 Cloudflare 添加 A 记录解析到本服务器 IP (${server_ip})${PLAIN}"
-        echo -e "${CYAN}  2. Cloudflare 代理状态必须为【仅限 DNS】(灰色云朵，切勿开启小黄云 CDN，否则阻断 UDP)${PLAIN}"
-        echo -e "${CYAN}  3. 若无域名可直接回车，将自动生成 10 年自签证书基于公网 IP 直连启用 Hysteria 2${PLAIN}"
-                local cert_hint="直接回车使用 IP 自签证书"
-        [[ -f "${CERT_DIR}/fullchain.cer" ]] && cert_hint="直接回车继续使用当前证书 / IP 自签证书"
-        read -p "请输入你的自有域名 [${cert_hint}，输入 skip 完全跳过]: " hy_domain
+    echo -e "${CYAN}提示:${PLAIN}"
+    echo -e "${CYAN}  1. 用自有域名: 需先在 Cloudflare 添加 A 记录指向本机 IP (${server_ip})${PLAIN}"
+    echo -e "${CYAN}  2. CF 代理状态必须为【仅限 DNS】(灰色云朵)，小黄云会阻断 UDP${PLAIN}"
+    echo -e "${CYAN}  3. 直接回车 = IP 自签证书；skip = 只装 Reality${PLAIN}"
+    [[ -n "$old_domain" ]] && echo -e "${CYAN}  4. 当前已有域名 ${old_domain}，输入 keep 可沿用${PLAIN}"
+
+    local hy_domain
+    read -r -p "请输入域名 [回车=IP自签]: " hy_domain || hy_domain=""
+    if [[ -z "$hy_domain" ]]; then
+        hy_domain="ip"
     fi
-    hy_domain=${hy_domain:-$HY_DOMAIN}
+    case "${hy_domain,,}" in
+        ip|self|selfsigned) hy_domain="" ;;
+        none) hy_domain="skip" ;;
+        keep)
+            if [[ -n "$old_domain" ]]; then
+                hy_domain="$old_domain"
+                echo -e "${BLUE}沿用已有域名: ${hy_domain}${PLAIN}"
+            else
+                echo -e "${YELLOW}当前没有已配置的域名，回退为 IP 自签证书。${PLAIN}"
+                hy_domain=""
+            fi
+            ;;
+    esac
+    # 用户输入合法域名时做基础格式校验
+    if [[ -n "$hy_domain" && "$hy_domain" != "skip" ]]; then
+        if ! [[ "$hy_domain" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$ ]]; then
+            echo -e "${RED}域名格式非法: ${hy_domain}${PLAIN}"
+            return 1
+        fi
+    fi
 
     local target_host="$hy_domain"
     local cf_token=""
@@ -512,58 +643,80 @@ install_node() {
             echo -e "${CYAN} 2. 点击 [创建令牌] -> 找到 [编辑区域 DNS (Edit zone DNS)] 点击使用模板${PLAIN}"
             echo -e "${CYAN} 3. 区域资源选择: 包含 -> 特定区域 -> 选择你的域名 -> 点击创建并复制${PLAIN}"
             echo -e "${CYAN}---------------------------------------------------------------------${PLAIN}"
-            read -p "请输入 Cloudflare API Token: " cf_token
+            read -r -p "请输入 Cloudflare API Token: " cf_token || cf_token=""
         fi
-        cf_token=${cf_token:-$CF_TOKEN}
-        [[ -z "$cf_token" ]] && echo -e "${RED}CF Token 不能为空！${PLAIN}" && exit 1
+        if [[ -z "$cf_token" ]]; then
+            echo -e "${RED}未提供 CF Token，无法申请域名证书。${PLAIN}"
+            echo -e "${YELLOW}已自动回退为 IP 自签证书模式继续安装。${PLAIN}"
+            target_host="$server_ip"
+            hy_skip_cert="true"
+            hy_domain=""
+            cert_fell_back="true"
+        fi
     fi
 
-    local hy_port="8443"
-    local hy_range="20000:40000"
+    local hy_port=""
+    local hy_range=""
 
     if [ "$hy_enabled" = true ]; then
+        hy_port="8443"
+        hy_range="20000:40000"
         while true; do
-            if [[ -z "$HY_PORT" ]]; then
-                read -p "请输入 Hysteria 2 主监听 UDP 端口 [默认 8443]: " hy_port
+            read -r -p "请输入 Hysteria 2 主监听 UDP 端口 [默认 ${old_hy_port:-8443}]: " hy_port || hy_port=""
+            hy_port=${hy_port:-${old_hy_port:-8443}}
+            if ! validate_port "$hy_port"; then
+                echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
             fi
-            hy_port=${hy_port:-${HY_PORT:-8443}}
-            if check_port_occupied "$hy_port" "udp"; then
-                break
-            else
-                echo -e "${YELLOW}请更换其他未占用的 UDP 端口！${PLAIN}"
-                HY_PORT=""
-                hy_port=""
-            fi
+            if check_port_occupied "$hy_port" "udp"; then break; fi
+            echo -e "${YELLOW}请更换其他未占用的 UDP 端口！${PLAIN}"
         done
 
-        if [[ -z "$HY_RANGE" ]]; then
-            read -p "请输入端口跳跃范围 [默认 20000:40000]: " hy_range
-        fi
-        hy_range=${hy_range:-${HY_RANGE:-20000:40000}}
+        while true; do
+            read -r -p "请输入端口跳跃范围 [默认 ${old_hy_range:-20000:40000}] (none=不启用): " hy_range || hy_range=""
+            hy_range=${hy_range:-${old_hy_range:-20000:40000}}
+            [[ "${hy_range,,}" == "none" ]] && { hy_range=""; break; }
+            if validate_range "$hy_range"; then break; fi
+            echo -e "${RED}范围格式非法，应为 起始:结束（如 20000:40000）。${PLAIN}"
+        done
     fi
 
     echo -e "\n${YELLOW}=== 3. 配置 HTTPS 订阅站点参数 ===${PLAIN}"
+    local sub_port
     while true; do
-        if [[ -z "$SUB_PORT" ]]; then
-            read -p "请输入 Caddy 订阅 HTTPS 监听端口 [默认 8444]: " sub_port
+        read -r -p "请输入 Caddy 订阅 HTTPS 监听端口 [默认 ${old_sub_port:-8444}]: " sub_port || sub_port=""
+        sub_port=${sub_port:-${old_sub_port:-8444}}
+        if ! validate_port "$sub_port"; then
+            echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
         fi
-        sub_port=${sub_port:-${SUB_PORT:-8444}}
-        if check_port_occupied "$sub_port" "tcp"; then
-            break
-        else
-            echo -e "${YELLOW}请更换其他未占用的 TCP 端口！${PLAIN}"
-            SUB_PORT=""
-            sub_port=""
-        fi
+        if check_port_occupied "$sub_port" "tcp"; then break; fi
+        echo -e "${YELLOW}请更换其他未占用的 TCP 端口！${PLAIN}"
     done
 
-    if [[ -z "$NODE_PREFIX" ]]; then
-        read -p "请输入节点名称前缀 (如 HK / US / Oracle-O2) [默认 Node]: " node_prefix
-    fi
-    node_prefix=${node_prefix:-${NODE_PREFIX:-Node}}
+    local node_prefix
+    read -r -p "请输入节点名称前缀 (如 HK / US / Oracle-O2) [默认 ${old_prefix:-Node}]: " node_prefix || node_prefix=""
+    node_prefix=${node_prefix:-${old_prefix:-Node}}
+    # 去掉会破坏 YAML/URI 的字符
+    node_prefix=$(echo "$node_prefix" | tr -d '"' | tr -d "'")
 
-    # 签发证书 (正规 CA 或自签)
-    issue_cert_bundle "$hy_domain" "$cf_token" "$server_ip"
+    # 签发证书（skip 模式下仍需自签证书，仅供 Caddy 订阅站点的 TLS 使用）
+    if [ "$hy_enabled" = true ]; then
+        issue_cert_bundle "$hy_domain" "$cf_token" "$server_ip" || return 1
+        if [[ "$CERT_MODE" == "domain" ]]; then
+            hy_skip_cert="false"
+            target_host="$hy_domain"
+        else
+            hy_skip_cert="true"
+            target_host="$server_ip"
+            if [[ -n "$hy_domain" && "$hy_domain" != "skip" ]]; then
+                hy_domain=""          # 已降级，清除域名避免后续误用
+                cert_fell_back="true"
+            fi
+        fi
+    else
+        issue_cert_bundle "" "" "$server_ip" || return 1
+        target_host="$server_ip"
+        hy_skip_cert="true"
+    fi
 
     # 生成密钥凭证
     echo -e "${BLUE}生成安全密钥凭证...${PLAIN}"
@@ -582,7 +735,7 @@ install_node() {
             ufw allow "$hy_port/udp" >/dev/null 2>&1 || true
         fi
     fi
-    if [ "$hy_enabled" = true ]; then
+    if [ "$hy_enabled" = true ] && [[ -n "$hy_range" ]]; then
         setup_port_hopping "$hy_port" "$hy_range"
     fi
 
@@ -697,19 +850,33 @@ LimitNOFILE=infinity
 WantedBy=multi-user.target
 EOF
 
-    systemctl daemon-reload
-    systemctl enable --now sing-box
-    systemctl restart sing-box
+    # 启动前先做配置校验，避免带病重启导致服务起不来
+    if ! /usr/local/bin/sing-box check -c "$CONF_FILE" >/dev/null 2>&1; then
+        echo -e "${RED}生成的配置未通过 sing-box check 校验，已中止启动。${PLAIN}"
+        /usr/local/bin/sing-box check -c "$CONF_FILE" || true
+        return 1
+    fi
 
-    # 注册全局快捷指令 simbo
-    install -m 755 "$0" /usr/local/bin/simbo 2>/dev/null || cp -f "$0" /usr/local/bin/simbo
+    systemctl daemon-reload
+    systemctl enable sing-box >/dev/null 2>&1 || true
+    if ! systemctl restart sing-box; then
+        echo -e "${RED}sing-box 启动失败，请查看: journalctl -u sing-box -n 50${PLAIN}"
+        return 1
+    fi
+
+    install_simbo_command
 
     # 部署 Caddy 订阅并组装完整客户端配置
-    local hy_ports_display="${hy_port},${hy_range/:/-}"
+    local hy_ports_display="$hy_port"
+    [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"
     generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_enabled" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
     setup_caddy_subscription "$target_host" "$sub_token" "$sub_port"
 
     show_subscription
+
+    if [[ "${cert_fell_back:-}" == "true" ]]; then
+        echo -e "${YELLOW}注意: 本次因域名证书申请失败已回退为 IP 自签证书，客户端已自动设为 skip-cert-verify。${PLAIN}"
+    fi
 }
 
 # 输出订阅详情与节点 YAML
@@ -718,7 +885,9 @@ show_subscription() {
         echo -e "${RED}未找到已安装的环境配置！${PLAIN}"
         return 1
     fi
+    set +e
     source "$ENV_FILE"
+    set -e
     local port=${SUB_PORT:-8444}
     local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
     local sub_url="https://${host}:${port}/sub_${SUB_TOKEN}/config.yaml"
@@ -744,14 +913,17 @@ show_links() {
     if [[ ! -f "$LINKS_FILE" ]]; then
         if [[ -f "$ENV_FILE" ]]; then
             source "$ENV_FILE"
-            local hy_ports_display="${HY_PORT},${HY_RANGE/:/-}"
+            local hy_ports_display="${HY_PORT}"
+            [[ -n "${HY_RANGE:-}" ]] && hy_ports_display="${HY_PORT},${HY_RANGE/:/-}"
             local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
             local vless_link="vless://${VL_UUID}@${SERVER_IP}:${VL_PORT}?security=reality&encryption=none&pbk=${VL_PUBKEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${VL_SNI}&sid=${VL_SHORTID}#${NODE_PREFIX}-VLESS-Reality"
             echo "$vless_link" > "$LINKS_FILE"
             if [ "${HY_ENABLED:-true}" = true ]; then
                 local insecure_flag="0"
                 [[ "${HY_SKIP_CERT:-false}" == "true" ]] && insecure_flag="1"
-                local hy2_link="hysteria2://${HY_PASS}@${host}:${HY_PORT}/?sni=${host}&insecure=${insecure_flag}&mport=${hy_ports_display}#${NODE_PREFIX}-Hysteria2"
+                local mport_param=""
+                [[ -n "$hy_ports_display" && "$hy_ports_display" == *,* ]] && mport_param="&mport=${hy_ports_display}"
+                local hy2_link="hysteria2://${HY_PASS}@${host}:${HY_PORT}/?sni=${host}&insecure=${insecure_flag}${mport_param}#${NODE_PREFIX}-Hysteria2"
                 echo "$hy2_link" >> "$LINKS_FILE"
             fi
         else
@@ -786,7 +958,8 @@ show_links() {
 # 彻底干净卸载
 uninstall_all() {
     echo -e "${YELLOW}警告: 即将彻底卸载 sing-box 并清除所有节点、订阅与证书配置！${PLAIN}"
-    read -p "确认卸载吗？(y/N): " confirm
+    local confirm=""
+    read -r -p "确认卸载吗？(y/N): " confirm || confirm=""
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && echo "已取消。" && return 0
 
     echo -e "${BLUE}正在停止并移除服务...${PLAIN}"
@@ -811,8 +984,18 @@ uninstall_all() {
         systemctl reload caddy 2>/dev/null || true
     fi
 
+    # 清理 acme.sh 中本机签发的续期任务（仅当存在 acme.sh 时）
+    if [[ -x "$HOME/.acme.sh/acme.sh" && -f "$ENV_FILE" ]]; then
+        local un_domain
+        un_domain=$(grep -oP '^HY_DOMAIN="\K[^"]*' "$ENV_FILE" 2>/dev/null || true)
+        if [[ -n "$un_domain" && "$un_domain" != "skip" ]]; then
+            "$HOME/.acme.sh/acme.sh" --remove -d "$un_domain" --ecc >/dev/null 2>&1 || true
+        fi
+    fi
+
     rm -f /usr/local/bin/sing-box
     rm -f /usr/local/bin/simbo
+    rm -rf /usr/local/share/simple-box
     rm -rf "$CONF_DIR"
 
     echo -e "${GREEN}sing-box 与订阅配置已彻底干净卸载！${PLAIN}"
@@ -854,7 +1037,10 @@ menu() {
 
         local caddy_status="${RED}未运行${PLAIN}"
         local sub_port="8444"
-        [[ -f "$ENV_FILE" ]] && source "$ENV_FILE" && sub_port=${SUB_PORT:-8444}
+        if [[ -f "$ENV_FILE" ]]; then
+            set +e; source "$ENV_FILE"; set -e
+            sub_port=${SUB_PORT:-8444}
+        fi
         if command -v caddy &>/dev/null && systemctl is-active --quiet caddy; then
             caddy_status="${GREEN}运行中 (端口: ${sub_port})${PLAIN}"
         fi
@@ -863,7 +1049,7 @@ menu() {
         echo -e " 操作系统: ${CYAN}${os_name} (${arch})${PLAIN}"
         local cert_display="未配置"
         if [[ -f "$ENV_FILE" ]]; then
-            source "$ENV_FILE"
+            set +e; source "$ENV_FILE"; set -e
             if [[ "$HY_ENABLED" == "false" || "$HY_DOMAIN" == "skip" ]]; then
                 cert_display="未启用 (仅Reality)"
             elif [[ -n "$HY_DOMAIN" && "$HY_DOMAIN" != "skip" ]]; then
@@ -880,7 +1066,11 @@ menu() {
         if [[ -f "$ENV_FILE" ]]; then
             local p_hy="未启用"
             if [ "${HY_ENABLED:-true}" = true ]; then
-                p_hy="UDP ${HY_PORT:-8443} [跳跃: ${HY_RANGE:-20000:40000}]"
+                if [[ -n "${HY_RANGE:-}" ]]; then
+                    p_hy="UDP ${HY_PORT:-8443} [跳跃: ${HY_RANGE}]"
+                else
+                    p_hy="UDP ${HY_PORT:-8443} [无跳跃]"
+                fi
             fi
             echo -e " 当前节点: ${BLUE}Reality: TCP ${VL_PORT:-443} | Hy2: ${p_hy}${PLAIN}"
         fi
@@ -897,29 +1087,31 @@ menu() {
         echo -e " 0. 退出管理控制台"
         echo -e "${GREEN}====================================================${PLAIN}"
         
-        read -p "请输入选项 [0-8]: " opt
+        local opt=""
+        read -r -p "请输入选项 [0-8]: " opt || opt="0"
         case "$opt" in
-            1) install_node ;;
-            2) show_subscription ;;
-            3) show_links ;;
-            4) update_singbox_core ;;
-            5) manage_bbr ;;
-            6) 
-                systemctl restart sing-box && systemctl restart caddy 2>/dev/null || true
+            1) install_node || true ;;
+            2) show_subscription || true ;;
+            3) show_links || true ;;
+            4) update_singbox_core || true ;;
+            5) manage_bbr || true ;;
+            6)
+                systemctl restart sing-box 2>/dev/null || echo -e "${RED}sing-box 重启失败${PLAIN}"
+                systemctl restart caddy 2>/dev/null || true
                 echo -e "${GREEN}服务已重启！${PLAIN}"
                 ;;
-            7) journalctl -u sing-box -o cat -e -f ;;
-            8) uninstall_all ;;
+            7) journalctl -u sing-box -o cat -n 40 --no-pager || true ;;
+            8) uninstall_all || true ;;
             0) echo -e "${GREEN}已退出。随时输入 simbo 即可重新打开面板。${PLAIN}"; exit 0 ;;
             *) echo -e "${RED}无效选项！${PLAIN}" ;;
         esac
         echo ""
-        read -p "按回车键返回主菜单..." dummy
+        read -r -p "按回车键返回主菜单..." dummy || true
     done
 }
 
 case "$1" in
-    install) install_node ;;
+    install) install_node || exit 1 ;;
     update) 
         if [[ "$2" == "force" || "$2" == "-f" ]]; then
             update_singbox_core "force"

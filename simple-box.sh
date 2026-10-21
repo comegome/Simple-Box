@@ -231,7 +231,7 @@ issue_cert_bundle() {
         echo -e "${YELLOW}未配置自有域名，正在为服务器 IP (${server_ip}) 生成 10 年自签 ECC 证书...${PLAIN}"
         openssl ecparam -genkey -name prime256v1 -out "${CERT_DIR}/private.key" >/dev/null 2>&1
         openssl req -new -x509 -days 3650 -key "${CERT_DIR}/private.key" -out "${CERT_DIR}/fullchain.cer" \
-            -subj "/CN=${server_ip}" >/dev/null 2>&1
+            -subj "/CN=${server_ip}" -addext "subjectAltName=IP:${server_ip},IP:127.0.0.1" >/dev/null 2>-subj "/CN=${server_ip}" >/dev/null 2>&11
     fi
 
     chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
@@ -290,7 +290,7 @@ setup_caddy_subscription() {
 
     cat > "/etc/caddy/sites/simple-box-sub.caddy" <<EOF
 # Simple-Box HTTPS 订阅分发站点
-${domain_or_ip}:${sub_port} {
+:${sub_port} {
     tls ${CERT_DIR}/fullchain.cer ${CERT_DIR}/private.key
 
     @sub path /sub_${token}/config.yaml /sub_${token}/provider.yaml /sub_${token}/links.txt

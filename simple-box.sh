@@ -231,7 +231,7 @@ issue_cert_bundle() {
         echo -e "${YELLOW}未配置自有域名，正在为服务器 IP (${server_ip}) 生成 10 年自签 ECC 证书...${PLAIN}"
         openssl ecparam -genkey -name prime256v1 -out "${CERT_DIR}/private.key" >/dev/null 2>&1
         openssl req -new -x509 -days 3650 -key "${CERT_DIR}/private.key" -out "${CERT_DIR}/fullchain.cer" \
-            -subj "/CN=${server_ip}" -addext "subjectAltName=IP:${server_ip},IP:127.0.0.1" >/dev/null 2>-subj "/CN=${server_ip}" >/dev/null 2>&11
+            -subj "/CN=${server_ip}" -addext "subjectAltName=IP:${server_ip},IP:127.0.0.1" >/dev/null 2>&1
     fi
 
     chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true

@@ -864,7 +864,7 @@ EOF
 EOF
     fi
 
-    cat >> "$CONF_FILE" <<EOF
+    cat >> "$tmp_conf" <<EOF
   ],
   "outbounds": [
     {

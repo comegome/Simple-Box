@@ -55,6 +55,32 @@ validate_domain() {
     [[ "$d" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$ ]]
 }
 
+# 剔除字符串首尾的空白字符与引号
+trim_string() {
+    local str="$1"
+    # 使用 tr/sed 安全剥离首尾空白与包裹引号
+    echo "$str" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+}
+
+# 在线校验 Cloudflare API Token 有效性
+verify_cloudflare_token() {
+    local token="$1"
+    token=$(trim_string "$token")
+    [[ -z "$token" ]] && return 1
+
+    echo -e "${BLUE}正在在线校验 Cloudflare API Token...${PLAIN}"
+    local check_res
+    check_res=$(curl -s -m 8 -H "Authorization: Bearer ${token}" https://api.cloudflare.com/client/v4/user/tokens/verify || true)
+    if echo "$check_res" | grep -q '"status":"active"'; then
+        echo -e "${GREEN}✓ Cloudflare API Token 校验通过 (Active)！${PLAIN}"
+        return 0
+    else
+        echo -e "${RED}✗ Cloudflare API Token 校验失败 (无效或权限不足)！${PLAIN}"
+        echo -e "${YELLOW}请确认: 1. 区域资源是否包含该域名 2. 权限是否为 [编辑区域 DNS]${PLAIN}"
+        return 1
+    fi
+}
+
 # 端口冲突检测
 check_port_occupied() {
     local port="$1"
@@ -141,46 +167,50 @@ manage_bbr() {
         local cur_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
         local cur_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
         local bbr_tag="${YELLOW}未开启 (${cur_bbr})${PLAIN}"
-        [[ "$cur_bbr" == "bbr" ]] && bbr_tag="${GREEN}已开启 (bbr)${PLAIN}"
+        local action_desc="开启加速 (bbr + fq)"
+        local target_action="enable"
+        if [[ "$cur_bbr" == "bbr" ]]; then
+            bbr_tag="${GREEN}已开启 (bbr)${PLAIN}"
+            action_desc="恢复默认 (cubic + fq_codel)"
+            target_action="disable"
+        fi
 
         echo -e "\n${GREEN}================== TCP BBR 加速管理 ===================${PLAIN}"
         echo -e " 当前状态: ${bbr_tag} | 队列规则: ${CYAN}${cur_qdisc}${PLAIN}"
         echo -e "${GREEN}-------------------------------------------------------${PLAIN}"
-        echo -e " 1. 开启 / 优化 BBR 加速 (bbr + fq)"
-        echo -e " 2. 关闭 BBR 并恢复系统默认 (cubic + fq_codel)"
+        echo -e " 1. ${action_desc}"
         echo -e " 0. 返回主菜单"
         echo -e "${GREEN}=======================================================${PLAIN}"
         local opt=""
-        read -r -p "请输入选项 [0-2]: " opt || opt=""
+        read -r -p "请输入选项 [0-1]: " opt || opt=""
         case "$opt" in
             1)
-                mkdir -p /etc/sysctl.d
-                cat > /etc/sysctl.d/99-bbr.conf <<EOF
+                if [[ "$target_action" == "enable" ]]; then
+                    mkdir -p /etc/sysctl.d
+                    cat > /etc/sysctl.d/99-bbr.conf <<EOF
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
-                sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
-                local check_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
-                local check_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
-                echo -e "\n${BLUE}正在验证内核参数...${PLAIN}"
-                sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc
-                if [[ "$check_bbr" == "bbr" ]]; then
-                    echo -e "\n${GREEN}✓ 验证成功: TCP BBR 与 fq 队列调度已在内核立即生效！${PLAIN}"
+                    sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
+                    local check_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+                    local check_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+                    echo -e "\n${BLUE}正在验证内核参数...${PLAIN}"
+                    sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc
+                    if [[ "$check_bbr" == "bbr" ]]; then
+                        echo -e "\n${GREEN}✓ 验证成功: TCP BBR 与 fq 队列调度已在内核立即生效！${PLAIN}"
+                    else
+                        echo -e "\n${YELLOW}! 配置已写入，但内核当前返回: ${check_bbr}，若未生效请检查内核并重启系统。${PLAIN}"
+                    fi
                 else
-                    echo -e "\n${YELLOW}! 配置已写入，但内核当前返回: ${check_bbr}，若未生效请检查内核并重启系统。${PLAIN}"
+                    rm -f /etc/sysctl.d/99-bbr.conf
+                    sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
+                    sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || true
+                    local check_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+                    local check_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+                    echo -e "\n${BLUE}正在验证内核参数...${PLAIN}"
+                    sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc
+                    echo -e "\n${GREEN}✓ 验证成功: 已关闭 BBR，当前内核已恢复为默认 (${check_bbr} + ${check_qdisc})！${PLAIN}"
                 fi
-                echo ""
-                read -r -p "按回车键继续..." dummy || true
-                ;;
-            2)
-                rm -f /etc/sysctl.d/99-bbr.conf
-                sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
-                sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || true
-                local check_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
-                local check_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
-                echo -e "\n${BLUE}正在验证内核参数...${PLAIN}"
-                sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc
-                echo -e "\n${GREEN}✓ 验证成功: 已关闭 BBR，当前内核已恢复为默认 (${check_bbr} + ${check_qdisc})！${PLAIN}"
                 echo ""
                 read -r -p "按回车键继续..." dummy || true
                 ;;
@@ -826,15 +856,32 @@ echo -e "${CYAN} 2. 点击 [创建令牌] -> 找到 [编辑区域 DNS (Edit zone
 echo -e "${CYAN} 3. 区域资源选择: [包括] -> [特定区域] -> 选择你的域名${PLAIN}"
 echo -e "${CYAN} 4. 底部点击 [继续以显示摘要] -> 最终确认页点击 [创建令牌] 并复制生成的令牌${PLAIN}"
 echo -e "${CYAN}---------------------------------------------------------------------${PLAIN}"
-            read -r -p "请输入 Cloudflare API Token: " cf_token || cf_token=""
-        fi
-        if [[ -z "$cf_token" ]]; then
-            echo -e "${RED}未提供 CF Token，无法申请域名证书。${PLAIN}"
-            echo -e "${YELLOW}已自动回退为 IP 自签证书模式继续安装。${PLAIN}"
-            target_host="$server_ip"
-            hy_skip_cert="true"
-            hy_domain=""
-            cert_fell_back="true"
+            while true; do
+                read -r -p "请输入 Cloudflare API Token: " cf_token || cf_token=""
+                cf_token=$(trim_string "$cf_token")
+                if [[ -z "$cf_token" ]]; then
+                    echo -e "${YELLOW}未输入 Token，将自动使用 IP 自签证书。${PLAIN}"
+                    target_host="$server_ip"
+                    hy_skip_cert="true"
+                    hy_domain=""
+                    cert_fell_back="true"
+                    break
+                fi
+                if verify_cloudflare_token "$cf_token"; then
+                    break
+                fi
+                local retry=""
+                read -r -p "是否重新输入 Token？[Y/n (回车重试，输入 n 使用 IP 自签)]: " retry || retry=""
+                if [[ "${retry,,}" == "n" ]]; then
+                    echo -e "${YELLOW}已放弃域名证书，将自动使用 IP 自签证书。${PLAIN}"
+                    target_host="$server_ip"
+                    hy_skip_cert="true"
+                    hy_domain=""
+                    cf_token=""
+                    cert_fell_back="true"
+                    break
+                fi
+            done
         fi
     fi
 
@@ -1270,11 +1317,26 @@ echo -e "${CYAN} 2. 点击 [创建令牌] -> 找到 [编辑区域 DNS (Edit zone
 echo -e "${CYAN} 3. 区域资源选择: [包括] -> [特定区域] -> 选择你的域名${PLAIN}"
 echo -e "${CYAN} 4. 底部点击 [继续以显示摘要] -> 最终确认页点击 [创建令牌] 并复制生成的令牌${PLAIN}"
 echo -e "${CYAN}---------------------------------------------------------------------${PLAIN}"
-                    read -r -p "请输入 Cloudflare API Token: " cf_token || cf_token=""
-                    if [[ -z "$cf_token" ]]; then
-                        echo -e "${YELLOW}未输入 Token，将自动使用 IP 自签证书。${PLAIN}"
-                        hy_domain=""
-                    fi
+                    while true; do
+                        read -r -p "请输入 Cloudflare API Token: " cf_token || cf_token=""
+                        cf_token=$(trim_string "$cf_token")
+                        if [[ -z "$cf_token" ]]; then
+                            echo -e "${YELLOW}未输入 Token，将自动使用 IP 自签证书。${PLAIN}"
+                            hy_domain=""
+                            break
+                        fi
+                        if verify_cloudflare_token "$cf_token"; then
+                            break
+                        fi
+                        local retry=""
+                        read -r -p "是否重新输入 Token？[Y/n (回车重试，输入 n 使用 IP 自签)]: " retry || retry=""
+                        if [[ "${retry,,}" == "n" ]]; then
+                            echo -e "${YELLOW}已放弃域名证书，将自动使用 IP 自签证书。${PLAIN}"
+                            hy_domain=""
+                            cf_token=""
+                            break
+                        fi
+                    done
                     break
                 done
 

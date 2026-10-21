@@ -841,8 +841,14 @@ render_and_reload() {
         return 1
     fi
 
-    if ! systemctl restart sing-box 2>/dev/null; then
-        echo -e "${RED}sing-box 重启失败，请查看: journalctl -u sing-box -n 30${PLAIN}"
+    if systemctl is-active --quiet sing-box 2>/dev/null; then
+        systemctl restart sing-box 2>/dev/null || { echo -e "${RED}sing-box 重启失败，请查看: journalctl -u sing-box -n 30${PLAIN}"; return 1; }
+    else
+        systemctl start sing-box 2>/dev/null || { echo -e "${RED}sing-box 启动失败，请查看: journalctl -u sing-box -n 30${PLAIN}"; return 1; }
+    fi
+    sleep 1
+    if ! systemctl is-active --quiet sing-box 2>/dev/null; then
+        echo -e "${RED}sing-box 未能进入运行状态，请查看: journalctl -u sing-box -n 30${PLAIN}"
         return 1
     fi
 
@@ -1558,6 +1564,8 @@ echo -e "${CYAN}----------------------------------------------------------------
                 write_env_config
                 if ! render_and_reload; then
                     echo -e "${RED}Hysteria 2 模块更新失败，请检查上面的错误信息。${PLAIN}"
+                    # 证书阶段可能已停服务，失败路径必须把服务拉回来
+                    systemctl start sing-box 2>/dev/null || true
                     read -r -p "按回车键返回..." dummy || true
                     continue
                 fi

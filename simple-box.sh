@@ -507,7 +507,12 @@ install_node() {
     else
         target_host="$hy_domain"
         if [[ -z "$CF_TOKEN" ]]; then
-            read -p "请输入 Cloudflare API Token (需拥有 Zone.DNS 编辑权限): " cf_token
+            echo -e "\n${CYAN}------------------- Cloudflare API Token 获取指引 -------------------${PLAIN}"
+            echo -e "${CYAN} 1. 登录 CF -> 右上角头像 -> [我的个人资料] -> 左侧 [API 令牌]${PLAIN}"
+            echo -e "${CYAN} 2. 点击 [创建令牌] -> 找到 [编辑区域 DNS (Edit zone DNS)] 点击使用模板${PLAIN}"
+            echo -e "${CYAN} 3. 区域资源选择: 包含 -> 特定区域 -> 选择你的域名 -> 点击创建并复制${PLAIN}"
+            echo -e "${CYAN}---------------------------------------------------------------------${PLAIN}"
+            read -p "请输入 Cloudflare API Token: " cf_token
         fi
         cf_token=${cf_token:-$CF_TOKEN}
         [[ -z "$cf_token" ]] && echo -e "${RED}CF Token 不能为空！${PLAIN}" && exit 1

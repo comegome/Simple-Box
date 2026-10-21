@@ -64,6 +64,38 @@ simbo del           # 彻底干净卸载并还原网络规则
 
 ---
 
+
+---
+
+## 📖 Cloudflare 域名解析与 API Token 申请指南
+
+如果你希望为 Hysteria 2 绑定自有域名并申请受信任的 Let's Encrypt 正规证书，请参考以下两步操作（整个过程耗时约 1 分钟，全走 DNS-01 验证，**无需 VPS 开放 80 端口，哪怕防火墙把 Web 端口全关了也能正常签发**）：
+
+### 步骤 1：在 Cloudflare 添加 A 记录（解析 VPS 公网 IP）
+1. 登录 [Cloudflare 控制台](https://dash.cloudflare.com/)，点击进入你的域名；
+2. 在左侧菜单点击 **DNS** $\to$ **记录 (Records)** $\to$ 点击 **添加记录 (Add record)**；
+3. 填写参数：
+   * **类型 (Type)**：选择 `A`
+   * **名称 (Name)**：输入你想使用的二级域名前缀（例如 `node`、`o2` 或 `@`）
+   * **IPv4 地址**：填入这台 VPS 的公网 IPv4
+   * **代理状态 (Proxy status)**：**【核心关键】务必点击切换为“仅限 DNS”（灰色云朵）！切勿开启小黄云 CDN 代理，否则 UDP (Hy2) 流量会被 Cloudflare 边缘阻断！**
+4. 点击 **保存 (Save)**。
+
+### 步骤 2：生成专属 API Token（授权脚本全自动申请与续期）
+1. 点击 Cloudflare 控制台右上角个人头像 $\to$ **我的个人资料 (My Profile)**；
+2. 在左侧菜单点击 **API 令牌 (API Tokens)** $\to$ 点击 **创建令牌 (Create Token)**；
+3. 在常用模板列表中找到 **编辑区域 DNS (Edit zone DNS)**，点击右侧的 **使用模板 (Use template)**；
+4. 权限设置极简：
+   * **令牌名称**：任意填写（例如 `simple-box-cert`）
+   * **区域资源 (Zone Resources)**：
+     选择 **包含 (Include)** $\to$ **特定区域 (Specific zone)** $\to$ 在下拉框中选中你的目标域名
+   * 其余参数默认保持不变
+5. 滚动到页面最下方，点击 **继续以显示摘要 (Continue to summary)** $\to$ 点击 **创建令牌 (Create Token)**；
+6. 复制屏幕上生成的一长串 Token 字符串（形如 `z5k9...`，注意：该 Token 仅展示一次，建议妥善保存）。
+
+### 步骤 3：在 VPS 终端填入
+在服务器运行 `simbo` 选择 `[1] 安装 / 重置配置`，在提示输入域名和 CF Token 时，直接将上述域名与 Token 粘贴进去即可。脚本将全自动签发 ECC-256 优质证书，并配置后台定时任务每 60 天静默续期。
+
 ## 🛠️ 功能特性
 
 * **单内核纯净运行**：100% 官方正版 `SagerNet/sing-box` Release，无任何未知或第三方闭源二进制，系统常驻内存仅约 8~15 MB。

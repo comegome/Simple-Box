@@ -50,6 +50,11 @@ validate_range() {
     (( s >= 1 && e <= 65535 && e > s ))
 }
 
+validate_domain() {
+    local d="$1"
+    [[ "$d" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$ ]]
+}
+
 # 端口冲突检测
 check_port_occupied() {
     local port="$1"
@@ -1139,11 +1144,6 @@ menu_reality_module() {
         [ -t 1 ] && clear
         echo -e "
 ${GREEN}================= VLESS-Reality 模块配置 =================${PLAIN}"
-        echo -e " 监听端口: ${CYAN}${VL_PORT}${PLAIN}"
-        echo -e " 伪装域名: ${CYAN}${VL_SNI}${PLAIN}"
-        echo -e " 用户UUID: ${CYAN}${VL_UUID}${PLAIN}"
-        echo -e " 公钥Key : ${CYAN}${VL_PUBKEY}${PLAIN}"
-        echo -e "${GREEN}----------------------------------------------------------${PLAIN}"
         echo -e " 1. 重置并更新 Reality 参数"
         echo -e " 0. 返回主菜单"
         echo -e "${GREEN}==========================================================${PLAIN}"
@@ -1151,8 +1151,7 @@ ${GREEN}================= VLESS-Reality 模块配置 =================${PLAIN}"
         read -r -p "请输入选项 [0-1]: " opt || opt=""
         case "$opt" in
             1)
-                echo -e "
-${YELLOW}=== 重置 VLESS-Reality 参数 ===${PLAIN}"
+                echo -e "\n${YELLOW}=== 重置 VLESS-Reality 参数 ===${PLAIN}"
                 local vl_port
                 while true; do
                     read -r -p "请输入 Reality 监听端口 [默认 ${VL_PORT}]: " vl_port || vl_port=""
@@ -1208,8 +1207,7 @@ ${YELLOW}=== 重置 VLESS-Reality 参数 ===${PLAIN}"
                 write_env_config
                 render_and_reload
 
-                echo -e "
-${GREEN}VLESS-Reality 模块已成功更新！${PLAIN}"
+                echo -e "\n${GREEN}VLESS-Reality 模块已成功更新！${PLAIN}"
                 echo -e "${CYAN}提示: 订阅链接与 Token 保持完全一致，客户端仅需点击“更新订阅”即可自动同步新节点。${PLAIN}"
                 read -r -p "按回车键返回..." dummy || true
                 set +e; source "$ENV_FILE"; set -e
@@ -1231,55 +1229,40 @@ menu_hy2_module() {
 
     while true; do
         [ -t 1 ] && clear
-        local hy_status_str="${GREEN}已启用${PLAIN}"
-        [[ "${HY_ENABLED:-true}" != "true" ]] && hy_status_str="${YELLOW}已停用${PLAIN}"
-        local cert_desc="IP 自签证书"
-        [[ "${HY_SKIP_CERT:-true}" != "true" && -n "${HY_DOMAIN:-}" ]] && cert_desc="域名 CA 证书 (${HY_DOMAIN})"
-
         echo -e "
 ${GREEN}================== Hysteria 2 模块配置 ===================${PLAIN}"
-        echo -e " 模块状态: ${hy_status_str}"
-        echo -e " 监听端口: ${CYAN}${HY_PORT:-8443}${PLAIN}"
-        echo -e " 跳跃范围: ${CYAN}${HY_RANGE:-不启用}${PLAIN}"
-        echo -e " TLS 证书: ${CYAN}${cert_desc}${PLAIN}"
-        echo -e " 访问密码: ${CYAN}${HY_PASS:-未配置}${PLAIN}"
-        echo -e "${GREEN}----------------------------------------------------------${PLAIN}"
         echo -e " 1. 重置并更新 Hysteria 2 参数"
-        if [[ "${HY_ENABLED:-true}" == "true" ]]; then
-            echo -e " 2. 停用 Hysteria 2 (仅保留 Reality)"
-        else
-            echo -e " 2. 启用 Hysteria 2"
-        fi
         echo -e " 0. 返回主菜单"
         echo -e "${GREEN}==========================================================${PLAIN}"
         local opt=""
-        read -r -p "请输入选项 [0-2]: " opt || opt=""
+        read -r -p "请输入选项 [0-1]: " opt || opt=""
         case "$opt" in
             1)
-                echo -e "
-${YELLOW}=== 重置 Hysteria 2 参数 ===${PLAIN}"
-                local hy_domain="" cf_email="" cf_key=""
+                echo -e "\n${YELLOW}=== 重置 Hysteria 2 参数 ===${PLAIN}"
+                local hy_domain="" cf_token=""
                 local CERT_MODE="selfsigned"
                 local target_host="$SERVER_IP"
                 local hy_skip_cert="true"
 
                 while true; do
-                    echo -e "
-请输入你的自有域名 (直接回车继续使用 IP 自签证书):"
+                    echo -e "\n请输入你的自有域名 (直接回车继续使用 IP 自签证书):"
                     read -r -p "域名: " hy_domain || hy_domain=""
                     if [[ -z "$hy_domain" ]]; then
                         echo -e "${GREEN}选择使用 IP 自签证书。${PLAIN}"
                         break
                     fi
                     if ! validate_domain "$hy_domain"; then
-                        echo -e "${RED}域名格式不合法，请重新输入。${PLAIN}"; continue
+                        echo -e "${RED}域名格式不合法（示例: o2.ducto.net），请重新输入。${PLAIN}"; continue
                     fi
-                    echo -e "
-请输入 Cloudflare API 凭证 (需已将域名 DNS 解析到当前 IP):"
-                    read -r -p "Cloudflare 账号 Email: " cf_email || cf_email=""
-                    read -r -p "Cloudflare Global API Key 或 Token: " cf_key || cf_key=""
-                    if [[ -z "$cf_email" || -z "$cf_key" ]]; then
-                        echo -e "${RED}CF 凭证不能为空，请重新配置。${PLAIN}"; continue
+                    echo -e "\n${CYAN}------------------- Cloudflare API Token 获取指引 -------------------${PLAIN}"
+                    echo -e "${CYAN} 1. 登录 CF -> 右上角头像 -> [我的个人资料] -> 左侧 [API 令牌]${PLAIN}"
+                    echo -e "${CYAN} 2. 点击 [创建令牌] -> 找到 [编辑区域 DNS (Edit zone DNS)] 点击使用模板${PLAIN}"
+                    echo -e "${CYAN} 3. 区域资源选择: 包含 -> 特定区域 -> 选择你的域名 -> 点击创建并复制${PLAIN}"
+                    echo -e "${CYAN}---------------------------------------------------------------------${PLAIN}"
+                    read -r -p "请输入 Cloudflare API Token: " cf_token || cf_token=""
+                    if [[ -z "$cf_token" ]]; then
+                        echo -e "${YELLOW}未输入 Token，将自动使用 IP 自签证书。${PLAIN}"
+                        hy_domain=""
                     fi
                     break
                 done
@@ -1322,8 +1305,8 @@ ${YELLOW}=== 重置 Hysteria 2 参数 ===${PLAIN}"
                     break
                 done
 
-                if [[ -n "$hy_domain" ]]; then
-                    if issue_cert_bundle "$hy_domain" "$cf_email" "$cf_key"; then
+                if [[ -n "$hy_domain" && -n "$cf_token" ]]; then
+                    if issue_cert_bundle "$hy_domain" "$cf_token" "$SERVER_IP"; then
                         CERT_MODE="domain"
                         target_host="$hy_domain"
                         hy_skip_cert="false"
@@ -1370,54 +1353,8 @@ ${YELLOW}=== 重置 Hysteria 2 参数 ===${PLAIN}"
                 write_env_config
                 render_and_reload
 
-                echo -e "
-${GREEN}Hysteria 2 模块已成功更新！${PLAIN}"
+                echo -e "\n${GREEN}Hysteria 2 模块已成功更新！${PLAIN}"
                 echo -e "${CYAN}提示: 订阅链接与 Token 保持完全一致，客户端仅需点击“更新订阅”即可自动同步新节点。${PLAIN}"
-                read -r -p "按回车键返回..." dummy || true
-                set +e; source "$ENV_FILE"; set -e
-                ;;
-            2)
-                local hy_enabled="true"
-                if [[ "${HY_ENABLED:-true}" == "true" ]]; then
-                    hy_enabled="false"
-                    clear_port_hopping
-                    echo -e "${YELLOW}正在停用 Hysteria 2...${PLAIN}"
-                else
-                    hy_enabled="true"
-                    if [[ -n "${HY_RANGE:-}" ]]; then
-                        clear_port_hopping
-                        iptables -t nat -A PREROUTING -p udp --dport "$HY_RANGE" -j REDIRECT --to-ports "${HY_PORT:-8443}"
-                        which netfilter-persistent &>/dev/null && netfilter-persistent save &>/dev/null || true
-                    fi
-                    echo -e "${GREEN}正在启用 Hysteria 2...${PLAIN}"
-                fi
-
-                local node_prefix="$NODE_PREFIX"
-                local server_ip="$SERVER_IP"
-                local vl_port="$VL_PORT"
-                local vl_sni="$VL_SNI"
-                local user_uuid="$VL_UUID"
-                local vl_privkey="${VL_PRIVKEY:-}"
-                local vl_pubkey="$VL_PUBKEY"
-                local vl_shortid="$VL_SHORTID"
-                local hy_domain="${HY_DOMAIN:-}"
-                local target_host="${TARGET_HOST:-$server_ip}"
-                local hy_port="${HY_PORT:-8443}"
-                local hy_range="${HY_RANGE:-}"
-                local hy_password="${HY_PASS:-}"
-                local hy_skip_cert="${HY_SKIP_CERT:-true}"
-                local sub_port="${SUB_PORT:-8444}"
-                local sub_proto="${SUB_PROTO:-http}"
-                local sub_token="${SUB_TOKEN}"
-                local CERT_MODE="selfsigned"
-                [[ "$hy_skip_cert" != "true" ]] && CERT_MODE="domain"
-
-                write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "$hy_enabled" "$hy_port" "$hy_password"
-                write_env_config
-                render_and_reload
-
-                echo -e "
-${GREEN}Hysteria 2 状态切换成功！${PLAIN}"
                 read -r -p "按回车键返回..." dummy || true
                 set +e; source "$ENV_FILE"; set -e
                 ;;
@@ -1440,9 +1377,6 @@ menu_sub_module() {
         [ -t 1 ] && clear
         echo -e "
 ${GREEN}================ 在线订阅站点模块配置 ================${PLAIN}"
-        echo -e " 监听端口: ${CYAN}${SUB_PORT} [${SUB_PROTO^^}]${PLAIN}"
-        echo -e " 路径散列: ${CYAN}${SUB_TOKEN}${PLAIN}"
-        echo -e "${GREEN}----------------------------------------------------------${PLAIN}"
         echo -e " 1. 修改订阅端口 (保持当前 Token，客户端免重新导入)"
         echo -e " 2. 重置并刷新订阅 Token (换新路径，旧链接全部作废 404)"
         echo -e " 0. 返回主菜单"
@@ -1451,8 +1385,7 @@ ${GREEN}================ 在线订阅站点模块配置 ================${PLAIN}
         read -r -p "请输入选项 [0-2]: " opt || opt=""
         case "$opt" in
             1)
-                echo -e "
-${YELLOW}=== 修改 Caddy 订阅端口 ===${PLAIN}"
+                echo -e "\n${YELLOW}=== 修改 Caddy 订阅端口 ===${PLAIN}"
                 local sub_port
                 while true; do
                     read -r -p "请输入新的订阅监听端口 [默认 ${SUB_PORT}]: " sub_port || sub_port=""
@@ -1502,14 +1435,12 @@ ${YELLOW}=== 修改 Caddy 订阅端口 ===${PLAIN}"
                 setup_caddy_subscription "$target_host" "$SUB_TOKEN" "$SUB_PORT" "$CERT_MODE"
                 systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
 
-                echo -e "
-${GREEN}订阅端口已成功修改为 ${SUB_PORT}！${PLAIN}"
+                echo -e "\n${GREEN}订阅端口已成功修改为 ${SUB_PORT}！${PLAIN}"
                 read -r -p "按回车键返回..." dummy || true
                 set +e; source "$ENV_FILE"; set -e
                 ;;
             2)
-                echo -e "
-${YELLOW}=== 重置并刷新订阅 Token ===${PLAIN}"
+                echo -e "\n${YELLOW}=== 重置并刷新订阅 Token ===${PLAIN}"
                 echo -e "${RED}警告: 刷新 Token 后，旧链接将立即失效返回 404，所有客户端必须重新导入新链接！${PLAIN}"
                 local confirm=""
                 read -r -p "确认刷新 Token？[y/N]: " confirm || confirm=""
@@ -1555,8 +1486,7 @@ ${YELLOW}=== 重置并刷新订阅 Token ===${PLAIN}"
                 setup_caddy_subscription "$target_host" "$new_token" "$sub_port" "$CERT_MODE"
                 systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
 
-                echo -e "
-${GREEN}Token 刷新成功！旧链接已立即作废。${PLAIN}"
+                echo -e "\n${GREEN}Token 刷新成功！旧链接已立即作废。${PLAIN}"
                 echo -e "新在线订阅: ${CYAN}${sub_proto}://${target_host}:${sub_port}/${new_token}/config.yaml${PLAIN}"
                 read -r -p "按回车键返回..." dummy || true
                 set +e; source "$ENV_FILE"; set -e
@@ -1571,21 +1501,8 @@ ${GREEN}Token 刷新成功！旧链接已立即作废。${PLAIN}"
 menu_singbox_manage() {
     while true; do
         [ -t 1 ] && clear
-        local sb_ver="未安装"
-        local sb_status="${RED}未运行${PLAIN}"
-        if [[ -f /usr/local/bin/sing-box ]]; then
-            sb_ver=$(/usr/local/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
-            if systemctl is-active --quiet sing-box 2>/dev/null; then
-                sb_status="${GREEN}运行中 (v${sb_ver})${PLAIN}"
-            else
-                sb_status="${RED}已停止 (v${sb_ver})${PLAIN}"
-            fi
-        fi
-
         echo -e "
 ${GREEN}=================== sing-box 内核管理 ===================${PLAIN}"
-        echo -e " 当前状态: ${sb_status}"
-        echo -e "${GREEN}----------------------------------------------------------${PLAIN}"
         echo -e " 1. 重启 sing-box 服务"
         echo -e " 2. 停止 sing-box 服务"
         echo -e " 3. 启动 sing-box 服务"
@@ -1613,9 +1530,7 @@ ${GREEN}=================== sing-box 内核管理 ===================${PLAIN}"
                 read -r -p "按回车键返回..." dummy || true
                 ;;
             5)
-                echo -e "
-${BLUE}正在获取 sing-box 最近 40 行运行日志：${PLAIN}
-"
+                echo -e "\n${BLUE}正在获取 sing-box 最近 40 行运行日志：${PLAIN}\n"
                 journalctl -u sing-box -o cat -n 40 --no-pager || true
                 echo ""
                 read -r -p "按回车键返回..." dummy || true

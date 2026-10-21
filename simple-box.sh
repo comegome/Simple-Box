@@ -1180,6 +1180,10 @@ EOF
     if [[ "${cert_fell_back:-}" == "true" ]]; then
         echo -e "${YELLOW}注意: 本次因域名证书申请失败已回退为 IP 自签证书，客户端已自动设为 skip-cert-verify。${PLAIN}"
     fi
+
+    echo -e "\n${GREEN}===================================================================${PLAIN}"
+    echo -e "${GREEN}🎉 Simple-Box 安装就绪！随时在终端输入 ${YELLOW}simbo${GREEN} 即可打开管理控制台。${PLAIN}"
+    echo -e "${GREEN}===================================================================${PLAIN}\n"
 }
 
 # 输出订阅详情与节点 YAML

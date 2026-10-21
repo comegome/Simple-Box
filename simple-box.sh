@@ -586,8 +586,16 @@ show_subscription() {
 # 展示单独节点链接与二维码
 show_links() {
     if [[ ! -f "$LINKS_FILE" ]]; then
-        echo -e "${RED}未找到节点链接文件，请先执行安装！${PLAIN}"
-        return 1
+        if [[ -f "$ENV_FILE" ]]; then
+            source "$ENV_FILE"
+            local hy_ports_display="${HY_PORT},${HY_RANGE/:/-}"
+            local vless_link="vless://${VL_UUID}@${SERVER_IP}:${VL_PORT}?security=reality&encryption=none&pbk=${VL_PUBKEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${VL_SNI}&sid=${VL_SHORTID}#${NODE_PREFIX}-VLESS-Reality"
+            local hy2_link="hysteria2://${HY_PASS}@${HY_DOMAIN}:${HY_PORT}/?sni=${HY_DOMAIN}&insecure=0&mport=${hy_ports_display}#${NODE_PREFIX}-Hysteria2"
+            echo -e "${vless_link}\n${hy2_link}" > "$LINKS_FILE"
+        else
+            echo -e "${RED}未找到节点环境配置，请先执行安装！${PLAIN}"
+            return 1
+        fi
     fi
     local vless_url=$(head -n 1 "$LINKS_FILE")
     local hy2_url=$(tail -n 1 "$LINKS_FILE")

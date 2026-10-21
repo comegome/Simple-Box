@@ -1515,7 +1515,8 @@ echo -e "${CYAN}----------------------------------------------------------------
                     fi
                 else
                     if ! issue_self_signed_cert "$SERVER_IP"; then
-                        echo -e "${RED}证书生成失败，操作中止。${PLAIN}"
+                        echo -e "${RED}证书生成失败，操作中止（原配置与服务保持不变）。${PLAIN}"
+                        systemctl start sing-box 2>/dev/null || true
                         read -r -p "按回车键返回..." dummy || true
                         continue
                     fi
@@ -1552,6 +1553,7 @@ echo -e "${CYAN}----------------------------------------------------------------
                 if [[ -z "$vl_privkey" ]]; then
                     echo -e "${RED}环境配置缺少 Reality 私钥 (VL_PRIVKEY)，无法安全重建。${PLAIN}"
                     echo -e "${YELLOW}请进入 [1] VLESS-Reality 模块配置 重新生成一次密钥，再回到此处。${PLAIN}"
+                    systemctl start sing-box 2>/dev/null || true
                     read -r -p "按回车键返回..." dummy || true
                     continue
                 fi

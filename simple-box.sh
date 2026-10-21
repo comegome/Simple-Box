@@ -237,12 +237,20 @@ issue_cert_bundle() {
     chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
     chmod 644 "${CERT_DIR}"/* 2>/dev/null || true
 
-    if [[ -f "${CERT_DIR}/fullchain.cer" && -f "${CERT_DIR}/private.key" ]]; then
-        echo -e "${GREEN}证书已就绪安装至 ${CERT_DIR}！${PLAIN}"
-    else
-        echo -e "${RED}证书生成失败，请检查配置！${PLAIN}"
-        exit 1
+    if [[ ! -f "${CERT_DIR}/fullchain.cer" || ! -f "${CERT_DIR}/private.key" ]]; then
+        echo -e "${RED}警告: Cloudflare 证书申请未成功 (请检查 Token 权限或域名拼写)！${PLAIN}"
+        echo -e "${YELLOW}触发安全防护机制: 自动平滑降级为 10 年期 IP 自签证书，确保节点立即可用...${PLAIN}"
+        openssl ecparam -genkey -name prime256v1 -out "${CERT_DIR}/private.key" >/dev/null 2>&1
+        openssl req -new -x509 -days 3650 -key "${CERT_DIR}/private.key" -out "${CERT_DIR}/fullchain.cer" \
+            -subj "/CN=${server_ip}" -addext "subjectAltName=IP:${server_ip},IP:127.0.0.1" >/dev/null 2>&1
+        TARGET_HOST="$server_ip"
+        target_host="$server_ip"
+        hy_skip_cert="true"
+        hy_domain=""
     fi
+    chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
+    chmod 644 "${CERT_DIR}"/* 2>/dev/null || true
+    echo -e "${GREEN}TLS 证书环境已就绪安装至 ${CERT_DIR}！${PLAIN}"
 }
 
 # 端口跳跃 iptables 规则配置
@@ -851,7 +859,9 @@ menu() {
         local cert_display="未配置"
         if [[ -f "$ENV_FILE" ]]; then
             source "$ENV_FILE"
-            if [[ -n "$HY_DOMAIN" && "$HY_DOMAIN" != "skip" ]]; then
+            if [[ "$HY_ENABLED" == "false" || "$HY_DOMAIN" == "skip" ]]; then
+                cert_display="未启用 (仅Reality)"
+            elif [[ -n "$HY_DOMAIN" && "$HY_DOMAIN" != "skip" ]]; then
                 cert_display="${HY_DOMAIN}"
             elif [[ "$HY_SKIP_CERT" == "true" ]]; then
                 cert_display="IP 自签证书"

@@ -164,7 +164,6 @@ sniffer:
 # 核心原则：“先国外、后国内、未知兜底归国外”，且所有 IP 规则均附带 no-resolve，确保数据库遗漏的海外域名 0ms 直达代理节点
 rules:
   # 0. Tailscale 直连（必须在所有 GEOSITE 之前）
-  - DOMAIN-SUFFIX,ducto.net,DIRECT
   - DOMAIN-REGEX,^derp\d+[a-z]?\.tailscale\.com$,DIRECT
   
   # 1. 局域网与私有网络直连

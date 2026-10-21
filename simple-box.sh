@@ -1463,7 +1463,7 @@ ${GREEN}================== Hysteria 2 模块配置 ===================${PLAIN}"
                         break
                     fi
                     if ! validate_domain "$hy_domain"; then
-                        echo -e "${RED}域名格式不合法（示例: o2.ducto.net），请重新输入。${PLAIN}"; continue
+                        echo -e "${RED}域名格式不合法（示例: node.example.com），请重新输入。${PLAIN}"; continue
                     fi
                     echo -e "\n${CYAN}------------------- Cloudflare API Token 获取指引 -------------------${PLAIN}"
 echo -e "${CYAN} 1. 登录 CF -> 右上角头像 -> [配置文件] -> 左侧导航 [API 令牌]${PLAIN}"

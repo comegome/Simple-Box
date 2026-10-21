@@ -603,6 +603,11 @@ generate_full_client_config() {
         echo "mode: rule" >> "$full_config_file"
     fi
 
+    # 分流规则自适应：若为 IP 模式，将 VPS 本机 IP 置顶为 DIRECT，防止节点失效时订阅死锁；若为域名，走代理加密隧道
+    if [[ "$domain_or_ip" == "$server_ip" ]]; then
+        sed -i "/^rules:/a \  - IP-CIDR,${server_ip}/32,DIRECT,no-resolve" "$full_config_file"
+    fi
+
     local ports_line=""
     [[ -n "$hy_ports_display" && "$hy_ports_display" == *,* ]] && ports_line="    ports: \"${hy_ports_display}\""
 
@@ -1174,9 +1179,7 @@ EOF
 
     show_subscription
 
-    if [[ "${SUB_PROTO:-}" == "http" ]]; then
-        echo -e "${CYAN}提示: 当前为 IP 自签模式，因主流客户端 (如 ClashX.Meta) 会阻断未受信任的自签 HTTPS 证书，订阅已采用 HTTP 分发 (带随机 Token 严格保护)，可在客户端直接粘贴导入。${PLAIN}"
-    fi
+
     if [[ "${cert_fell_back:-}" == "true" ]]; then
         echo -e "${YELLOW}注意: 本次因域名证书申请失败已回退为 IP 自签证书，客户端已自动设为 skip-cert-verify。${PLAIN}"
     fi
@@ -1208,6 +1211,16 @@ show_subscription() {
     echo -e "2. ${YELLOW}纯节点 Provider 订阅 (供自建规则文件引用)${PLAIN}:"
     echo -e "   ${GREEN}${provider_url}${PLAIN}"
     echo -e "${GREEN}=================================================================${PLAIN}"
+
+    if [[ "$proto" == "http" ]]; then
+        echo -e "${YELLOW}⚠️  安全与隐私提示 (IP 模式):${PLAIN}"
+        echo -e "   • 分流规则已将 VPS IP 设为直连，确保节点更新/失效时订阅更新绝不死锁。"
+        echo -e "   • ${RED}注意: 当前订阅通过 HTTP 明文传输，不受 TLS 保护${PLAIN}，请勿在公共 Wi-Fi / 不可信网络环境下更新。"
+        echo -e "   • 若需全链路隐私防嗅探保护，请在菜单 [2] 中配置自有域名启用 HTTPS 模式。"
+    else
+        echo -e "${GREEN}🛡️  隐私安全提示 (域名 HTTPS 模式):${PLAIN}"
+        echo -e "   • 订阅内容由权威 CA 证书 (TLS 1.3) 强加密分发，防链路嗅探，受到完整隐私保护。"
+    fi
 
     if [[ -f "$YAML_PROVIDER" ]]; then
         echo -e "\n${YELLOW}=== 本地节点 YAML 片段 (亦可手动复制) ===${PLAIN}"
@@ -1822,6 +1835,11 @@ menu() {
             echo -e "${GREEN}----------------------------------------------------${PLAIN}"
             echo -e " 在线订阅: ${CYAN}${proto}://${host}:${port}/${SUB_TOKEN}/config.yaml${PLAIN}"
             echo -e " 节点列表: ${CYAN}${proto}://${host}:${port}/${SUB_TOKEN}/provider.yaml${PLAIN}"
+            if [[ "$proto" == "http" ]]; then
+                echo -e " 订阅安全: ${YELLOW}直连分发 (未加密，建议在可信网络下更新)${PLAIN}"
+            else
+                echo -e " 订阅安全: ${GREEN}TLS 强加密保护 (权威 CA 证书)${PLAIN}"
+            fi
         fi
 
         echo -e "${GREEN}----------------------------------------------------${PLAIN}"

@@ -288,10 +288,14 @@ issue_cert_bundle() {
         }
         # 模式 B: 为公网 IP 生成 10 年自签 ECC 证书
         [[ -z "$domain" ]] && echo -e "${YELLOW}为服务器 IP (${server_ip}) 生成 10 年期自签 ECC 证书...${PLAIN}"
-        rm -f "${CERT_DIR}/fullchain.cer" "${CERT_DIR}/private.key"
-        openssl ecparam -genkey -name prime256v1 -out "${CERT_DIR}/private.key" >/dev/null 2>&1
-        openssl req -new -x509 -days 3650 -key "${CERT_DIR}/private.key" -out "${CERT_DIR}/fullchain.cer" \
+        local tmp_key="${CERT_DIR}/.private.key.tmp"
+        local tmp_crt="${CERT_DIR}/.fullchain.cer.tmp"
+        openssl ecparam -genkey -name prime256v1 -out "$tmp_key" >/dev/null 2>&1
+        openssl req -new -x509 -days 3650 -key "$tmp_key" -out "$tmp_crt" \
             -subj "/CN=${server_ip}" -addext "subjectAltName=IP:${server_ip},IP:127.0.0.1" >/dev/null 2>&1
+        # 原子替换，避免读到半写状态
+        mv -f "$tmp_key" "${CERT_DIR}/private.key"
+        mv -f "$tmp_crt" "${CERT_DIR}/fullchain.cer"
         CERT_MODE="selfsigned"
     fi
 
@@ -718,6 +722,11 @@ install_node() {
     node_prefix=${node_prefix:-${old_prefix:-Node}}
     # 去掉会破坏 YAML/URI 的字符
     node_prefix=$(echo "$node_prefix" | tr -d '"' | tr -d "'")
+
+    # 证书重生成前先停 sing-box，避免文件监视器读到写入中途的 cert/key 组合
+    if systemctl is-active --quiet sing-box; then
+        systemctl stop sing-box 2>/dev/null || true
+    fi
 
     # 签发证书（skip 模式下仍需自签证书，仅供 Caddy 订阅站点的 TLS 使用）
     if [ "$hy_enabled" = true ]; then

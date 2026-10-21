@@ -1458,14 +1458,18 @@ uninstall_all() {
     [[ -f "${CONF_DIR}/.caddyfile_created_by_script" ]] && caddyfile_created=true
     [[ -f "${CONF_DIR}/.caddyfile_appended_by_script" ]] && caddyfile_appended=true
 
-    if [[ "$caddyfile_created" == "true" ]]; then
+    if [[ "$caddy_owned" == "true" && "$caddyfile_created" == "true" ]]; then
+        # 包是本脚本装的、Caddyfile 也是本脚本建的：一并删除（包已卸载，无副作用）
         rm -f /etc/caddy/Caddyfile
         echo -e "${BLUE}已移除本脚本创建的 Caddyfile${PLAIN}"
-    elif [[ "$caddyfile_appended" == "true" && -f /etc/caddy/Caddyfile ]]; then
-        # 仅回退本脚本追加的那行 import，保留用户原有内容
-        sed -i '\|^import sites/\*\.caddy$|d' /etc/caddy/Caddyfile
-        sed -i -e :a -e '/^\n*$/{$d;N;};/\n$/ba' /etc/caddy/Caddyfile 2>/dev/null || true
-        echo -e "${BLUE}已回退本脚本追加的 Caddyfile import 行${PLAIN}"
+    elif [[ "$caddyfile_created" == "true" || "$caddyfile_appended" == "true" ]]; then
+        # Caddy 是用户原有的：只回退本脚本加的那行 import，绝不删用户的 Caddyfile。
+        # 回退后文件即使为空也是合法的 Caddy 配置，Caddy 仍能正常启动。
+        if [[ -f /etc/caddy/Caddyfile ]]; then
+            sed -i '\|^import sites/\*\.caddy$|d' /etc/caddy/Caddyfile
+            sed -i -e :a -e '/^\n*$/{$d;N;};/\n$/ba' /etc/caddy/Caddyfile 2>/dev/null || true
+            echo -e "${BLUE}已回退本脚本追加的 Caddyfile import 行${PLAIN}"
+        fi
     fi
 
     if [[ "$caddy_owned" == "true" ]]; then
@@ -1478,6 +1482,11 @@ uninstall_all() {
         fi
         rm -f /etc/apt/sources.list.d/caddy-stable.list
         rm -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+        # apt remove 不删配置目录：只清理本脚本创建的站点文件，
+        # 目录为空才 rmdir —— 用户后来自己加的站点配置必须保留。
+        rm -f /etc/caddy/sites/simple-box*.caddy /etc/caddy/sites/*-"${SUB_PORT:-8444}".caddy 2>/dev/null || true
+        rmdir /etc/caddy/sites 2>/dev/null || true
+        rmdir /etc/caddy 2>/dev/null || true
         echo -e "${BLUE}已卸载 Caddy 软件包并清理其软件源${PLAIN}"
     elif command -v caddy &>/dev/null; then
         systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true

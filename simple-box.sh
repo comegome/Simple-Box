@@ -518,7 +518,7 @@ setup_caddy_subscription() {
         cat > "/etc/caddy/sites/simple-box-sub.caddy" <<EOF
 # Simple-Box HTTPS 订阅分发站点 (域名 CA 证书)
 :${sub_port} {
-    bind 0.0.0.0
+    bind tcp4/0.0.0.0
     tls ${CERT_DIR}/fullchain.cer ${CERT_DIR}/private.key
 
     @sub path /${token}/config.yaml /${token}/provider.yaml /${token}/links.txt
@@ -538,7 +538,7 @@ EOF
         cat > "/etc/caddy/sites/simple-box-sub.caddy" <<EOF
 # Simple-Box HTTP 订阅分发站点 (IP 自签兼容模式)
 http://:${sub_port} {
-    bind 0.0.0.0
+    bind tcp4/0.0.0.0
     @sub path /${token}/config.yaml /${token}/provider.yaml /${token}/links.txt
     handle @sub {
         root * ${WEB_DIR}

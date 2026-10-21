@@ -1603,7 +1603,7 @@ echo -e "${CYAN}----------------------------------------------------------------
     done
 }
 
-# 3. 在线订阅站点独立模块配置
+# 3. 在线订阅站点独立模块配置 (结构与模块 1、2 统一)
 menu_sub_module() {
     if [[ ! -f "$ENV_FILE" ]]; then
         echo -e "${RED}未检测到已安装的配置，请先运行选项 7 重新安装Simple-Box！${PLAIN}"
@@ -1616,15 +1616,14 @@ menu_sub_module() {
         [ -t 1 ] && clear
         echo -e "
 ${GREEN}================ 在线订阅站点模块配置 ================${PLAIN}"
-        echo -e " 1. 修改订阅端口 (保持当前 Token，客户端免重新导入)"
-        echo -e " 2. 重置并刷新订阅 Token (换新路径，旧链接全部作废 404)"
+        echo -e " 1. 重置并更新在线订阅参数 (改端口 / 刷新 Token)"
         echo -e " 0. 返回主菜单"
-        echo -e "${GREEN}==========================================================${PLAIN}"
+        echo -e "${GREEN}======================================================${PLAIN}"
         local opt=""
-        read -r -p "请输入选项 [0-2]: " opt || opt=""
+        read -r -p "请输入选项 [0-1]: " opt || opt=""
         case "$opt" in
             1)
-                echo -e "\n${YELLOW}=== 修改 Caddy 订阅端口 ===${PLAIN}"
+                echo -e "\n${YELLOW}=== 重置并更新在线订阅参数 ===${PLAIN}"
                 local sub_port
                 while true; do
                     read -r -p "请输入新的订阅监听端口 [默认 ${SUB_PORT}]: " sub_port || sub_port=""
@@ -1648,53 +1647,20 @@ ${GREEN}================ 在线订阅站点模块配置 ================${PLAIN}
                     echo -e "${YELLOW}请更换其他未占用的 TCP 端口！${PLAIN}"
                 done
 
-                SUB_PORT="$sub_port"
-                local CERT_MODE="selfsigned"
-                [[ "${HY_SKIP_CERT:-true}" != "true" ]] && CERT_MODE="domain"
-
-                local node_prefix="$NODE_PREFIX"
-                local server_ip="$SERVER_IP"
-                local vl_port="$VL_PORT"
-                local vl_sni="$VL_SNI"
-                local user_uuid="$VL_UUID"
-                local vl_privkey="${VL_PRIVKEY:-}"
-                local vl_pubkey="$VL_PUBKEY"
-                local vl_shortid="$VL_SHORTID"
-                local hy_enabled="${HY_ENABLED:-true}"
-                local hy_domain="${HY_DOMAIN:-}"
-                local target_host="${TARGET_HOST:-$server_ip}"
-                local hy_port="${HY_PORT:-8443}"
-                local hy_range="${HY_RANGE:-}"
-                local hy_password="${HY_PASS:-}"
-                local hy_skip_cert="${HY_SKIP_CERT:-true}"
-                local sub_proto="$SUB_PROTO"
-                local sub_token="$SUB_TOKEN"
-                write_env_config
-
-                setup_caddy_subscription "$target_host" "$SUB_TOKEN" "$SUB_PORT" "$CERT_MODE"
-                reload_caddy_safe || true
-                verify_caddy_listening "$SUB_PORT" || true
-
-                echo -e "\n${GREEN}订阅端口已成功修改为 ${SUB_PORT}！${PLAIN}"
-                read -r -p "按回车键返回..." dummy || true
-                set +e; source "$ENV_FILE"; set -e
-                ;;
-            2)
-                echo -e "\n${YELLOW}=== 重置并刷新订阅 Token ===${PLAIN}"
-                echo -e "${RED}警告: 刷新 Token 后，旧链接将立即失效返回 404，所有客户端必须重新导入新链接！${PLAIN}"
-                local confirm=""
-                read -r -p "确认刷新 Token？[y/N]: " confirm || confirm=""
-                if [[ "${confirm,,}" != "y" ]]; then
-                    echo -e "已取消。"; sleep 1; continue
-                fi
+                local rotate_token=""
+                read -r -p "是否同时刷新订阅 Token (旧链接将立即 404 作废)？[y/N]: " rotate_token || rotate_token=""
+                rotate_token=$(trim_string "$rotate_token")
 
                 local old_token="$SUB_TOKEN"
-                local new_token
-                new_token=$(openssl rand -hex 12)
+                local new_token="$SUB_TOKEN"
+                if [[ "${rotate_token,,}" == "y" ]]; then
+                    new_token=$(openssl rand -hex 12)
+                    [[ -n "${old_token:-}" ]] && rm -rf "${WEB_DIR:?}/${old_token:?}"
+                    mkdir -p "${WEB_DIR}/${new_token}"
+                    echo -e "${YELLOW}Token 已轮换为新路径，旧 Token 链接已销毁。${PLAIN}"
+                fi
 
-                [[ -n "${old_token:-}" ]] && rm -rf "${WEB_DIR:?}/${old_token:?}"
-                mkdir -p "${WEB_DIR}/${new_token}"
-
+                SUB_PORT="$sub_port"
                 SUB_TOKEN="$new_token"
                 local CERT_MODE="selfsigned"
                 [[ "${HY_SKIP_CERT:-true}" != "true" ]] && CERT_MODE="domain"
@@ -1714,7 +1680,6 @@ ${GREEN}================ 在线订阅站点模块配置 ================${PLAIN}
                 local hy_range="${HY_RANGE:-}"
                 local hy_password="${HY_PASS:-}"
                 local hy_skip_cert="${HY_SKIP_CERT:-true}"
-                local sub_port="$SUB_PORT"
                 local sub_proto="$SUB_PROTO"
                 local sub_token="$new_token"
                 write_env_config
@@ -1723,12 +1688,13 @@ ${GREEN}================ 在线订阅站点模块配置 ================${PLAIN}
                 [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"
                 generate_full_client_config "$target_host" "$new_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_enabled" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
 
-                setup_caddy_subscription "$target_host" "$new_token" "$sub_port" "$CERT_MODE"
+                setup_caddy_subscription "$target_host" "$new_token" "$SUB_PORT" "$CERT_MODE"
                 reload_caddy_safe || true
-                verify_caddy_listening "$sub_port" || true
+                verify_caddy_listening "$SUB_PORT" || true
 
-                echo -e "\n${GREEN}Token 刷新成功！旧链接已立即作废。${PLAIN}"
-                echo -e "新在线订阅: ${CYAN}${sub_proto}://${target_host}:${sub_port}/${new_token}/config.yaml${PLAIN}"
+                echo -e "\n${GREEN}✓ 在线订阅站点已成功更新！${PLAIN}"
+                echo -e "当前在线订阅: ${CYAN}${sub_proto}://${target_host}:${SUB_PORT}/${new_token}/config.yaml${PLAIN}"
+                echo -e "${YELLOW}提示: 订阅参数已更新，请在客户端 (如 ClashX.Meta) 中修改端口或更新订阅 URL。${PLAIN}"
                 read -r -p "按回车键返回..." dummy || true
                 set +e; source "$ENV_FILE"; set -e
                 ;;

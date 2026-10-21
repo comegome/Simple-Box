@@ -285,9 +285,10 @@ setup_caddy_subscription() {
         echo -e "\nimport sites/*.caddy" >> /etc/caddy/Caddyfile
     fi
 
-    rm -f "/etc/caddy/sites/${domain_or_ip}-${sub_port}.caddy" "/etc/caddy/sites/simple-box.caddy"
+    # 清理所有旧版 simple-box caddy 配置文件
+    rm -f /etc/caddy/sites/*-${sub_port}.caddy /etc/caddy/sites/simple-box*.caddy
 
-    cat > "/etc/caddy/sites/${domain_or_ip}-${sub_port}.caddy" <<EOF
+    cat > "/etc/caddy/sites/simple-box-sub.caddy" <<EOF
 # Simple-Box HTTPS 订阅分发站点
 ${domain_or_ip}:${sub_port} {
     tls ${CERT_DIR}/fullchain.cer ${CERT_DIR}/private.key
@@ -791,9 +792,7 @@ uninstall_all() {
                 netfilter-persistent save >/dev/null 2>&1 || true
             fi
         fi
-        local port=${SUB_PORT:-8444}
-        local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
-        rm -f "/etc/caddy/sites/${host}-${port}.caddy" "/etc/caddy/sites/simple-box.caddy"
+        rm -f /etc/caddy/sites/*-${SUB_PORT:-8444}.caddy /etc/caddy/sites/simple-box*.caddy
         systemctl reload caddy 2>/dev/null || true
     fi
 

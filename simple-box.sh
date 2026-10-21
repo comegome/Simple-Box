@@ -144,27 +144,43 @@ install_node() {
     local server_ip=$(curl -s4m5 https://icanhazip.com || curl -s4m5 https://api.ipify.org || echo "YOUR_SERVER_IP")
 
     echo -e "\n${YELLOW}=== 1. 配置 VLESS-Reality 参数 ===${PLAIN}"
-    read -p "请输入 Reality 监听端口 [默认 443]: " vl_port
-    vl_port=${vl_port:-443}
+    if [[ -z "$VL_PORT" ]]; then
+        read -p "请输入 Reality 监听端口 [默认 443]: " vl_port
+    fi
+    vl_port=${vl_port:-${VL_PORT:-443}}
 
-    read -p "请输入 Reality 借壳伪装域名 [默认 gateway.icloud.com]: " vl_sni
-    vl_sni=${vl_sni:-gateway.icloud.com}
+    if [[ -z "$VL_SNI" ]]; then
+        read -p "请输入 Reality 借壳伪装域名 [默认 gateway.icloud.com]: " vl_sni
+    fi
+    vl_sni=${vl_sni:-${VL_SNI:-gateway.icloud.com}}
 
     echo -e "\n${YELLOW}=== 2. 配置 Hysteria 2 参数 ===${PLAIN}"
-    read -p "请输入你的自有域名 (已在 Cloudflare 托管且解析到此 IP): " hy_domain
+    if [[ -z "$HY_DOMAIN" ]]; then
+        read -p "请输入你的自有域名 (已在 Cloudflare 托管且解析到此 IP): " hy_domain
+    fi
+    hy_domain=${hy_domain:-$HY_DOMAIN}
     [[ -z "$hy_domain" ]] && echo -e "${RED}域名不能为空！${PLAIN}" && exit 1
 
-    read -p "请输入 Cloudflare API Token (需拥有 Zone.DNS 编辑权限): " cf_token
+    if [[ -z "$CF_TOKEN" ]]; then
+        read -p "请输入 Cloudflare API Token (需拥有 Zone.DNS 编辑权限): " cf_token
+    fi
+    cf_token=${cf_token:-$CF_TOKEN}
     [[ -z "$cf_token" ]] && echo -e "${RED}CF Token 不能为空！${PLAIN}" && exit 1
 
-    read -p "请输入 Hysteria 2 主监听 UDP 端口 [默认 8443]: " hy_port
-    hy_port=${hy_port:-8443}
+    if [[ -z "$HY_PORT" ]]; then
+        read -p "请输入 Hysteria 2 主监听 UDP 端口 [默认 8443]: " hy_port
+    fi
+    hy_port=${hy_port:-${HY_PORT:-8443}}
 
-    read -p "请输入端口跳跃范围 [默认 20000:40000]: " hy_range
-    hy_range=${hy_range:-20000:40000}
+    if [[ -z "$HY_RANGE" ]]; then
+        read -p "请输入端口跳跃范围 [默认 20000:40000]: " hy_range
+    fi
+    hy_range=${hy_range:-${HY_RANGE:-20000:40000}}
 
-    read -p "请输入节点名称前缀 (如 HK / US / Oracle-O1) [默认 Node]: " node_prefix
-    node_prefix=${node_prefix:-Node}
+    if [[ -z "$NODE_PREFIX" ]]; then
+        read -p "请输入节点名称前缀 (如 HK / US / Oracle-O1) [默认 Node]: " node_prefix
+    fi
+    node_prefix=${node_prefix:-${NODE_PREFIX:-Node}}
 
     # 签发证书
     issue_cf_cert "$hy_domain" "$cf_token"

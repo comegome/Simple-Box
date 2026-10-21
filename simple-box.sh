@@ -990,7 +990,19 @@ install_node() {
         set +e; source "$ENV_FILE"; set -e
         old_vl_port="$VL_PORT"; old_vl_sni="$VL_SNI"; old_hy_port="$HY_PORT"
         old_hy_range="$HY_RANGE"; old_sub_port="$SUB_PORT"; old_prefix="$NODE_PREFIX"
-        [[ "$HY_SKIP_CERT" != "true" ]] && old_domain="$HY_DOMAIN"
+        old_domain="${HY_DOMAIN:-}"
+        # 若 env.conf 中无域名记录，探测 acme.sh 目录中是否曾签发过历史域名证书
+        if [[ -z "$old_domain" || "$old_domain" == "skip" ]] && [[ -d "$HOME/.acme.sh" ]]; then
+            local acme_d
+            acme_d=$(find "$HOME/.acme.sh" -maxdepth 1 -type d -name "*_ecc" 2>/dev/null | head -n1)
+            if [[ -n "$acme_d" ]]; then
+                local found_d
+                found_d=$(basename "$acme_d" | sed 's/_ecc$//')
+                if validate_domain "$found_d"; then
+                    old_domain="$found_d"
+                fi
+            fi
+        fi
     fi
 
     local server_ip

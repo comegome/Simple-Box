@@ -429,6 +429,53 @@ setup_port_hopping() {
     fi
 }
 
+# 安全重载 Caddy：先校验配置，优先 reload，失败才 restart，并解除 systemd 限流
+reload_caddy_safe() {
+    if ! command -v caddy &>/dev/null; then
+        echo -e "${YELLOW}未安装 Caddy，跳过订阅站点重载。${PLAIN}"
+        return 1
+    fi
+
+    # 1. 配置语法校验（不通过就不要碰运行中的服务）
+    if ! caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
+        echo -e "${RED}Caddyfile 校验失败，已保持现有订阅服务不变。${PLAIN}"
+        caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1 | tail -5
+        return 1
+    fi
+
+    # 2. 运行中优先热重载，避免反复 restart 触发 systemd start-limit-hit
+    if systemctl is-active --quiet caddy; then
+        if systemctl reload caddy 2>/dev/null; then
+            return 0
+        fi
+        echo -e "${YELLOW}Caddy 热重载未生效，改为重启...${PLAIN}"
+    else
+        # 3. 未运行（或曾被限流）时先清除失败计数，再启动
+        systemctl reset-failed caddy 2>/dev/null || true
+    fi
+
+    if systemctl restart caddy 2>/dev/null; then
+        return 0
+    fi
+    echo -e "${RED}Caddy 启动失败，请查看: journalctl -u caddy -n 30${PLAIN}"
+    return 1
+}
+
+# 校验 Caddy 是否真的在目标端口监听（重载后调用，防止"配置成功但没生效"）
+verify_caddy_listening() {
+    local port="$1"
+    local i
+    for i in 1 2 3 4 5; do
+        if ss -tln 2>/dev/null | grep -qE "[:.]${port} "; then
+            return 0
+        fi
+        sleep 1
+    done
+    echo -e "${RED}警告: Caddy 未在端口 ${port} 上监听，订阅链接当前不可用。${PLAIN}"
+    echo -e "${YELLOW}请检查: journalctl -u caddy -n 30${PLAIN}"
+    return 1
+}
+
 # 部署 Caddy 订阅分发服务
 setup_caddy_subscription() {
     local domain_or_ip="$1"
@@ -497,7 +544,7 @@ EOF
         echo -e "${YELLOW}节点本身不受影响；可稍后手动安装 Caddy 再重跑本项。${PLAIN}"
         return 0
     fi
-    systemctl restart caddy || echo -e "${RED}Caddy 重启失败，请查看 journalctl -u caddy。${PLAIN}"
+    reload_caddy_safe || echo -e "${YELLOW}订阅站点配置已写入，但 Caddy 未能生效，可稍后手动 systemctl restart caddy。${PLAIN}"
 }
 
 # 组装客户端订阅与独立链接
@@ -789,7 +836,8 @@ render_and_reload() {
     generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_enabled" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
 
     setup_caddy_subscription "$target_host" "$sub_token" "$sub_port" "$CERT_MODE"
-    systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
+    reload_caddy_safe || true
+    verify_caddy_listening "$sub_port" || true
 }
 
 install_node() {
@@ -1355,6 +1403,7 @@ ${GREEN}================== Hysteria 2 模块配置 ===================${PLAIN}"
                 while true; do
                     echo -e "\n请输入你的自有域名 (直接回车继续使用 IP 自签证书):"
                     read -r -p "域名: " hy_domain || hy_domain=""
+                    hy_domain=$(trim_string "$hy_domain")
                     if [[ -z "$hy_domain" ]]; then
                         echo -e "${GREEN}选择使用 IP 自签证书。${PLAIN}"
                         break
@@ -1573,7 +1622,8 @@ ${GREEN}================ 在线订阅站点模块配置 ================${PLAIN}
                 write_env_config
 
                 setup_caddy_subscription "$target_host" "$SUB_TOKEN" "$SUB_PORT" "$CERT_MODE"
-                systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
+                reload_caddy_safe || true
+                verify_caddy_listening "$SUB_PORT" || true
 
                 echo -e "\n${GREEN}订阅端口已成功修改为 ${SUB_PORT}！${PLAIN}"
                 read -r -p "按回车键返回..." dummy || true
@@ -1624,7 +1674,8 @@ ${GREEN}================ 在线订阅站点模块配置 ================${PLAIN}
                 generate_full_client_config "$target_host" "$new_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_enabled" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
 
                 setup_caddy_subscription "$target_host" "$new_token" "$sub_port" "$CERT_MODE"
-                systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
+                reload_caddy_safe || true
+                verify_caddy_listening "$sub_port" || true
 
                 echo -e "\n${GREEN}Token 刷新成功！旧链接已立即作废。${PLAIN}"
                 echo -e "新在线订阅: ${CYAN}${sub_proto}://${target_host}:${sub_port}/${new_token}/config.yaml${PLAIN}"

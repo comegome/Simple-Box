@@ -136,50 +136,58 @@ install_caddy() {
 
 # BBR 拥塞控制管理（开启与关闭）
 manage_bbr() {
-    local cur_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
-    local cur_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
+    while true; do
+        [ -t 1 ] && clear
+        local cur_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
+        local cur_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
+        local bbr_tag="${YELLOW}未开启 (${cur_bbr})${PLAIN}"
+        [[ "$cur_bbr" == "bbr" ]] && bbr_tag="${GREEN}已开启 (bbr)${PLAIN}"
 
-    echo -e "\n${GREEN}====================================================${PLAIN}"
-    echo -e "${GREEN}              TCP 拥塞控制管理 (BBR)                ${PLAIN}"
-    echo -e "${GREEN}====================================================${PLAIN}"
-    echo -e " 当前算法: ${CYAN}${cur_bbr}${PLAIN} | 队列规则: ${CYAN}${cur_qdisc}${PLAIN}"
-    echo -e " 1. 开启 / 优化 BBR 加速 (推荐: bbr + fq)"
-    echo -e " 2. 关闭 BBR 并恢复系统默认 (恢复为 cubic)"
-    echo -e " 0. 返回"
-    echo -e "${GREEN}====================================================${PLAIN}"
-
-    local opt=""
-    read -r -p "请输入选项 [0-2]: " opt || true
-    opt=${opt:-1}
-
-    case "$opt" in
-        1)
-            if [[ "$cur_bbr" == "bbr" ]]; then
-                echo -e "${GREEN}当前已处于 BBR 状态，无需重复开启！${PLAIN}"
-            else
+        echo -e "\n${GREEN}================== TCP BBR 加速管理 ===================${PLAIN}"
+        echo -e " 当前状态: ${bbr_tag} | 队列规则: ${CYAN}${cur_qdisc}${PLAIN}"
+        echo -e "${GREEN}-------------------------------------------------------${PLAIN}"
+        echo -e " 1. 开启 / 优化 BBR 加速 (bbr + fq)"
+        echo -e " 2. 关闭 BBR 并恢复系统默认 (cubic + fq_codel)"
+        echo -e " 0. 返回主菜单"
+        echo -e "${GREEN}=======================================================${PLAIN}"
+        local opt=""
+        read -r -p "请输入选项 [0-2]: " opt || opt=""
+        case "$opt" in
+            1)
                 mkdir -p /etc/sysctl.d
                 cat > /etc/sysctl.d/99-bbr.conf <<EOF
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
                 sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
-                local new_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
-                if [[ "$new_bbr" == "bbr" ]]; then
-                    echo -e "${GREEN}BBR 拥塞控制加速已成功开启并立即生效！${PLAIN}"
+                local check_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+                local check_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+                echo -e "\n${BLUE}正在验证内核参数...${PLAIN}"
+                sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc
+                if [[ "$check_bbr" == "bbr" ]]; then
+                    echo -e "\n${GREEN}✓ 验证成功: TCP BBR 与 fq 队列调度已在内核立即生效！${PLAIN}"
                 else
-                    echo -e "${YELLOW}已写入配置，若未生效请检查内核版本是否 >= 4.9 并重启系统。${PLAIN}"
+                    echo -e "\n${YELLOW}! 配置已写入，但内核当前返回: ${check_bbr}，若未生效请检查内核并重启系统。${PLAIN}"
                 fi
-            fi
-            ;;
-        2)
-            rm -f /etc/sysctl.d/99-bbr.conf
-            sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
-            sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || true
-            echo -e "${GREEN}已成功关闭 BBR，当前已还原为系统默认 (cubic)！${PLAIN}"
-            ;;
-        0) return 0 ;;
-        *) echo -e "${RED}无效选项！${PLAIN}" ;;
-    esac
+                echo ""
+                read -r -p "按回车键继续..." dummy || true
+                ;;
+            2)
+                rm -f /etc/sysctl.d/99-bbr.conf
+                sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
+                sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || true
+                local check_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+                local check_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
+                echo -e "\n${BLUE}正在验证内核参数...${PLAIN}"
+                sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc
+                echo -e "\n${GREEN}✓ 验证成功: 已关闭 BBR，当前内核已恢复为默认 (${check_bbr} + ${check_qdisc})！${PLAIN}"
+                echo ""
+                read -r -p "按回车键继续..." dummy || true
+                ;;
+            0) break ;;
+            *) echo -e "${RED}无效选项${PLAIN}"; sleep 1 ;;
+        esac
+    done
 }
 
 # 获取并升级官方 sing-box 内核（带精准版本校验）
@@ -813,10 +821,11 @@ install_node() {
         target_host="$hy_domain"
         if [[ -z "$CF_TOKEN" ]]; then
             echo -e "\n${CYAN}------------------- Cloudflare API Token 获取指引 -------------------${PLAIN}"
-            echo -e "${CYAN} 1. 登录 CF -> 右上角头像 -> [我的个人资料] -> 左侧 [API 令牌]${PLAIN}"
-            echo -e "${CYAN} 2. 点击 [创建令牌] -> 找到 [编辑区域 DNS (Edit zone DNS)] 点击使用模板${PLAIN}"
-            echo -e "${CYAN} 3. 区域资源选择: 包含 -> 特定区域 -> 选择你的域名 -> 点击创建并复制${PLAIN}"
-            echo -e "${CYAN}---------------------------------------------------------------------${PLAIN}"
+echo -e "${CYAN} 1. 登录 CF -> 右上角头像 -> [配置文件] -> 左侧导航 [API 令牌]${PLAIN}"
+echo -e "${CYAN} 2. 点击 [创建令牌] -> 找到 [编辑区域 DNS (Edit zone DNS)] 点击 [使用模板]${PLAIN}"
+echo -e "${CYAN} 3. 区域资源选择: [包括] -> [特定区域] -> 选择你的域名${PLAIN}"
+echo -e "${CYAN} 4. 底部点击 [继续以显示摘要] -> 最终确认页点击 [创建令牌] 并复制生成的令牌${PLAIN}"
+echo -e "${CYAN}---------------------------------------------------------------------${PLAIN}"
             read -r -p "请输入 Cloudflare API Token: " cf_token || cf_token=""
         fi
         if [[ -z "$cf_token" ]]; then
@@ -1079,6 +1088,7 @@ show_links() {
         fi
     fi
     echo -e "${GREEN}==============================================================${PLAIN}\n"
+    read -r -p "按回车键返回主菜单..." dummy || true
 }
 
 # 彻底干净卸载
@@ -1255,10 +1265,11 @@ ${GREEN}================== Hysteria 2 模块配置 ===================${PLAIN}"
                         echo -e "${RED}域名格式不合法（示例: o2.ducto.net），请重新输入。${PLAIN}"; continue
                     fi
                     echo -e "\n${CYAN}------------------- Cloudflare API Token 获取指引 -------------------${PLAIN}"
-                    echo -e "${CYAN} 1. 登录 CF -> 右上角头像 -> [我的个人资料] -> 左侧 [API 令牌]${PLAIN}"
-                    echo -e "${CYAN} 2. 点击 [创建令牌] -> 找到 [编辑区域 DNS (Edit zone DNS)] 点击使用模板${PLAIN}"
-                    echo -e "${CYAN} 3. 区域资源选择: 包含 -> 特定区域 -> 选择你的域名 -> 点击创建并复制${PLAIN}"
-                    echo -e "${CYAN}---------------------------------------------------------------------${PLAIN}"
+echo -e "${CYAN} 1. 登录 CF -> 右上角头像 -> [配置文件] -> 左侧导航 [API 令牌]${PLAIN}"
+echo -e "${CYAN} 2. 点击 [创建令牌] -> 找到 [编辑区域 DNS (Edit zone DNS)] 点击 [使用模板]${PLAIN}"
+echo -e "${CYAN} 3. 区域资源选择: [包括] -> [特定区域] -> 选择你的域名${PLAIN}"
+echo -e "${CYAN} 4. 底部点击 [继续以显示摘要] -> 最终确认页点击 [创建令牌] 并复制生成的令牌${PLAIN}"
+echo -e "${CYAN}---------------------------------------------------------------------${PLAIN}"
                     read -r -p "请输入 Cloudflare API Token: " cf_token || cf_token=""
                     if [[ -z "$cf_token" ]]; then
                         echo -e "${YELLOW}未输入 Token，将自动使用 IP 自签证书。${PLAIN}"
@@ -1501,35 +1512,29 @@ ${GREEN}================ 在线订阅站点模块配置 ================${PLAIN}
 menu_singbox_manage() {
     while true; do
         [ -t 1 ] && clear
-        echo -e "
-${GREEN}=================== sing-box 内核管理 ===================${PLAIN}"
-        echo -e " 1. 重启 sing-box 服务"
-        echo -e " 2. 停止 sing-box 服务"
-        echo -e " 3. 启动 sing-box 服务"
-        echo -e " 4. 检查并更新 sing-box 内核"
-        echo -e " 5. 查看实时运行日志"
+        echo -e "\n${GREEN}=================== sing-box 内核管理 ===================${PLAIN}"
+        echo -e " 1. 重启 / 启动 sing-box 服务"
+        echo -e " 2. 检查并更新 sing-box 内核"
+        echo -e " 3. 查看实时运行日志"
         echo -e " 0. 返回主菜单"
         echo -e "${GREEN}==========================================================${PLAIN}"
         local opt=""
-        read -r -p "请输入选项 [0-5]: " opt || opt=""
+        read -r -p "请输入选项 [0-3]: " opt || opt=""
         case "$opt" in
             1)
-                systemctl restart sing-box 2>/dev/null && echo -e "${GREEN}sing-box 服务已重启！${PLAIN}" || echo -e "${RED}重启失败${PLAIN}"
-                sleep 1
+                if systemctl is-active --quiet sing-box 2>/dev/null; then
+                    systemctl restart sing-box 2>/dev/null && echo -e "\n${GREEN}✓ sing-box 服务已成功平滑重启！${PLAIN}" || echo -e "\n${RED}重启失败${PLAIN}"
+                else
+                    systemctl start sing-box 2>/dev/null && echo -e "\n${GREEN}✓ sing-box 服务已成功启动！${PLAIN}" || echo -e "\n${RED}启动失败${PLAIN}"
+                fi
+                echo ""
+                read -r -p "按回车键继续..." dummy || true
                 ;;
             2)
-                systemctl stop sing-box 2>/dev/null && echo -e "${YELLOW}sing-box 服务已停止！${PLAIN}" || echo -e "${RED}停止失败${PLAIN}"
-                sleep 1
-                ;;
-            3)
-                systemctl start sing-box 2>/dev/null && echo -e "${GREEN}sing-box 服务已启动！${PLAIN}" || echo -e "${RED}启动失败${PLAIN}"
-                sleep 1
-                ;;
-            4)
                 update_singbox_core || true
                 read -r -p "按回车键返回..." dummy || true
                 ;;
-            5)
+            3)
                 echo -e "\n${BLUE}正在获取 sing-box 最近 40 行运行日志：${PLAIN}\n"
                 journalctl -u sing-box -o cat -n 40 --no-pager || true
                 echo ""

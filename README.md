@@ -82,12 +82,12 @@ simbo del           # 彻底卸载并还原网络规则
 4. **保存 (Save)**。
 
 ### 步骤 2：生成专属 API Token
-1. Cloudflare 右上角头像 $\to$ **我的个人资料 (My Profile)**；
+1. Cloudflare 右上角头像 $\to$ **配置文件 (Profile)**；
 2. 左侧 **API 令牌 (API Tokens)** $\to$ **创建令牌 (Create Token)**；
 3. 找到模板 **编辑区域 DNS (Edit zone DNS)**，点击 **使用模板 (Use template)**；
 4. 配置：
    * **令牌名称**：任意（如 `simple-box-cert`）
-   * **区域资源 (Zone Resources)**：**包含 (Include)** $\to$ **特定区域 (Specific zone)** $\to$ 选中目标域名
+   * **区域资源 (Zone Resources)**：**包括 (Include)** $\to$ **特定区域 (Specific zone)** $\to$ 选中目标域名
    * 其余保持默认
 5. 底部 **继续以显示摘要** $\to$ **创建令牌**；
 6. 复制生成的 Token（仅展示一次，妥善保存）。

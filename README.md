@@ -67,13 +67,7 @@ bash <(wget -qO- https://cdn.jsdelivr.net/gh/comegome/simple-box@main/simple-box
 安装完成后脚本会把自身落地到 `/usr/local/share/simple-box/simple-box.sh`，并注册软链 `/usr/local/bin/simbo`（管道执行 `bash <(curl ...)` 场景同样支持）。之后在服务器**任意路径**下直接输入 **`simbo`**：
 
 ```bash
-simbo               # 打开交互式控制面板
-simbo sub           # 查看在线订阅链接与本地 YAML
-simbo link          # 查看单独节点链接 (vless:// / hy2://) 与二维码
-simbo bbr           # 管理 TCP BBR 拥塞控制（开启 / 关闭）
-simbo update        # 检查并升级 sing-box 官方内核
-simbo update force  # 强制重新下载覆盖当前内核
-simbo del           # 彻底卸载并还原网络规则
+simbo               # 打开 Simple-Box 极简交互控制面板
 ```
 
 ---

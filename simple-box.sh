@@ -603,11 +603,11 @@ generate_full_client_config() {
         echo "mode: rule" >> "$full_config_file"
     fi
 
-    # 分流规则防死锁：无论域名或 IP 均注入顶层直连，确保节点更新/失效时订阅拉取 100% 不死锁
+    # 分流规则防死锁：域名模式精准直连该域名；IP 模式直连 VPS 本机 IP
     if [[ "$domain_or_ip" == "$server_ip" || -z "$domain_or_ip" ]]; then
         sed -i "/^rules:/a \  - IP-CIDR,${server_ip}/32,DIRECT,no-resolve" "$full_config_file"
     else
-        sed -i "/^rules:/a \  - DOMAIN,${domain_or_ip},DIRECT\n  - IP-CIDR,${server_ip}/32,DIRECT,no-resolve" "$full_config_file"
+        sed -i "/^rules:/a \  - DOMAIN,${domain_or_ip},DIRECT" "$full_config_file"
     fi
 
     local ports_line=""
@@ -1877,13 +1877,6 @@ menu() {
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
     case "${1:-}" in
         install|reinstall) install_node || exit 1 ;;
-        reality) menu_reality_module ;;
-        hy2) menu_hy2_module ;;
-        sub|yaml) show_subscription ;;
-        link|url|qr) show_links ;;
-        bbr) manage_bbr ;;
-        core|box) menu_singbox_manage ;;
-        del|uninstall) uninstall_all ;;
         *) menu ;;
     esac
 fi

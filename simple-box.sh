@@ -409,6 +409,19 @@ clear_port_hopping() {
             iptables -t nat -D PREROUTING -p udp --dport "$r" -j REDIRECT --to-ports "$tport" 2>/dev/null || true
         fi
     done
+    # 清理历史版本遗留的 IPv6 跳跃规则（本脚本已不支持 IPv6，只删不加）
+    if command -v ip6tables &>/dev/null; then
+        local r6
+        for r6 in $(ip6tables -t nat -S PREROUTING 2>/dev/null \
+            | grep -oP -- '--dport \K[0-9]+:[0-9]+(?=.*REDIRECT --to-ports)' | sort -u || true); do
+            local t6
+            t6=$(ip6tables -t nat -S PREROUTING 2>/dev/null \
+                | grep -F -- "--dport $r6 " | grep -oP -- '--to-ports \K[0-9]+' | head -1 || true)
+            [[ -n "$t6" ]] && ip6tables -t nat -D PREROUTING -p udp --dport "$r6" \
+                -j REDIRECT --to-ports "$t6" 2>/dev/null || true
+        done
+    fi
+
     if command -v netfilter-persistent &>/dev/null; then
         netfilter-persistent save >/dev/null 2>&1 || true
     fi
@@ -524,7 +537,8 @@ EOF
         echo -e "${BLUE}配置 Caddy HTTP 订阅分发站点 (端口 ${sub_port}, 客户端直接导入免证书报错)...${PLAIN}"
         cat > "/etc/caddy/sites/simple-box-sub.caddy" <<EOF
 # Simple-Box HTTP 订阅分发站点 (IP 自签兼容模式)
-http://0.0.0.0:${sub_port} {
+http://:${sub_port} {
+    bind 0.0.0.0
     @sub path /${token}/config.yaml /${token}/provider.yaml /${token}/links.txt
     handle @sub {
         root * ${WEB_DIR}
@@ -1253,6 +1267,10 @@ uninstall_all() {
         if [[ -n "${HY_RANGE:-}" && -n "${HY_PORT:-}" ]]; then
             echo -e "${BLUE}精准清理端口跳跃规则...${PLAIN}"
             iptables -t nat -D PREROUTING -p udp --dport "$HY_RANGE" -j REDIRECT --to-ports "$HY_PORT" 2>/dev/null || true
+            # 清理历史版本可能遗留的 IPv6 规则
+            if command -v ip6tables &>/dev/null; then
+                ip6tables -t nat -D PREROUTING -p udp --dport "$HY_RANGE" -j REDIRECT --to-ports "$HY_PORT" 2>/dev/null || true
+            fi
             if command -v netfilter-persistent &>/dev/null; then
                 netfilter-persistent save >/dev/null 2>&1 || true
             fi

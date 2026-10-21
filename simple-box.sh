@@ -5,7 +5,7 @@
 #   1. VLESS-TCP-Reality-Vision (日常主力直连)
 #   2. Hysteria 2 (晚高峰弱网/UDP端口跳跃, 基于 Cloudflare 证书)
 # 订阅分发:
-#   集成 Caddy 8444 HTTPS，输出组装好的完整客户端规则模板订阅与纯节点订阅
+#   集成 Caddy HTTPS 安全分发，输出完整规则模板订阅与纯节点订阅，附带 URI 与二维码
 # ==============================================================================
 set -e
 
@@ -21,6 +21,7 @@ CERT_DIR="${CONF_DIR}/cert"
 WEB_DIR="${CONF_DIR}/web"
 ENV_FILE="${CONF_DIR}/env.conf"
 YAML_PROVIDER="${CONF_DIR}/clash_meta_provider.yaml"
+LINKS_FILE="${CONF_DIR}/links.txt"
 TEMPLATE_FILE="${CONF_DIR}/template.yaml"
 
 [[ $EUID -ne 0 ]] && echo -e "${RED}错误: 必须使用 root 权限运行此脚本！${PLAIN}" && exit 1
@@ -48,6 +49,9 @@ check_port_occupied() {
         if echo "$in_use" | grep -q "sing-box"; then
             echo -e "${BLUE}提示: 端口 ${port} 当前由已有 sing-box 进程使用，重置安装将自动平滑接管。${PLAIN}"
             return 0
+        elif echo "$in_use" | grep -q "caddy"; then
+            echo -e "${BLUE}提示: 端口 ${port} 当前由已有 caddy 订阅服务使用，重置安装将自动复用。${PLAIN}"
+            return 0
         else
             echo -e "${RED}警告: ${proto^^} 端口 ${port} 已被外部服务占用！${PLAIN}"
             echo -e "${YELLOW}占用详情: ${in_use}${PLAIN}"
@@ -60,7 +64,7 @@ check_port_occupied() {
 # 基础依赖检查与安装
 install_deps() {
     local missing=()
-    for cmd in curl tar jq openssl iptables socat; do
+    for cmd in curl tar jq openssl iptables socat qrencode; do
         if ! command -v "$cmd" &>/dev/null; then
             missing+=("$cmd")
         fi
@@ -78,7 +82,7 @@ install_deps() {
     fi
 }
 
-# 检查并安装 Caddy
+# 检查并自动安装 Caddy
 install_caddy() {
     if command -v caddy &>/dev/null; then
         return 0
@@ -141,7 +145,6 @@ issue_cf_cert() {
 
     export CF_Token="$cf_token"
 
-    # 若本地已有该域名的有效证书，直接同步部署
     if [[ -f "$HOME/.acme.sh/${domain}_ecc/fullchain.cer" && -f "$HOME/.acme.sh/${domain}_ecc/${domain}.key" ]]; then
         echo -e "${GREEN}检测到本地已有 ${domain} 的有效证书，直接同步部署...${PLAIN}"
     else
@@ -155,8 +158,9 @@ issue_cf_cert() {
         --key-file "${CERT_DIR}/private.key" \
         --reloadcmd "systemctl reload sing-box 2>/dev/null || true; systemctl reload caddy 2>/dev/null || true"
 
-    chmod 755 "$CONF_DIR" "$CERT_DIR" "$WEB_DIR" 2>/dev/null || true
+    chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
     chmod 644 "${CERT_DIR}"/* 2>/dev/null || true
+
     if [[ -f "${CERT_DIR}/fullchain.cer" && -f "${CERT_DIR}/private.key" ]]; then
         echo -e "${GREEN}证书已成功部署至 ${CERT_DIR}！${PLAIN}"
     else
@@ -165,7 +169,7 @@ issue_cf_cert() {
     fi
 }
 
-# 端口跳跃 iptables 规则配置 (精准增量设置)
+# 端口跳跃 iptables 规则配置
 setup_port_hopping() {
     local hy_port="$1"
     local range="$2"
@@ -192,30 +196,27 @@ setup_port_hopping() {
 setup_caddy_subscription() {
     local domain="$1"
     local token="$2"
-    local sub_port="8444"
+    local sub_port="$3"
 
     install_caddy
 
     echo -e "${BLUE}配置 Caddy HTTPS 安全订阅站点 (端口 ${sub_port})...${PLAIN}"
     mkdir -p "/etc/caddy/sites"
     
-    # 确保主 Caddyfile 包含 sites/*.caddy
     if [ ! -f /etc/caddy/Caddyfile ]; then
         echo -e "import sites/*.caddy\n" > /etc/caddy/Caddyfile
     elif ! grep -q "import sites/\*\.caddy" /etc/caddy/Caddyfile; then
         echo -e "\nimport sites/*.caddy" >> /etc/caddy/Caddyfile
     fi
 
-    # 清除旧的同名站点配置，避免重复绑定冲突
-    rm -f "/etc/caddy/sites/${domain}-8444.caddy" "/etc/caddy/sites/simple-box.caddy"
+    rm -f "/etc/caddy/sites/${domain}-${sub_port}.caddy" "/etc/caddy/sites/simple-box.caddy"
 
-    # 生成安全隔离站点配置（仅放行对应 Token，其余一律 404）
-    cat > "/etc/caddy/sites/${domain}-8444.caddy" <<EOF
+    cat > "/etc/caddy/sites/${domain}-${sub_port}.caddy" <<EOF
 # Simple-Box HTTPS 订阅分发站点
 ${domain}:${sub_port} {
     tls ${CERT_DIR}/fullchain.cer ${CERT_DIR}/private.key
 
-    @sub path /sub_${token}/config.yaml /sub_${token}/provider.yaml
+    @sub path /sub_${token}/config.yaml /sub_${token}/provider.yaml /sub_${token}/links.txt
     handle @sub {
         root * ${WEB_DIR}
         header Content-Type "text/plain; charset=utf-8"
@@ -228,15 +229,15 @@ ${domain}:${sub_port} {
 }
 EOF
 
-    # 防火墙精准放行 8444
     if command -v ufw &>/dev/null && ufw status | grep -qw "active"; then
         ufw allow "${sub_port}/tcp" >/dev/null 2>&1 || true
     fi
 
+    chmod 755 "$WEB_DIR" 2>/dev/null || true
     systemctl restart caddy
 }
 
-# 组装完整的客户端订阅文件
+# 组装客户端订阅与独立链接
 generate_full_client_config() {
     local domain="$1"
     local token="$2"
@@ -253,7 +254,6 @@ generate_full_client_config() {
 
     mkdir -p "${WEB_DIR}/sub_${token}"
 
-    # 下载/复制模板
     if [ ! -f "$TEMPLATE_FILE" ]; then
         curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/template.yaml -o "$TEMPLATE_FILE" 2>/dev/null || true
     fi
@@ -333,6 +333,17 @@ proxies:
     skip-cert-verify: false
 EOF
     cp -f "$provider_file" "$YAML_PROVIDER"
+
+    # 3. 组装原生分享链接
+    local vless_link="vless://${user_uuid}@${server_ip}:${vl_port}?security=reality&encryption=none&pbk=${vl_pubkey}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${vl_sni}&sid=${vl_shortid}#${node_prefix}-VLESS-Reality"
+    local hy2_link="hysteria2://${hy_password}@${domain}:${hy_port}/?sni=${domain}&insecure=0&mport=${hy_ports_display}#${node_prefix}-Hysteria2"
+    
+    local links_out="${WEB_DIR}/sub_${token}/links.txt"
+    cat > "$links_out" <<EOF
+${vless_link}
+${hy2_link}
+EOF
+    cp -f "$links_out" "$LINKS_FILE"
 }
 
 # 部署与配置主函数
@@ -340,7 +351,7 @@ install_node() {
     install_deps
     [[ ! -f /usr/local/bin/sing-box ]] && update_singbox_core
 
-    mkdir -p "$CONF_DIR"
+    mkdir -p "$CONF_DIR" "$WEB_DIR"
     local server_ip=$(curl -s4m5 https://icanhazip.com || curl -s4m5 https://api.ipify.org || echo "YOUR_SERVER_IP")
 
     echo -e "\n${YELLOW}=== 1. 配置 VLESS-Reality 参数 ===${PLAIN}"
@@ -394,6 +405,21 @@ install_node() {
         read -p "请输入端口跳跃范围 [默认 20000:40000]: " hy_range
     fi
     hy_range=${hy_range:-${HY_RANGE:-20000:40000}}
+
+    echo -e "\n${YELLOW}=== 3. 配置 HTTPS 订阅站点参数 ===${PLAIN}"
+    while true; do
+        if [[ -z "$SUB_PORT" ]]; then
+            read -p "请输入 Caddy 订阅 HTTPS 监听端口 [默认 8444]: " sub_port
+        fi
+        sub_port=${sub_port:-${SUB_PORT:-8444}}
+        if check_port_occupied "$sub_port" "tcp"; then
+            break
+        else
+            echo -e "${YELLOW}请更换其他未占用的 TCP 端口！${PLAIN}"
+            SUB_PORT=""
+            sub_port=""
+        fi
+    done
 
     if [[ -z "$NODE_PREFIX" ]]; then
         read -p "请输入节点名称前缀 (如 HK / US / Oracle-O1) [默认 Node]: " node_prefix
@@ -495,6 +521,7 @@ HY_DOMAIN="${hy_domain}"
 HY_PORT="${hy_port}"
 HY_RANGE="${hy_range}"
 HY_PASS="${hy_password}"
+SUB_PORT="${sub_port}"
 SUB_TOKEN="${sub_token}"
 EOF
 
@@ -525,7 +552,7 @@ EOF
     # 部署 Caddy 订阅并组装完整客户端配置
     local hy_ports_display="${hy_port},${hy_range/:/-}"
     generate_full_client_config "$hy_domain" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password"
-    setup_caddy_subscription "$hy_domain" "$sub_token"
+    setup_caddy_subscription "$hy_domain" "$sub_token" "$sub_port"
 
     show_subscription
 }
@@ -537,11 +564,12 @@ show_subscription() {
         return 1
     fi
     source "$ENV_FILE"
-    local sub_url="https://${HY_DOMAIN}:8444/sub_${SUB_TOKEN}/config.yaml"
-    local provider_url="https://${HY_DOMAIN}:8444/sub_${SUB_TOKEN}/provider.yaml"
+    local port=${SUB_PORT:-8444}
+    local sub_url="https://${HY_DOMAIN}:${port}/sub_${SUB_TOKEN}/config.yaml"
+    local provider_url="https://${HY_DOMAIN}:${port}/sub_${SUB_TOKEN}/provider.yaml"
 
     echo -e "\n${GREEN}====================== 节点在线订阅已生成 ======================${PLAIN}"
-    echo -e "1. ${YELLOW}完整配置订阅 (推荐 ClashX.Meta 直接导入托管)${PLAIN}:"
+    echo -e "1. ${YELLOW}完整配置订阅 (推荐 ClashX.Meta / Mihomo 直接导入托管)${PLAIN}:"
     echo -e "   ${GREEN}${sub_url}${PLAIN}"
     echo -e "   (内置 MIPS TUN、纯 IP DoH、ARC 缓存与 📌节点选择 分流规则)\n"
     echo -e "2. ${YELLOW}纯节点 Provider 订阅 (供自建规则文件引用)${PLAIN}:"
@@ -553,6 +581,33 @@ show_subscription() {
         cat "$YAML_PROVIDER"
         echo -e "${YELLOW}==========================================${PLAIN}\n"
     fi
+}
+
+# 展示单独节点链接与二维码
+show_links() {
+    if [[ ! -f "$LINKS_FILE" ]]; then
+        echo -e "${RED}未找到节点链接文件，请先执行安装！${PLAIN}"
+        return 1
+    fi
+    local vless_url=$(head -n 1 "$LINKS_FILE")
+    local hy2_url=$(tail -n 1 "$LINKS_FILE")
+
+    echo -e "\n${GREEN}====================== 节点原生分享链接 ======================${PLAIN}"
+    echo -e "${YELLOW}[1] VLESS-Reality 链接:${PLAIN}"
+    echo -e "${GREEN}${vless_url}${PLAIN}"
+    if command -v qrencode &>/dev/null; then
+        echo -e "\n${YELLOW}[VLESS-Reality 二维码]:${PLAIN}"
+        qrencode -t ANSIUTF8 "${vless_url}"
+    fi
+
+    echo -e "\n--------------------------------------------------------------"
+    echo -e "${YELLOW}[2] Hysteria 2 链接:${PLAIN}"
+    echo -e "${GREEN}${hy2_url}${PLAIN}"
+    if command -v qrencode &>/dev/null; then
+        echo -e "\n${YELLOW}[Hysteria 2 二维码]:${PLAIN}"
+        qrencode -t ANSIUTF8 "${hy2_url}"
+    fi
+    echo -e "${GREEN}==============================================================${PLAIN}\n"
 }
 
 # 彻底干净卸载
@@ -579,8 +634,8 @@ uninstall_all() {
                 netfilter-persistent save >/dev/null 2>&1 || true
             fi
         fi
-        # 清除 Caddy 站点配置
-        rm -f "/etc/caddy/sites/${HY_DOMAIN}-8444.caddy" "/etc/caddy/sites/simple-box.caddy"
+        local port=${SUB_PORT:-8444}
+        rm -f "/etc/caddy/sites/${HY_DOMAIN}-${port}.caddy" "/etc/caddy/sites/simple-box.caddy"
         systemctl reload caddy 2>/dev/null || true
     fi
 
@@ -598,10 +653,11 @@ menu() {
     echo -e "${GREEN}====================================================${PLAIN}"
     echo -e " 1. 安装 / 重置配置 (VLESS-Reality + Hysteria2 + Caddy)"
     echo -e " 2. 查看在线订阅链接与节点 YAML"
-    echo -e " 3. 检查并升级 sing-box 官方最新内核"
-    echo -e " 4. 重启服务 (sing-box 与 Caddy)"
-    echo -e " 5. 查看 sing-box 运行日志"
-    echo -e " 6. 彻底干净卸载"
+    echo -e " 3. 查看单独节点链接 (vless:// / hy2://) 与二维码"
+    echo -e " 4. 检查并升级 sing-box 官方最新内核"
+    echo -e " 5. 重启服务 (sing-box 与 Caddy)"
+    echo -e " 6. 查看 sing-box 运行日志"
+    echo -e " 7. 彻底干净卸载"
     echo -e " 0. 退出"
     echo -e "${GREEN}====================================================${PLAIN}"
     
@@ -622,17 +678,18 @@ menu() {
         fi
     fi
     echo -e "Sing-box 状态: ${sb_status} | Caddy 订阅状态: ${caddy_status}\n"
-    read -p "请输入选项 [0-6]: " opt
+    read -p "请输入选项 [0-7]: " opt
     case "$opt" in
         1) install_node ;;
         2) show_subscription ;;
-        3) update_singbox_core ;;
-        4) 
+        3) show_links ;;
+        4) update_singbox_core ;;
+        5) 
             systemctl restart sing-box && systemctl restart caddy 2>/dev/null || true
             echo -e "${GREEN}服务已重启！${PLAIN}"
             ;;
-        5) journalctl -u sing-box -o cat -e -f ;;
-        6) uninstall_all ;;
+        6) journalctl -u sing-box -o cat -e -f ;;
+        7) uninstall_all ;;
         0) exit 0 ;;
         *) echo -e "${RED}无效选项！${PLAIN}" ;;
     esac
@@ -642,6 +699,7 @@ case "$1" in
     install) install_node ;;
     update) update_singbox_core ;;
     yaml|sub) show_subscription ;;
+    link|url|qr) show_links ;;
     del|uninstall) uninstall_all ;;
     *) menu ;;
 esac

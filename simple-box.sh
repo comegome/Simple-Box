@@ -784,7 +784,7 @@ uninstall_all() {
 # 交互控制台主循环
 menu() {
     while true; do
-        clear
+        [ -t 1 ] && clear
         echo -e "${GREEN}====================================================${PLAIN}"
         echo -e "${GREEN}        Simple-Box Manager - 极简安全控制台        ${PLAIN}"
         echo -e "${GREEN}====================================================${PLAIN}"
@@ -872,7 +872,13 @@ menu() {
 
 case "$1" in
     install) install_node ;;
-    update) update_singbox_core "force" ;;
+    update) 
+        if [[ "$2" == "force" || "$2" == "-f" ]]; then
+            update_singbox_core "force"
+        else
+            update_singbox_core
+        fi
+        ;;
     yaml|sub) show_subscription ;;
     link|url|qr) show_links ;;
     bbr) enable_bbr ;;

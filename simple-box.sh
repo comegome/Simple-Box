@@ -45,9 +45,14 @@ check_port_occupied() {
         in_use=$(ss -ulnp 2>/dev/null | grep -E "[: ]${port} " || true)
     fi
     if [[ -n "$in_use" ]]; then
-        echo -e "${RED}警告: ${proto^^} 端口 ${port} 已被占用！${PLAIN}"
-        echo -e "${YELLOW}占用详情: ${in_use}${PLAIN}"
-        return 1
+        if echo "$in_use" | grep -q "sing-box"; then
+            echo -e "${BLUE}提示: 端口 ${port} 当前由已有 sing-box 进程使用，重置安装将自动平滑接管。${PLAIN}"
+            return 0
+        else
+            echo -e "${RED}警告: ${proto^^} 端口 ${port} 已被外部服务占用！${PLAIN}"
+            echo -e "${YELLOW}占用详情: ${in_use}${PLAIN}"
+            return 1
+        fi
     fi
     return 0
 }
@@ -150,6 +155,8 @@ issue_cf_cert() {
         --key-file "${CERT_DIR}/private.key" \
         --reloadcmd "systemctl reload sing-box 2>/dev/null || true; systemctl reload caddy 2>/dev/null || true"
 
+    chmod 755 "$CONF_DIR" "$CERT_DIR" "$WEB_DIR" 2>/dev/null || true
+    chmod 644 "${CERT_DIR}"/* 2>/dev/null || true
     if [[ -f "${CERT_DIR}/fullchain.cer" && -f "${CERT_DIR}/private.key" ]]; then
         echo -e "${GREEN}证书已成功部署至 ${CERT_DIR}！${PLAIN}"
     else

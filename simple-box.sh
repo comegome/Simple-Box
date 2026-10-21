@@ -638,9 +638,11 @@ generate_full_client_config() {
     mkdir -p "${WEB_DIR}/${token}"
 
     if [ ! -f "$TEMPLATE_FILE" ]; then
-        local script_dir
-        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-        if [ -f "${script_dir}/template.yaml" ]; then
+        local script_dir=""
+        if [[ -n "${BASH_SOURCE[0]:-}" ]]; then
+            script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        fi
+        if [[ -n "$script_dir" && -f "${script_dir}/template.yaml" ]]; then
             cp -f "${script_dir}/template.yaml" "$TEMPLATE_FILE" 2>/dev/null || true
         else
             curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/template.yaml -o "$TEMPLATE_FILE" 2>/dev/null || true
@@ -772,9 +774,10 @@ install_simbo_command() {
 
     mkdir -p "$share_dir"
 
-    if [[ -f "$0" && -r "$0" ]]; then
-        # 本地脚本文件直接复制
-        install -m 755 "$0" "$target" 2>/dev/null || cp -f "$0" "$target" 2>/dev/null || true
+    # 仅当 $0 确实是一个真实的脚本文件时才复制（管道执行时 $0 为 bash，不能复制）
+    if [[ -n "${BASH_SOURCE[0]:-}" && -f "${BASH_SOURCE[0]}" && -r "${BASH_SOURCE[0]}" ]]; then
+        install -m 755 "${BASH_SOURCE[0]}" "$target" 2>/dev/null \
+            || cp -f "${BASH_SOURCE[0]}" "$target" 2>/dev/null || true
     fi
 
     # 管道执行（$0 为 /dev/fd/xx）或复制失败时，从仓库拉取一份落地
@@ -1999,7 +2002,18 @@ menu() {
     done
 }
 
-if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+# 管道执行（curl ... | bash）时 stdin 就是脚本自身的输入流，交互式 read 会立即 EOF。
+# 若存在可用终端，把 stdin 重新接到 /dev/tty，保证菜单可以正常交互。
+if [[ -z "${BASH_SOURCE[0]:-}" && ! -t 0 && -r /dev/tty ]] && { [[ -z "${1:-}" ]] || [[ "${1:-}" == "menu" ]]; }; then
+    exec </dev/tty
+fi
+
+# 入口守卫：三种执行方式都要能进入主流程
+#   1) ./simple-box.sh / bash simple-box.sh  -> BASH_SOURCE[0] == $0
+#   2) bash <(curl ...)                      -> BASH_SOURCE[0] == /dev/fd/63 == $0
+#   3) curl ... | bash                       -> BASH_SOURCE[0] 为空，$0 为 bash（管道）
+_ENTRY_SRC="${BASH_SOURCE[0]:-}"
+if [[ -z "$_ENTRY_SRC" || "$_ENTRY_SRC" == "$0" ]]; then
     case "${1:-}" in
         install|reinstall) install_node || exit 1 ;;
         *) menu ;;

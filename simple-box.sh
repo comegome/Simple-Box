@@ -35,7 +35,7 @@ get_arch() {
 # 基础依赖检查与安装 (最小化，不影响系统现有防火墙策略)
 install_deps() {
     local missing=()
-    for cmd in curl tar jq openssl ufw; do
+    for cmd in curl tar jq openssl iptables; do
         if ! command -v "$cmd" &>/dev/null; then
             missing+=("$cmd")
         fi

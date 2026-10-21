@@ -230,8 +230,13 @@ update_singbox_core() {
         cur_ver=$(/usr/local/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
     fi
 
-    local tag=$(curl -sSL "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | grep -Po '"tag_name": "\K[^"]*')
-    [[ -z "$tag" ]] && echo -e "${RED}获取最新版本失败，请检查网络！${PLAIN}" && return 1
+    local tag=""
+    tag=$(curl -sSL --max-time 20 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null \
+        | grep -Po '"tag_name": "\K[^"]*' || true)
+    if [[ -z "$tag" ]]; then
+        echo -e "${RED}获取最新版本失败（GitHub API 不通或被限流），已保留现有版本。${PLAIN}"
+        return 1
+    fi
     local latest_ver=${tag#v}
     local arch=$(get_arch)
 
@@ -350,6 +355,32 @@ issue_cert_bundle() {
         return 1
     fi
     echo -e "${GREEN}TLS 证书已就绪: ${CERT_DIR} (模式: ${CERT_MODE})${PLAIN}"
+    return 0
+}
+
+# 仅签发 IP 自签证书（独立函数，供子菜单复用）
+issue_self_signed_cert() {
+    local server_ip="$1"
+    mkdir -p "$CERT_DIR"
+    [[ -z "$server_ip" ]] && { echo -e "${RED}缺少公网 IP，无法生成自签证书。${PLAIN}"; return 1; }
+
+    echo -e "${YELLOW}为服务器 IP (${server_ip}) 生成 10 年期自签 ECC 证书...${PLAIN}"
+    local tmp_key="${CERT_DIR}/.private.key.tmp"
+    local tmp_crt="${CERT_DIR}/.fullchain.cer.tmp"
+    if ! openssl ecparam -genkey -name prime256v1 -out "$tmp_key" >/dev/null 2>&1; then
+        echo -e "${RED}自签私钥生成失败（openssl 不可用？）。${PLAIN}"; return 1
+    fi
+    if ! openssl req -new -x509 -days 3650 -key "$tmp_key" -out "$tmp_crt" \
+        -subj "/CN=${server_ip}" -addext "subjectAltName=IP:${server_ip},IP:127.0.0.1" >/dev/null 2>&1; then
+        rm -f "$tmp_key" "$tmp_crt"
+        echo -e "${RED}自签证书生成失败。${PLAIN}"; return 1
+    fi
+    # 原子替换，避免 sing-box/caddy 读到半写状态
+    mv -f "$tmp_key" "${CERT_DIR}/private.key"
+    mv -f "$tmp_crt" "${CERT_DIR}/fullchain.cer"
+    chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
+    chmod 644 "${CERT_DIR}"/* 2>/dev/null || true
+    echo -e "${GREEN}IP 自签证书已就绪 (10 年有效期)。${PLAIN}"
     return 0
 }
 
@@ -738,13 +769,20 @@ EOF
 
 # 校验 sing-box 配置、重启并全量刷新客户端文件与 Caddy 订阅
 render_and_reload() {
+    if [[ ! -x /usr/local/bin/sing-box ]]; then
+        echo -e "${RED}未找到 sing-box 内核，无法应用配置。${PLAIN}"
+        return 1
+    fi
     if ! /usr/local/bin/sing-box check -c "$CONF_FILE" >/dev/null 2>&1; then
-        echo -e "${RED}生成的 sing-box 配置文件校验失败！请检查错误信息：${PLAIN}"
+        echo -e "${RED}生成的 sing-box 配置文件校验失败！已回滚到上一份可用配置。${PLAIN}"
         /usr/local/bin/sing-box check -c "$CONF_FILE" || true
         return 1
     fi
 
-    systemctl restart sing-box
+    if ! systemctl restart sing-box 2>/dev/null; then
+        echo -e "${RED}sing-box 重启失败，请查看: journalctl -u sing-box -n 30${PLAIN}"
+        return 1
+    fi
 
     local hy_ports_display="$hy_port"
     [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"
@@ -766,7 +804,7 @@ install_node() {
     # 读取既有配置，作为重置时的默认值（直接回车即沿用）
     local old_vl_port="" old_vl_sni="" old_hy_port="" old_hy_range="" old_sub_port="" old_prefix="" old_domain=""
     if [[ -f "$ENV_FILE" ]]; then
-        source "$ENV_FILE"
+        set +e; source "$ENV_FILE"; set -e
         old_vl_port="$VL_PORT"; old_vl_sni="$VL_SNI"; old_hy_port="$HY_PORT"
         old_hy_range="$HY_RANGE"; old_sub_port="$SUB_PORT"; old_prefix="$NODE_PREFIX"
         [[ "$HY_SKIP_CERT" != "true" ]] && old_domain="$HY_DOMAIN"
@@ -1094,7 +1132,7 @@ show_subscription() {
 show_links() {
     if [[ ! -f "$LINKS_FILE" ]]; then
         if [[ -f "$ENV_FILE" ]]; then
-            source "$ENV_FILE"
+            set +e; source "$ENV_FILE"; set -e
             local hy_ports_display="${HY_PORT}"
             [[ -n "${HY_RANGE:-}" ]] && hy_ports_display="${HY_PORT},${HY_RANGE/:/-}"
             local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
@@ -1152,8 +1190,8 @@ uninstall_all() {
     systemctl daemon-reload
 
     if [[ -f "$ENV_FILE" ]]; then
-        source "$ENV_FILE"
-        if [[ -n "$HY_RANGE" && -n "$HY_PORT" ]]; then
+        set +e; source "$ENV_FILE"; set -e
+        if [[ -n "${HY_RANGE:-}" && -n "${HY_PORT:-}" ]]; then
             echo -e "${BLUE}精准清理端口跳跃规则...${PLAIN}"
             iptables -t nat -D PREROUTING -p udp --dport "$HY_RANGE" -j REDIRECT --to-ports "$HY_PORT" 2>/dev/null || true
             if command -v ip6tables &>/dev/null; then
@@ -1212,7 +1250,7 @@ ${GREEN}================= VLESS-Reality 模块配置 =================${PLAIN}"
                 local vl_port
                 while true; do
                     read -r -p "请输入 Reality 监听端口 [默认 ${VL_PORT}]: " vl_port || vl_port=""
-                    vl_port=${vl_port:-${VL_PORT}}
+                    vl_port=$(trim_string "${vl_port:-${VL_PORT}}")
                     if ! validate_port "$vl_port"; then
                         echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
                     fi
@@ -1233,8 +1271,17 @@ ${GREEN}================= VLESS-Reality 模块配置 =================${PLAIN}"
                 done
 
                 local vl_sni
-                read -r -p "请输入 Reality 伪装域名 (SNI) [默认 ${VL_SNI}]: " vl_sni || vl_sni=""
-                vl_sni=${vl_sni:-${VL_SNI}}
+                while true; do
+                    read -r -p "请输入 Reality 伪装域名 (SNI) [默认 ${VL_SNI}]: " vl_sni || vl_sni=""
+                    vl_sni=$(trim_string "${vl_sni:-${VL_SNI}}")
+                    if ! validate_domain "$vl_sni"; then
+                        echo -e "${RED}伪装域名格式非法（示例: gateway.icloud.com），请重新输入。${PLAIN}"; continue
+                    fi
+                    if [[ "$vl_sni" == "$SERVER_IP" ]]; then
+                        echo -e "${RED}伪装域名不能是本机 IP，必须为可正常 TLS1.3 握手的站点。${PLAIN}"; continue
+                    fi
+                    break
+                done
 
                 echo -e "${BLUE}生成新的 Reality 密钥凭证...${PLAIN}"
                 local key_pair
@@ -1262,7 +1309,11 @@ ${GREEN}================= VLESS-Reality 模块配置 =================${PLAIN}"
 
                 write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "$hy_enabled" "$hy_port" "$hy_password"
                 write_env_config
-                render_and_reload
+                if ! render_and_reload; then
+                    echo -e "${RED}Reality 模块更新失败，请检查上面的错误信息。${PLAIN}"
+                    read -r -p "按回车键返回..." dummy || true
+                    continue
+                fi
 
                 echo -e "\n${GREEN}VLESS-Reality 模块已成功更新！${PLAIN}"
                 echo -e "${CYAN}提示: 订阅链接与 Token 保持完全一致，客户端仅需点击“更新订阅”即可自动同步新节点。${PLAIN}"
@@ -1343,7 +1394,7 @@ echo -e "${CYAN}----------------------------------------------------------------
                 local hy_port
                 while true; do
                     read -r -p "请输入 Hysteria 2 主监听 UDP 端口 [默认 ${HY_PORT:-8443}]: " hy_port || hy_port=""
-                    hy_port=${hy_port:-${HY_PORT:-8443}}
+                    hy_port=$(trim_string "${hy_port:-${HY_PORT:-8443}}")
                     if ! validate_port "$hy_port"; then
                         echo -e "${RED}端口非法，请重新输入。${PLAIN}"; continue
                     fi
@@ -1360,7 +1411,7 @@ echo -e "${CYAN}----------------------------------------------------------------
                 local hy_range
                 while true; do
                     read -r -p "请输入端口跳跃范围 [默认 ${HY_RANGE:-20000:40000}] (none=不启用): " hy_range || hy_range=""
-                    hy_range=${hy_range:-${HY_RANGE:-20000:40000}}
+                    hy_range=$(trim_string "${hy_range:-${HY_RANGE:-20000:40000}}")
                     [[ "${hy_range,,}" == "none" ]] && { hy_range=""; break; }
                     if ! validate_range "$hy_range"; then
                         echo -e "${RED}范围格式非法，应为 起始:结束（如 20000:40000）。${PLAIN}"; continue
@@ -1379,22 +1430,27 @@ echo -e "${CYAN}----------------------------------------------------------------
                 done
 
                 if [[ -n "$hy_domain" && -n "$cf_token" ]]; then
-                    if issue_cert_bundle "$hy_domain" "$cf_token" "$SERVER_IP"; then
-                        CERT_MODE="domain"
+                    # issue_cert_bundle 内部会设置全局 CERT_MODE，必须以它为准而非返回码
+                    issue_cert_bundle "$hy_domain" "$cf_token" "$SERVER_IP" || true
+                    if [[ "$CERT_MODE" == "domain" ]]; then
                         target_host="$hy_domain"
                         hy_skip_cert="false"
                     else
-                        echo -e "${YELLOW}域名证书申请失败，自动降级为 IP 自签证书兜底。${PLAIN}"
-                        issue_self_signed_cert "$SERVER_IP"
+                        echo -e "${YELLOW}域名证书未成功，已降级为 IP 自签证书兜底。${PLAIN}"
                         CERT_MODE="selfsigned"
                         target_host="$SERVER_IP"
                         hy_domain=""
                         hy_skip_cert="true"
                     fi
                 else
-                    issue_self_signed_cert "$SERVER_IP"
+                    if ! issue_self_signed_cert "$SERVER_IP"; then
+                        echo -e "${RED}证书生成失败，操作中止。${PLAIN}"
+                        read -r -p "按回车键返回..." dummy || true
+                        continue
+                    fi
                     CERT_MODE="selfsigned"
                     target_host="$SERVER_IP"
+                    hy_domain=""
                     hy_skip_cert="true"
                 fi
 
@@ -1407,8 +1463,7 @@ echo -e "${CYAN}----------------------------------------------------------------
 
                 clear_port_hopping
                 if [[ -n "$hy_range" ]]; then
-                    iptables -t nat -A PREROUTING -p udp --dport "$hy_range" -j REDIRECT --to-ports "$hy_port"
-                    which netfilter-persistent &>/dev/null && netfilter-persistent save &>/dev/null || true
+                    setup_port_hopping "$hy_port" "$hy_range"
                 fi
 
                 local node_prefix="$NODE_PREFIX"
@@ -1422,9 +1477,21 @@ echo -e "${CYAN}----------------------------------------------------------------
                 local sub_port="$SUB_PORT"
                 local sub_token="$SUB_TOKEN"
 
+                # 老版本 env.conf 没有 VL_PRIVKEY，缺失时无法重建 Reality，必须先补齐
+                if [[ -z "$vl_privkey" ]]; then
+                    echo -e "${RED}环境配置缺少 Reality 私钥 (VL_PRIVKEY)，无法安全重建。${PLAIN}"
+                    echo -e "${YELLOW}请进入 [1] VLESS-Reality 模块配置 重新生成一次密钥，再回到此处。${PLAIN}"
+                    read -r -p "按回车键返回..." dummy || true
+                    continue
+                fi
+
                 write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "$hy_enabled" "$hy_port" "$hy_password"
                 write_env_config
-                render_and_reload
+                if ! render_and_reload; then
+                    echo -e "${RED}Hysteria 2 模块更新失败，请检查上面的错误信息。${PLAIN}"
+                    read -r -p "按回车键返回..." dummy || true
+                    continue
+                fi
 
                 echo -e "\n${GREEN}Hysteria 2 模块已成功更新！${PLAIN}"
                 echo -e "${CYAN}提示: 订阅链接与 Token 保持完全一致，客户端仅需点击“更新订阅”即可自动同步新节点。${PLAIN}"
@@ -1462,7 +1529,7 @@ ${GREEN}================ 在线订阅站点模块配置 ================${PLAIN}
                 local sub_port
                 while true; do
                     read -r -p "请输入新的订阅监听端口 [默认 ${SUB_PORT}]: " sub_port || sub_port=""
-                    sub_port=${sub_port:-${SUB_PORT}}
+                    sub_port=$(trim_string "${sub_port:-${SUB_PORT}}")
                     if ! validate_port "$sub_port"; then
                         echo -e "${RED}端口非法，请重新输入。${PLAIN}"; continue
                     fi

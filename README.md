@@ -9,7 +9,7 @@
 * 系统：Ubuntu 24.04+ 或 Debian 12+（官方仓库内置 Caddy，无需任何第三方源）
 * 硬件：x86_64 或 aarch64 处理器 + 256MB 及以上内存
 * 网络：IPv4 公网地址（双栈 VPS 仅在 IPv4 上提供服务；不支持纯 IPv6 VPS）
-* 客户端：Mihomo (Clash.Meta) 内核 $\ge$ v1.19.32，以完整支持 TUN 模式的 mips 用户态协议栈与 BBR 拥塞控制
+* 客户端：Mihomo (Clash.Meta) 内核 $\ge$ v1.19.32，以完整支持 TUN 模式的 mips 用户态协议栈
 
 ---
 

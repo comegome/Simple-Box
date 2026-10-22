@@ -9,14 +9,14 @@
 # ==============================================================================
 set -e
 
-RED='\033[0;31m'
-GREEN='\033[0;32m'
-YELLOW='\033[0;33m'
-BLUE='\033[0;34m'
-CYAN='\033[0;36m'
-PLAIN='\033[0m'
-GRAY='\033[0;90m'
-BOLD='\033[1m'
+RED=$'\033[0;31m'
+GREEN=$'\033[0;32m'
+YELLOW=$'\033[0;33m'
+BLUE=$'\033[0;34m'
+CYAN=$'\033[0;36m'
+PLAIN=$'\033[0m'
+GRAY=$'\033[0;90m'
+BOLD=$'\033[1m'
 
 CONF_DIR="/etc/sing-box"
 CONF_FILE="${CONF_DIR}/config.json"
@@ -155,7 +155,7 @@ check_domain_ip_binding() {
     fi
 
     local confirm=""
-    read -r -p "是否仍要继续使用该域名？[y/N (回车放弃，重新输入域名或使用 IP)]: " confirm || confirm=""
+    read -r -p "是否仍要继续使用该域名？y/N (回车放弃，重新输入域名或使用 IP): " confirm || confirm=""
     if [[ "${confirm,,}" == "y" || "${confirm,,}" == "yes" ]]; then
         echo -e "${YELLOW}已确认继续使用未匹配的域名: ${domain}${PLAIN}"
         return 0
@@ -260,7 +260,7 @@ prompt_cf_token() {
             return 0
         fi
         local retry=""
-        read -r -p "是否重新输入 Token？[Y/n (回车重试，输入 n 使用 IP 自签)]: " retry || retry=""
+        read -r -p "是否重新输入 Token？Y/n (回车重试，输入 n 使用 IP 自签): " retry || retry=""
         if [[ "${retry,,}" == "n" ]]; then
             echo -e "${YELLOW}已放弃域名证书，将自动使用 IP 自签证书。${PLAIN}"
             return 1
@@ -1344,7 +1344,7 @@ install_node() {
     echo -e "${GRAY}----------------------------------------------------${PLAIN}"
     local vl_port
     while true; do
-        read -r -p "请输入 Reality 监听端口 [默认 ${old_vl_port:-443}]: " vl_port || vl_port=""
+        read -r -p "请输入 Reality 监听端口 [默认: ${CYAN}${old_vl_port:-443}${PLAIN}]: " vl_port || vl_port=""
         vl_port=$(trim_string "${vl_port:-${old_vl_port:-443}}")
         if ! validate_port "$vl_port"; then
             echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
@@ -1356,7 +1356,7 @@ install_node() {
 
     local vl_sni
     while true; do
-        read -r -p "请输入 Reality 借壳伪装域名 [默认 ${old_vl_sni:-gateway.icloud.com}]: " vl_sni || vl_sni=""
+        read -r -p "请输入 Reality 借壳伪装域名 [默认: ${CYAN}${old_vl_sni:-gateway.icloud.com}${PLAIN}]: " vl_sni || vl_sni=""
         vl_sni=$(trim_string "$vl_sni")
         vl_sni=${vl_sni:-${old_vl_sni:-gateway.icloud.com}}
         if [[ "$vl_sni" == "$server_ip" ]]; then
@@ -1380,7 +1380,7 @@ install_node() {
     if [[ -n "$old_domain" ]]; then
         echo -e "检测到当前已配置域名: ${CYAN}${old_domain}${PLAIN}"
         local reuse_domain=""
-        read -r -p "是否继续使用此域名？[Y/n (回车沿用，输入 n 更换域名或使用 IP)]: " reuse_domain || reuse_domain=""
+        read -r -p "是否继续使用此域名？Y/n (回车沿用，输入 n 更换域名或使用 IP): " reuse_domain || reuse_domain=""
         if [[ -z "$reuse_domain" || "${reuse_domain,,}" == "y" || "${reuse_domain,,}" == "yes" ]]; then
             hy_domain="$old_domain"
             echo -e "已选择沿用当前域名: ${hy_domain}"
@@ -1454,7 +1454,7 @@ install_node() {
     local hy_port="8443"
     local hy_range="20000:40000"
     while true; do
-        read -r -p "请输入 Hysteria 2 主监听 UDP 端口 [默认 ${old_hy_port:-8443}]: " hy_port || hy_port=""
+        read -r -p "请输入 Hysteria 2 主监听 UDP 端口 [默认: ${CYAN}${old_hy_port:-8443}${PLAIN}]: " hy_port || hy_port=""
         hy_port=$(trim_string "${hy_port:-${old_hy_port:-8443}}")
         if ! validate_port "$hy_port"; then
             echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
@@ -1464,7 +1464,7 @@ install_node() {
     HY_PORT="$hy_port"
 
     while true; do
-        read -r -p "请输入端口跳跃范围 [默认 ${old_hy_range:-20000:40000}] (none=不启用): " hy_range || hy_range=""
+        read -r -p "请输入端口跳跃范围 [默认: ${CYAN}${old_hy_range:-20000:40000}${PLAIN}] (none=不启用): " hy_range || hy_range=""
         hy_range=$(trim_string "${hy_range:-${old_hy_range:-20000:40000}}")
         [[ "${hy_range,,}" == "none" ]] && { hy_range=""; break; }
         if ! validate_range "$hy_range"; then
@@ -1479,7 +1479,7 @@ install_node() {
     echo -e "${GRAY}----------------------------------------------------${PLAIN}"
     local sub_port
     while true; do
-        read -r -p "请输入 Caddy 订阅监听端口 [默认 ${old_sub_port:-8444}]: " sub_port || sub_port=""
+        read -r -p "请输入 Caddy 订阅监听端口 [默认: ${CYAN}${old_sub_port:-8444}${PLAIN}]: " sub_port || sub_port=""
         sub_port=$(trim_string "${sub_port:-${old_sub_port:-8444}}")
         if ! validate_port "$sub_port"; then
             echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
@@ -1488,7 +1488,7 @@ install_node() {
     done
 
     local node_prefix
-    read -r -p "请输入节点名称前缀 (如 HK / US / JP) [默认 ${old_prefix:-Node}]: " node_prefix || node_prefix=""
+    read -r -p "请输入节点名称前缀 (如 HK / US / JP) [默认: ${CYAN}${old_prefix:-Node}${PLAIN}]: " node_prefix || node_prefix=""
     node_prefix=$(trim_string "${node_prefix:-${old_prefix:-Node}}")
     # 去掉会破坏 YAML/URI 的字符（引号、逗号、井号、冒号、反斜杠）
     node_prefix=$(printf '%s' "$node_prefix" | tr -d '\"'"'"',#:\\')
@@ -1813,7 +1813,7 @@ ${GRAY}================= VLESS-Reality 模块配置 =================${PLAIN}"
                 echo -e "\n${YELLOW}=== 重置 VLESS-Reality 参数 ===${PLAIN}"
                 local vl_port
                 while true; do
-                    read -r -p "请输入 Reality 监听端口 [默认 ${VL_PORT}]: " vl_port || vl_port=""
+                    read -r -p "请输入 Reality 监听端口 [默认: ${CYAN}${VL_PORT}${PLAIN}]: " vl_port || vl_port=""
                     vl_port=$(trim_string "${vl_port:-${VL_PORT}}")
                     if ! validate_port "$vl_port"; then
                         echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
@@ -1825,7 +1825,7 @@ ${GRAY}================= VLESS-Reality 模块配置 =================${PLAIN}"
 
                 local vl_sni
                 while true; do
-                    read -r -p "请输入 Reality 伪装域名 (SNI) [默认 ${VL_SNI}]: " vl_sni || vl_sni=""
+                    read -r -p "请输入 Reality 伪装域名 (SNI) [默认: ${CYAN}${VL_SNI}${PLAIN}]: " vl_sni || vl_sni=""
                     vl_sni=$(trim_string "${vl_sni:-${VL_SNI}}")
                     if ! validate_domain "$vl_sni"; then
                         echo -e "${RED}伪装域名格式非法（示例: gateway.icloud.com），请重新输入。${PLAIN}"; continue
@@ -1912,7 +1912,7 @@ ${GRAY}=================== Hysteria 2 模块配置 ===================${PLAIN}"
                 if [[ -n "$old_hy_domain" ]]; then
                     echo -e "检测到当前已配置域名: ${CYAN}${old_hy_domain}${PLAIN}"
                     local reuse_d=""
-                    read -r -p "是否继续使用该域名？[Y/n (回车沿用，输入 n 更换域名或使用 IP)]: " reuse_d || reuse_d=""
+                    read -r -p "是否继续使用该域名？Y/n (回车沿用，输入 n 更换域名或使用 IP): " reuse_d || reuse_d=""
                     if [[ -z "$reuse_d" || "${reuse_d,,}" == "y" || "${reuse_d,,}" == "yes" ]]; then
                         hy_domain="$old_hy_domain"
                         echo -e "已选择沿用当前域名: ${hy_domain}"
@@ -1962,7 +1962,7 @@ ${GRAY}=================== Hysteria 2 模块配置 ===================${PLAIN}"
 
                 local hy_port
                 while true; do
-                    read -r -p "请输入 Hysteria 2 主监听 UDP 端口 [默认 ${HY_PORT:-8443}]: " hy_port || hy_port=""
+                    read -r -p "请输入 Hysteria 2 主监听 UDP 端口 [默认: ${CYAN}${HY_PORT:-8443}${PLAIN}]: " hy_port || hy_port=""
                     hy_port=$(trim_string "${hy_port:-${HY_PORT:-8443}}")
                     if ! validate_port "$hy_port"; then
                         echo -e "${RED}端口非法，请重新输入。${PLAIN}"; continue
@@ -1973,7 +1973,7 @@ ${GRAY}=================== Hysteria 2 模块配置 ===================${PLAIN}"
 
                 local hy_range
                 while true; do
-                    read -r -p "请输入端口跳跃范围 [默认 ${HY_RANGE:-20000:40000}] (none=不启用): " hy_range || hy_range=""
+                    read -r -p "请输入端口跳跃范围 [默认: ${CYAN}${HY_RANGE:-20000:40000}${PLAIN}] (none=不启用): " hy_range || hy_range=""
                     hy_range=$(trim_string "${hy_range:-${HY_RANGE:-20000:40000}}")
                     [[ "${hy_range,,}" == "none" ]] && { hy_range=""; break; }
                     if ! validate_range "$hy_range"; then
@@ -2103,7 +2103,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 echo -e "\n${YELLOW}=== Clash 订阅地址参数 ===${PLAIN}"
                 local sub_port
                 while true; do
-                    read -r -p "请输入新的订阅监听端口 [默认 ${SUB_PORT}]: " sub_port || sub_port=""
+                    read -r -p "请输入新的订阅监听端口 [默认: ${CYAN}${SUB_PORT}${PLAIN}]: " sub_port || sub_port=""
                     sub_port=$(trim_string "${sub_port:-${SUB_PORT}}")
                     if ! validate_port "$sub_port"; then
                         echo -e "${RED}端口非法，请重新输入。${PLAIN}"; continue
@@ -2175,7 +2175,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 echo -e "${CYAN}会过滤引号、逗号、井号、冒号与反斜杠，避免破坏 YAML 与分享链接。${PLAIN}"
                 local new_prefix=""
                 while true; do
-                    read -r -p "请输入节点名称前缀 [当前 ${NODE_PREFIX:-Node}]: " new_prefix || new_prefix=""
+                    read -r -p "请输入节点名称前缀 [当前: ${CYAN}${NODE_PREFIX:-Node}${PLAIN}]: " new_prefix || new_prefix=""
                     new_prefix=$(trim_string "${new_prefix:-${NODE_PREFIX:-Node}}")
                     new_prefix=$(printf '%s' "$new_prefix" | tr -d '\"'"'"',#:\\')
                     if [[ -z "$new_prefix" ]]; then

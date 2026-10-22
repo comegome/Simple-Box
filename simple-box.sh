@@ -915,6 +915,67 @@ install_simbo_command() {
     fi
 }
 
+# 拉取仓库最新脚本到指定路径
+# 返回 0 表示拿到了一份完整可用的脚本，1 表示网络失败或内容不可信
+fetch_latest_script() {
+    local dest="${1:-}"
+    [[ -z "$dest" ]] && return 1
+    local tmp="${dest}.dl.$$"
+
+    curl -fsSL --max-time 20 "$SCRIPT_URL" -o "$tmp" 2>/dev/null || { rm -f "$tmp"; return 1; }
+
+    # 必须是一份完整的 bash 脚本：非空 + 语法通过 + 含标志串。
+    # 否则可能把 404 页面、限流提示或半截下载当成脚本执行。
+    if [[ ! -s "$tmp" ]] \
+        || ! bash -n "$tmp" >/dev/null 2>&1 \
+        || ! grep -q 'Simple-Box Manager' "$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+
+    mv -f "$tmp" "$dest"
+}
+
+# 选项 7：先取仓库最新脚本，有更新就切换过去再用新版继续安装
+# 这样「重装」同时承担了「升级脚本」的职责，用户无需手动 curl 覆盖
+reinstall_with_latest() {
+    local share_dir="/usr/local/share/simple-box"
+    local target="${share_dir}/simple-box.sh"
+    local latest="/tmp/simple-box.latest.$$"
+
+    echo -e "${BLUE}正在检查仓库最新脚本...${PLAIN}"
+    if ! fetch_latest_script "$latest"; then
+        echo -e "${YELLOW}获取最新脚本失败（网络不通或被限流），将用当前版本继续重装。${PLAIN}"
+        rm -f "$latest"
+        install_node || true
+        return 0
+    fi
+
+    if [[ -f "$target" ]] && cmp -s "$latest" "$target"; then
+        echo -e "${GREEN}当前已是最新脚本，直接重装。${PLAIN}"
+        rm -f "$latest"
+        install_node || true
+        return 0
+    fi
+
+    echo -e "${GREEN}检测到仓库有新版本，正在更新脚本...${PLAIN}"
+    mkdir -p "$share_dir"
+    if ! install -m 755 "$latest" "$target" 2>/dev/null && ! cp -f "$latest" "$target"; then
+        echo -e "${RED}脚本更新失败（磁盘只读？），将用当前版本继续重装。${PLAIN}"
+        rm -f "$latest"
+        install_node || true
+        return 0
+    fi
+    chmod 755 "$target" 2>/dev/null || true
+    rm -f "$latest"
+    ln -sf "$target" /usr/local/bin/simbo
+
+    echo -e "${GREEN}脚本已更新，正在用新版本继续安装...${PLAIN}"
+    # 用新脚本接管当前进程：确保后续交互逻辑与提示都来自新版本，
+    # 而不是内存里这份旧代码（否则装完菜单仍是旧的）
+    exec bash "$target" install
+}
+
 # 部署与配置主函数
 # 集中生成 sing-box 服务端配置文件
 write_singbox_config() {
@@ -2243,7 +2304,7 @@ menu() {
             4) menu_sub_module || true ;;
             5) manage_bbr || true ;;
             6) menu_singbox_manage || true ;;
-            7) install_node || true ;;
+            7) reinstall_with_latest || true ;;
             8)
                 uninstall_all || true
                 # 卸载已彻底完成：脚本与配置目录均被删除，直接退出

@@ -15,6 +15,8 @@ YELLOW='\033[0;33m'
 BLUE='\033[0;34m'
 CYAN='\033[0;36m'
 PLAIN='\033[0m'
+GRAY='\033[0;90m'
+BOLD='\033[1m'
 
 CONF_DIR="/etc/sing-box"
 CONF_FILE="${CONF_DIR}/config.json"
@@ -1793,10 +1795,10 @@ menu_reality_module() {
     while true; do
         [ -t 1 ] && clear
         echo -e "
-${GREEN}================= VLESS-Reality 模块配置 =================${PLAIN}"
-        echo -e " 1. 重置并更新 VLESS-Reality 参数"
-        echo -e " 0. 返回主菜单"
-        echo -e "${GREEN}==========================================================${PLAIN}"
+${GRAY}================= VLESS-Reality 模块配置 =================${PLAIN}"
+        echo -e " ${CYAN}1.${PLAIN} 重置并更新 VLESS-Reality 参数"
+        echo -e " ${CYAN}0.${PLAIN} 返回主菜单"
+        echo -e "${GRAY}==========================================================${PLAIN}"
         local opt=""
         read -r -p "请输入选项 [0-1]: " opt || opt=""
         case "$opt" in
@@ -1884,10 +1886,10 @@ menu_hy2_module() {
     while true; do
         [ -t 1 ] && clear
         echo -e "
-${GREEN}=================== Hysteria 2 模块配置 ===================${PLAIN}"
-        echo -e " 1. 重置并更新 Hysteria 2 参数"
-        echo -e " 0. 返回主菜单"
-        echo -e "${GREEN}==========================================================${PLAIN}"
+${GRAY}=================== Hysteria 2 模块配置 ===================${PLAIN}"
+        echo -e " ${CYAN}1.${PLAIN} 重置并更新 Hysteria 2 参数"
+        echo -e " ${CYAN}0.${PLAIN} 返回主菜单"
+        echo -e "${GRAY}==========================================================${PLAIN}"
         local opt=""
         read -r -p "请输入选项 [0-1]: " opt || opt=""
         case "$opt" in
@@ -2082,11 +2084,11 @@ menu_sub_module() {
     while true; do
         [ -t 1 ] && clear
         echo -e "
-${GREEN}================= Clash 订阅地址配置 =================${PLAIN}"
-        echo -e " 1. 重置并更新 Clash 订阅地址参数"
-        echo -e " 2. 重置并更新节点名称前缀"
-        echo -e " 0. 返回主菜单"
-        echo -e "${GREEN}======================================================${PLAIN}"
+${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
+        echo -e " ${CYAN}1.${PLAIN} 重置并更新 Clash 订阅地址参数"
+        echo -e " ${CYAN}2.${PLAIN} 重置并更新节点名称前缀"
+        echo -e " ${CYAN}0.${PLAIN} 返回主菜单"
+        echo -e "${GRAY}======================================================${PLAIN}"
         local opt=""
         read -r -p "请输入选项 [0-2]: " opt || opt=""
         case "$opt" in
@@ -2220,12 +2222,12 @@ ${GREEN}================= Clash 订阅地址配置 =================${PLAIN}"
 menu_singbox_manage() {
     while true; do
         [ -t 1 ] && clear
-        echo -e "\n${GREEN}====================== 内核管理 ======================${PLAIN}"
-        echo -e " 1. 重启 / 启动 sing-box 服务"
-        echo -e " 2. 检查并更新 sing-box 内核"
-        echo -e " 3. 查看实时运行日志"
-        echo -e " 0. 返回主菜单"
-        echo -e "${GREEN}==========================================================${PLAIN}"
+        echo -e "\n${GRAY}====================== 内核管理 ======================${PLAIN}"
+        echo -e " ${CYAN}1.${PLAIN} 重启 / 启动 sing-box 服务"
+        echo -e " ${CYAN}2.${PLAIN} 检查并更新 sing-box 内核"
+        echo -e " ${CYAN}3.${PLAIN} 查看实时运行日志"
+        echo -e " ${CYAN}0.${PLAIN} 返回主菜单"
+        echo -e "${GRAY}==========================================================${PLAIN}"
         local opt=""
         read -r -p "请输入选项 [0-3]: " opt || opt=""
         case "$opt" in
@@ -2257,9 +2259,9 @@ menu_singbox_manage() {
 menu() {
     while true; do
         [ -t 1 ] && clear
-        echo -e "${GREEN}====================================================${PLAIN}"
-        echo -e "${GREEN}            Simple-Box Manager - 控制台             ${PLAIN}"
-        echo -e "${GREEN}====================================================${PLAIN}"
+        echo -e "${GRAY}====================================================${PLAIN}"
+        echo -e "${BOLD}                 Simple-Box 控制台                  ${PLAIN}"
+        echo -e "${GRAY}====================================================${PLAIN}"
         
         # 1. 宿主机基本信息提取（OS 已在入口解析并缓存，此处不再读文件）
         local os_name arch cur_ip bbr_status
@@ -2285,9 +2287,9 @@ menu() {
             sb_ver=$(/usr/local/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
             sb_ver="v${sb_ver#v}"
             if systemctl is-active --quiet sing-box; then
-                sb_status="${GREEN}运行中 (sing-box ${sb_ver})${PLAIN}"
+                sb_status="${GREEN}运行中${PLAIN} (sing-box ${sb_ver})"
             else
-                sb_status="${RED}已停止 (sing-box ${sb_ver})${PLAIN}"
+                sb_status="${RED}已停止${PLAIN} (sing-box ${sb_ver})"
             fi
         else
             sb_status="${RED}未安装${PLAIN}"
@@ -2301,11 +2303,11 @@ menu() {
             caddy_ver=$(caddy version 2>/dev/null | head -n1 | awk '{print $1}')
             caddy_ver="v${caddy_ver#v}"
             if ! systemctl is-active --quiet caddy; then
-                caddy_status="${RED}已停止 (Caddy ${caddy_ver})${PLAIN}"
+                caddy_status="${RED}已停止${PLAIN} (Caddy ${caddy_ver})"
             elif [[ -f /etc/caddy/sites/simple-box-sub.caddy ]]; then
-                caddy_status="${GREEN}运行中 (Caddy ${caddy_ver})${PLAIN}"
+                caddy_status="${GREEN}运行中${PLAIN} (Caddy ${caddy_ver})"
             else
-                caddy_status="${YELLOW}无订阅地址 (Caddy ${caddy_ver})${PLAIN}"
+                caddy_status="${YELLOW}无订阅地址${PLAIN} (Caddy ${caddy_ver})"
             fi
         fi
 
@@ -2320,9 +2322,9 @@ menu() {
         fi
 
         # 3. 打印系统面板
-        echo -e " 操作系统: ${CYAN}${os_name} (${arch})${PLAIN}"
-        echo -e " 公网地址: ${CYAN}${cur_ip}${PLAIN}"
-        echo -e " TLS 证书: ${CYAN}${cert_display}${PLAIN}"
+        echo -e " 操作系统: ${os_name} (${arch})"
+        echo -e " 公网地址: ${cur_ip}"
+        echo -e " TLS 证书: ${cert_display}"
         echo -e " TCP 加速: ${bbr_status}"
         echo -e " 证书管理: ${caddy_status}"
         echo -e " 代理服务: ${sb_status}"
@@ -2330,32 +2332,33 @@ menu() {
         if [[ -f "$ENV_FILE" ]]; then
             local hy_sni="${HY_DOMAIN:-$SERVER_IP}"
             local hy_ports="${HY_RANGE:-无}"
-            echo -e " ${BLUE}VLESS-Reality | TCP:${VL_PORT:-443} | ServerName: ${VL_SNI:-gateway.icloud.com}${PLAIN}"
-            echo -e " ${BLUE}Hysteria 2 | UDP:${HY_PORT:-8443} | SNI: ${hy_sni} | Ports: ${hy_ports}${PLAIN}"
+            echo -e "${GRAY}----------------------------------------------------${PLAIN}"
+            echo -e " VLESS-Reality | ${CYAN}TCP: ${VL_PORT:-443}${PLAIN}  | ServerName: ${VL_SNI:-gateway.icloud.com}"
+            echo -e " Hysteria 2    | ${CYAN}UDP: ${HY_PORT:-8443}${PLAIN} | SNI: ${hy_sni} | Ports: ${hy_ports}"
             
             local proto=${SUB_PROTO:-http}
             local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
             local port=${SUB_PORT:-8444}
-            echo -e "${GREEN}----------------------------------------------------${PLAIN}"
+            echo -e "${GRAY}----------------------------------------------------${PLAIN}"
             echo -e " Clash 订阅配置: ${CYAN}${proto}://${host}:${port}/${SUB_TOKEN}/config.yaml${PLAIN}"
             echo -e " Clash 节点列表: ${CYAN}${proto}://${host}:${port}/${SUB_TOKEN}/provider.yaml${PLAIN}"
             if [[ "$proto" == "http" ]]; then
-                echo -e " ${YELLOW}(无域名证书加密，建议在可信网络下更新)${PLAIN}"
+                echo -e " ${YELLOW}⚠️  (无域名证书加密，建议在可信网络下更新)${PLAIN}"
             else
-                echo -e " ${GREEN}(TLS 1.3 强加密保护，直连防死锁)${PLAIN}"
+                echo -e " ${GREEN}✓ (TLS 1.3 强加密保护，直连防死锁)${PLAIN}"
             fi
         fi
 
-        echo -e "${GREEN}----------------------------------------------------${PLAIN}"
-        echo -e " 1. vless / hy2 原生链接查看"
-        echo -e " 2. VLESS-Reality 模块配置"
-        echo -e " 3. Hysteria 2 模块配置"
-        echo -e " 4. Clash 订阅地址配置"
-        echo -e " 5. 内核管理"
-        echo -e " 6. 脚本升级 / 重装"
-        echo -e " 7. 脚本卸载"
-        echo -e " 0. 退出控制台"
-        echo -e "${GREEN}====================================================${PLAIN}"
+        echo -e "${GRAY}----------------------------------------------------${PLAIN}"
+        echo -e " ${CYAN}1.${PLAIN} vless / hy2 原生链接查看"
+        echo -e " ${CYAN}2.${PLAIN} VLESS-Reality 模块配置"
+        echo -e " ${CYAN}3.${PLAIN} Hysteria 2 模块配置"
+        echo -e " ${CYAN}4.${PLAIN} Clash 订阅地址配置"
+        echo -e " ${CYAN}5.${PLAIN} 内核管理"
+        echo -e " ${CYAN}6.${PLAIN} 脚本升级 / 重装"
+        echo -e " ${CYAN}7.${PLAIN} 脚本卸载"
+        echo -e " ${CYAN}0.${PLAIN} 退出控制台"
+        echo -e "${GRAY}====================================================${PLAIN}"
         
         local opt=""
         read -r -p "请输入选项 [0-7]: " opt || opt="0"

@@ -83,7 +83,7 @@ simbo
 
 ```text
 ====================================================
-            Simple-Box Manager - 控制台            
+                 Simple-Box 控制台                  
 ====================================================
  操作系统: Ubuntu 24.04.5 LTS (amd64)
  公网地址: 203.0.113.10
@@ -91,12 +91,13 @@ simbo
  TCP 加速: BBR
  证书管理: 运行中 (Caddy v2.6.2)
  代理服务: 运行中 (sing-box v1.14.3)
- VLESS-Reality | TCP:443 | ServerName: gateway.icloud.com
- Hysteria 2 | UDP:8443 | SNI: 203.0.113.10 | Ports: 20000:40000
+----------------------------------------------------
+ VLESS-Reality | TCP: 443  | ServerName: gateway.icloud.com
+ Hysteria 2    | UDP: 8443 | SNI: 203.0.113.10 | Ports: 20000:40000
 ----------------------------------------------------
  Clash 订阅配置: http://203.0.113.10:8444/2dac50852729bf55bb61833d/config.yaml
  Clash 节点列表: http://203.0.113.10:8444/2dac50852729bf55bb61833d/provider.yaml
- (无域名证书加密，建议在可信网络下更新)
+ ⚠️  (无域名证书加密，建议在可信网络下更新)
 ----------------------------------------------------
  1. vless / hy2 原生链接查看
  2. VLESS-Reality 模块配置

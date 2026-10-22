@@ -240,48 +240,28 @@ setup_caddy_repo() {
 }
 
 # 检查并自动安装 / 升级 Caddy
-# 关键点：已存在 caddy 时不再直接 return —— 否则系统里那份发行版旧包（如 2.6.2）
-# 会永久占位，官方源的 2.11.x 永远装不上。
+# 一条 apt-get install 同时覆盖「没装就装」和「装了旧版就升级」：
+# apt 在 candidate 高于已安装版本时默认就会升级，不需要自己比版本号。
 install_caddy() {
-    local cur_ver="" cur_pkg="" cand="" repo_ok=false
-    if command -v caddy &>/dev/null; then
-        cur_ver=$(caddy version 2>/dev/null | head -n1 | awk '{print $1}')
-        cur_pkg=$(dpkg-query -W -f='${Version}' caddy 2>/dev/null || echo "")
-    fi
+    local had_caddy=false
+    command -v caddy &>/dev/null && had_caddy=true
 
     if command -v apt-get &>/dev/null; then
-        if setup_caddy_repo; then
-            repo_ok=true
-            apt-get update -qq >/dev/null 2>&1 || true
-            cand=$(apt-cache policy caddy 2>/dev/null | awk '/Candidate:/{print $2; exit}')
-        fi
+        setup_caddy_repo || echo -e "${YELLOW}官方源配置失败，回退到系统仓库（版本可能较旧）${PLAIN}"
+        apt-get update -qq >/dev/null 2>&1 || true
+        echo -e "${BLUE}正在安装 / 更新 Caddy...${PLAIN}"
+        apt-get install -y -qq caddy || true
+    elif command -v yum &>/dev/null; then
+        yum install -y yum-plugin-copr >/dev/null 2>&1 || true
+        yum copr enable -y @caddy/caddy >/dev/null 2>&1 || true
+        yum install -y caddy || true
     fi
 
-    if [[ -z "$cur_ver" ]]; then
-        echo -e "${BLUE}正在安装 Caddy 用于安全的 HTTPS 订阅分发...${PLAIN}"
-        # 记录「Caddy 是本脚本装的」：卸载时才敢连软件包一起清理，
-        # 若用户机器上本来就有 caddy（可能还托管别的站点），卸载绝不能动它。
+    # 归属标记只在本机原本没有 caddy 时才写：
+    # 卸载时据此决定是否连软件包一起删，绝不误删用户自己装的 Caddy。
+    if [[ "$had_caddy" != "true" ]]; then
         mkdir -p "$CONF_DIR" 2>/dev/null || true
         : > "${CONF_DIR}/.caddy_installed_by_script" 2>/dev/null || true
-        [[ "$repo_ok" != "true" ]] && echo -e "${YELLOW}官方源不可用，回退到系统仓库安装（版本可能较旧）。${PLAIN}"
-        apt-get install -y -qq caddy || true
-    elif [[ -f "${CONF_DIR}/.caddy_installed_by_script" && -n "$cand" && "$cand" != "(none)" && "$cur_pkg" != "$cand" ]]; then
-        # 本脚本装的包 + 官方源有更新 -> 升级到最新
-        echo -e "${BLUE}正在升级 Caddy (${cur_ver} -> ${cand})...${PLAIN}"
-        apt-get install -y -qq --only-upgrade caddy >/dev/null 2>&1 || apt-get install -y -qq caddy >/dev/null 2>&1 || true
-        echo -e "${GREEN}Caddy 已升级至 $(caddy version 2>/dev/null | head -n1 | awk '{print $1}')${PLAIN}"
-    elif [[ -n "$cand" && "$cand" != "(none)" && "$cur_pkg" != "$cand" ]]; then
-        echo -e "${YELLOW}系统已有 Caddy ${cur_ver}，官方源可升级到 ${cand}。${PLAIN}"
-        echo -e "${CYAN}  为免影响你已有的站点，脚本不自动升级；如需升级请执行: apt-get install --only-upgrade -y caddy${PLAIN}"
-    fi
-
-    # 装了却仍不是官方源的最新版 -> 说明官方源没生效，必须明说，不能假装成功
-    if [[ "$repo_ok" == "true" && -n "$cand" && "$cand" != "(none)" ]]; then
-        local final_pkg
-        final_pkg=$(dpkg-query -W -f='${Version}' caddy 2>/dev/null || echo "")
-        if [[ -n "$final_pkg" && "$final_pkg" != "$cand" ]]; then
-            echo -e "${YELLOW}注意: 当前 Caddy ${final_pkg} 并非官方源最新版 ${cand}，可能是发行版仓库的旧包。${PLAIN}"
-        fi
     fi
 
     systemctl enable caddy >/dev/null 2>&1 || true

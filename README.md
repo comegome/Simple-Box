@@ -165,7 +165,7 @@ simbo
 
 #### Q2：没有域名能用 Hysteria 2 吗？为什么自签模式下订阅是 HTTP？
 能！安装时域名询问直接回车即可启用 IP 自签证书，客户端节点自带 `skip-cert-verify: true`，连接速度与正规证书完全一致。
-**关于订阅**：主流客户端（ClashX.Meta / Clash Verge / Shadowrocket 等）在拉取订阅时，底层的 TLS 客户端会硬性阻断未受信任的自签证书导致无法导入。因此在自签模式下，Caddy 订阅站点自动走 HTTP 分发（配合 24 位高强度随机 Token 路径隔离防护），免除用户手动安装系统 CA 的麻烦；绑定正规域名后则会自动升级为带 CA 证书的标准 HTTPS。
+**关于订阅**：主流客户端（ClashX.Meta / Clash Verge / Shadowrocket 等）在拉取订阅时，底层的 TLS 客户端会硬性阻断未受信任的自签证书导致无法导入。因此在自签模式下，Caddy 订阅地址证书自动走 HTTP 分发（配合 24 位高强度随机 Token 路径隔离防护），免除用户手动安装系统 CA 的麻烦；绑定正规域名后则会自动升级为带 CA 证书的标准 HTTPS。
 
 #### Q3：能用 IPv6 连接节点吗？
 不能。Simple-Box 为追求极简与可靠，彻底移除了 IPv6 双栈与相关复杂的 ip6tables 规则。所有服务显式绑定 IPv4。如果你的网络或机器仅有 IPv6，请勿使用本脚本。

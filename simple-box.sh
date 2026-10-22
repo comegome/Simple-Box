@@ -1550,14 +1550,30 @@ uninstall_all() {
     [[ -f "${CONF_DIR}/.caddyfile_created_by_script" ]] && caddyfile_created=true
     [[ -f "${CONF_DIR}/.caddyfile_appended_by_script" ]] && caddyfile_appended=true
 
+    # 关键判定：sites 目录里是否还有「不是本脚本的」站点。
+    # 场景：脚本装了 caddy（有归属标记），用户后来用这个 caddy 跑了自己的服务。
+    # 此时若直接删包，用户的站点会全部停摆 —— 必须降级为「只删本站点」。
+    local foreign_sites=0
+    if [[ -d /etc/caddy/sites ]]; then
+        foreign_sites=$(find /etc/caddy/sites -maxdepth 1 -type f \
+            ! -name 'simple-box*' ! -name "*-${SUB_PORT:-8444}.caddy" 2>/dev/null | wc -l)
+    fi
+    if [[ "$foreign_sites" -gt 0 ]]; then
+        caddy_owned=false
+        echo -e "${YELLOW}检测到 /etc/caddy/sites 下还有 ${foreign_sites} 个其它站点配置，${PLAIN}"
+        echo -e "${YELLOW}说明 Caddy 已承载你自己的服务，将保留软件包与 Caddyfile，仅移除本脚本的订阅站点。${PLAIN}"
+    fi
+
     if [[ "$caddy_owned" == "true" && "$caddyfile_created" == "true" ]]; then
         # 包是本脚本装的、Caddyfile 也是本脚本建的：一并删除（包已卸载，无副作用）
         rm -f /etc/caddy/Caddyfile
         echo -e "${BLUE}已移除本脚本创建的 Caddyfile${PLAIN}"
     elif [[ "$caddyfile_created" == "true" || "$caddyfile_appended" == "true" ]]; then
-        # Caddy 是用户原有的：只回退本脚本加的那行 import，绝不删用户的 Caddyfile。
-        # 回退后文件即使为空也是合法的 Caddy 配置，Caddy 仍能正常启动。
-        if [[ -f /etc/caddy/Caddyfile ]]; then
+        # Caddy 归用户使用（原有的，或已被用户接管）：只回退本脚本加的 import 行。
+        # 有用户站点时 import 必须留着，否则用户的站点不会生效。
+        if [[ "$foreign_sites" -gt 0 ]]; then
+            echo -e "${CYAN}保留 Caddyfile 中的 import sites/*.caddy（你自己的站点依赖它生效）${PLAIN}"
+        elif [[ -f /etc/caddy/Caddyfile ]]; then
             sed -i '\|^import sites/\*\.caddy$|d' /etc/caddy/Caddyfile
             sed -i -e :a -e '/^\n*$/{$d;N;};/\n$/ba' /etc/caddy/Caddyfile 2>/dev/null || true
             echo -e "${BLUE}已回退本脚本追加的 Caddyfile import 行${PLAIN}"
@@ -1576,7 +1592,11 @@ uninstall_all() {
         echo -e "${BLUE}已卸载本脚本安装的 Caddy 软件包${PLAIN}"
     elif command -v caddy &>/dev/null; then
         systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
-        echo -e "${CYAN}Caddy 为系统预装/他处安装，仅移除本站点配置，软件包保留${PLAIN}"
+        if [[ "$foreign_sites" -gt 0 ]]; then
+            echo -e "${CYAN}Caddy 保留运行，你的 ${foreign_sites} 个站点未受影响${PLAIN}"
+        else
+            echo -e "${CYAN}Caddy 为系统预装/他处安装，仅移除本站点配置，软件包保留${PLAIN}"
+        fi
     fi
 
     rm -rf "$CONF_DIR"

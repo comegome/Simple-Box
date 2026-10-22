@@ -1573,7 +1573,7 @@ uninstall_all() {
         rm -f /etc/caddy/sites/simple-box*.caddy /etc/caddy/sites/*-"${SUB_PORT:-8444}".caddy 2>/dev/null || true
         rmdir /etc/caddy/sites 2>/dev/null || true
         rmdir /etc/caddy 2>/dev/null || true
-        echo -e "${BLUE}已卸载 Caddy 软件包并清理其软件源${PLAIN}"
+        echo -e "${BLUE}已卸载本脚本安装的 Caddy 软件包${PLAIN}"
     elif command -v caddy &>/dev/null; then
         systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
         echo -e "${CYAN}Caddy 为系统预装/他处安装，仅移除本站点配置，软件包保留${PLAIN}"

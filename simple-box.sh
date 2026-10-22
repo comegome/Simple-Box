@@ -779,7 +779,8 @@ generate_full_client_config() {
     fi
 
     # 分流规则防死锁：域名模式精准直连该域名；IP 模式直连 VPS 本机 IP
-    # 模板可能没有 rules: 段（兜底模板、或用户自定义模板），此时直接追加，避免静默丢失
+    # 用 awk 插入而不是 sed a 命令：sed 的 a 会吃掉行首空格，导致 YAML 缩进错乱
+    # （- IP-CIDR 顶格 → 解析失败），awk 能原样保留两空格缩进。
     local direct_rule
     if [[ "$domain_or_ip" == "$server_ip" || -z "$domain_or_ip" ]]; then
         direct_rule="  - IP-CIDR,${server_ip}/32,DIRECT,no-resolve"
@@ -787,7 +788,10 @@ generate_full_client_config() {
         direct_rule="  - DOMAIN,${domain_or_ip},DIRECT"
     fi
     if grep -q '^rules:' "$full_config_file"; then
-        sed -i "/^rules:/a ${direct_rule}" "$full_config_file"
+        awk -v rule="$direct_rule" '
+            { print }
+            /^rules:[[:space:]]*$/ && !done { print rule; done=1 }
+        ' "$full_config_file" > "${full_config_file}.tmp" && mv -f "${full_config_file}.tmp" "$full_config_file"
     else
         printf 'rules:\n%s\n' "$direct_rule" >> "$full_config_file"
     fi

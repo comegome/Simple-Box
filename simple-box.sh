@@ -62,6 +62,51 @@ require_arch() {
     echo "$a"
 }
 
+# 支持范围：Ubuntu 24.04+ / Debian 12+（x86_64 / aarch64）。
+# 收缩到这个范围是为了让所有依赖都直接用发行版仓库，无需第三方 apt 源：
+#   - caddy 自 Ubuntu noble / Debian bookworm 起才进发行版仓库（22.04 jammy 没有这个包）
+#   - 两者仓库里的 2.6.2 已实测能完整承载本脚本的订阅站点配置
+#   - 两者共用 apt + systemd + iptables-persistent，脚本的系统调用完全同构
+# 已知版本下限（供后续新增依赖时对照）：
+#   caddy 2.6.2 | openssl 3.0 | iptables 1.8.10 | qrencode 4.1.1
+MIN_UBUNTU_VERSION="24.04"
+MIN_DEBIAN_VERSION="12"
+
+# 版本号比较：$1 >= $2 返回 0
+ver_ge() {
+    [[ "$(printf '%s\n' "$1" "$2" | sort -V | head -n1)" == "$2" ]]
+}
+
+require_os() {
+    local id="" ver="" name=""
+    local osrel="${OS_RELEASE_FILE:-/etc/os-release}"
+    if [[ -r "$osrel" ]]; then
+        # shellcheck disable=SC1091
+        . "$osrel"
+        id="${ID:-}"; ver="${VERSION_ID:-}"; name="${PRETTY_NAME:-$id $ver}"
+    fi
+
+    local min=""
+    case "$id" in
+        ubuntu) min="$MIN_UBUNTU_VERSION" ;;
+        debian) min="$MIN_DEBIAN_VERSION" ;;
+        *)
+            echo -e "${RED}不支持的操作系统: ${name:-未知}${PLAIN}"
+            echo -e "${YELLOW}本脚本仅支持 Ubuntu ${MIN_UBUNTU_VERSION}+ 或 Debian ${MIN_DEBIAN_VERSION}+（x86_64 / aarch64）。${PLAIN}"
+            return 1
+            ;;
+    esac
+
+    # 用 sort -V 比较：字符串比较会把 24.10 判成低于 24.04
+    if [[ -z "$ver" ]] || ! ver_ge "$ver" "$min"; then
+        echo -e "${RED}系统版本过低: ${name:-$id $ver}${PLAIN}"
+        echo -e "${YELLOW}本脚本要求 ${id} ${min} 及以上（当前 ${ver:-未知}）。${PLAIN}"
+        echo -e "${CYAN}  原因: 更早的版本仓库不含 caddy，无法直接安装订阅分发服务。${PLAIN}"
+        return 1
+    fi
+    echo "$name"
+}
+
 # 端口与端口段合法性校验
 validate_port() {
     local p="${1:-}"
@@ -179,17 +224,12 @@ install_deps() {
     if [ ${#missing[@]} -gt 0 ]; then
         echo -e "${BLUE}缺失依赖: ${missing[*]}${PLAIN}"
         echo -e "${BLUE}安装必要基础组件: ${missing[*]}...${PLAIN}"
-        if command -v apt-get &>/dev/null; then
-            export DEBIAN_FRONTEND=noninteractive
-            echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections 2>/dev/null || true
-            echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections 2>/dev/null || true
-            apt-get update -qq || echo -e "${YELLOW}apt-get update 失败，尝试直接安装。${PLAIN}"
-            apt-get install -y -qq "${missing[@]}" iptables-persistent \
-                || echo -e "${YELLOW}部分依赖安装失败，将尝试继续（缺少 qrencode 仅影响二维码显示）。${PLAIN}"
-        elif command -v yum &>/dev/null; then
-            yum install -y epel-release >/dev/null 2>&1 || true
-            yum install -y "${missing[@]}" || echo -e "${YELLOW}部分依赖安装失败，将尝试继续。${PLAIN}"
-        fi
+        export DEBIAN_FRONTEND=noninteractive
+        echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections 2>/dev/null || true
+        echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections 2>/dev/null || true
+        apt-get update -qq || echo -e "${YELLOW}apt-get update 失败，尝试直接安装。${PLAIN}"
+        apt-get install -y -qq "${missing[@]}" iptables-persistent \
+            || echo -e "${YELLOW}部分依赖安装失败，将尝试继续（缺少 qrencode 仅影响二维码显示）。${PLAIN}"
     fi
 
     # 关键依赖缺失时给出明确警告（iptables 缺失会导致端口跳跃静默失效）
@@ -204,59 +244,22 @@ install_deps() {
     fi
 }
 
-# 配置 Caddy 官方 apt 源（幂等）。
-# 必须先把内容落到临时文件并校验非空，再 dearmor/install：
-# 旧写法 `curl -1sL | gpg --dearmor` 在下载失败时会静默生成空 keyring，
-# apt 随后会以 NO_PUBKEY 忽略该源，install 便悄悄退回 Ubuntu 仓库的旧版 Caddy。
-setup_caddy_repo() {
-    command -v apt-get &>/dev/null || return 1
-    command -v gpg &>/dev/null || apt-get install -y -qq gnupg >/dev/null 2>&1 || true
-    apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl >/dev/null 2>&1 || true
-
-    local key_tmp src_tmp
-    key_tmp=$(mktemp) || return 1
-    src_tmp=$(mktemp) || return 1
-
-    if ! curl -fsSL --retry 3 --retry-delay 2 --max-time 30 \
-            'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' -o "$key_tmp" \
-       || [[ ! -s "$key_tmp" ]] \
-       || ! gpg --dearmor < "$key_tmp" > "${key_tmp}.gpg" 2>/dev/null \
-       || [[ ! -s "${key_tmp}.gpg" ]]; then
-        rm -f "$key_tmp" "${key_tmp}.gpg" "$src_tmp"
-        return 1
-    fi
-    install -m 644 "${key_tmp}.gpg" /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-
-    if ! curl -fsSL --retry 3 --retry-delay 2 --max-time 30 \
-            'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' -o "$src_tmp" \
-       || ! grep -q 'dl.cloudsmith.io/public/caddy/stable/deb/debian' "$src_tmp"; then
-        rm -f "$key_tmp" "${key_tmp}.gpg" "$src_tmp"
-        return 1
-    fi
-    install -m 644 "$src_tmp" /etc/apt/sources.list.d/caddy-stable.list
-
-    rm -f "$key_tmp" "${key_tmp}.gpg" "$src_tmp"
-    return 0
-}
-
 # 检查并自动安装 Caddy
-# 只有「机器上完全没有 caddy」时才装；已有则原样使用，绝不升级、不重启，
-# 避免打断用户自己托管在 Caddy 上的站点。
+# 支持范围已收缩到 Ubuntu 24.04+，发行版仓库自带 caddy，无需第三方源。
+# 已有 caddy 则原样使用：不升级、不重启，避免打断用户自己托管在它上面的站点。
 install_caddy() {
     if command -v caddy &>/dev/null; then
         systemctl enable caddy >/dev/null 2>&1 || true
         return 0
     fi
 
-    echo -e "${BLUE}正在安装 Caddy 用于安全的 HTTPS 订阅分发...${PLAIN}"
-    if command -v apt-get &>/dev/null; then
-        setup_caddy_repo || echo -e "${YELLOW}官方源不可用，回退到系统仓库安装${PLAIN}"
-        apt-get update -qq >/dev/null 2>&1 || true
-        apt-get install -y -qq caddy || true
-    elif command -v yum &>/dev/null; then
-        yum install -y yum-plugin-copr >/dev/null 2>&1 || true
-        yum copr enable -y @caddy/caddy >/dev/null 2>&1 || true
-        yum install -y caddy || true
+    echo -e "${BLUE}正在安装 Caddy 用于订阅分发...${PLAIN}"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update -qq >/dev/null 2>&1 || true
+    if ! apt-get install -y -qq caddy; then
+        echo -e "${RED}Caddy 安装失败。${PLAIN}"
+        echo -e "${YELLOW}请先执行 apt-get update 后重试，或手动安装: apt-get install -y caddy${PLAIN}"
+        return 1
     fi
 
     # 归属标记：只有本脚本装的包，卸载时才连软件包一起清理
@@ -1058,6 +1061,13 @@ render_and_reload() {
 }
 
 install_node() {
+    if ! require_os >/dev/null; then
+        return 1
+    fi
+    if ! require_arch >/dev/null; then
+        return 1
+    fi
+
     if ! install_deps; then
         echo -e "${RED}基础依赖检查未通过，安装中止。${PLAIN}"
         return 1
@@ -1563,14 +1573,8 @@ uninstall_all() {
 
     if [[ "$caddy_owned" == "true" ]]; then
         echo -e "${BLUE}正在卸载本脚本安装的 Caddy...${PLAIN}"
-        if command -v apt-get &>/dev/null; then
-            apt-get remove -y -qq caddy >/dev/null 2>&1 || true
-            apt-get autoremove -y -qq >/dev/null 2>&1 || true
-        elif command -v yum &>/dev/null; then
-            yum remove -y caddy >/dev/null 2>&1 || true
-        fi
-        rm -f /etc/apt/sources.list.d/caddy-stable.list
-        rm -f /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+        apt-get remove -y -qq caddy >/dev/null 2>&1 || true
+        apt-get autoremove -y -qq >/dev/null 2>&1 || true
         # apt remove 不删配置目录：只清理本脚本创建的站点文件，
         # 目录为空才 rmdir —— 用户后来自己加的站点配置必须保留。
         rm -f /etc/caddy/sites/simple-box*.caddy /etc/caddy/sites/*-"${SUB_PORT:-8444}".caddy 2>/dev/null || true
@@ -2191,6 +2195,8 @@ menu() {
 #   3) curl ... | bash                       -> BASH_SOURCE[0] 为空，$0 为 bash（管道）
 _ENTRY_SRC="${BASH_SOURCE[0]:-}"
 if [[ -z "$_ENTRY_SRC" || "$_ENTRY_SRC" == "$0" ]]; then
+    # 系统不在支持范围内就直接退出，别让用户走到一半才失败
+    require_os >/dev/null || exit 1
     case "${1:-}" in
         install|reinstall) install_node || exit 1 ;;
         "")

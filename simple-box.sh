@@ -238,7 +238,7 @@ install_deps() {
 }
 
 # 检查并自动安装 Caddy
-# 支持范围已收缩到 Ubuntu 24.04+，发行版仓库自带 caddy，无需第三方源。
+# 支持范围内（Ubuntu 24.04+ / Debian 12+）的发行版仓库自带 caddy，无需第三方源。
 # 已有 caddy 则原样使用：不升级、不重启，避免打断用户自己托管在它上面的站点。
 install_caddy() {
     if command -v caddy &>/dev/null; then
@@ -652,7 +652,10 @@ setup_caddy_subscription() {
     local sub_port="${3:-}"
     local cert_mode="${4:-selfsigned}"
 
-    install_caddy
+    if ! install_caddy; then
+        echo -e "${RED}Caddy 不可用，无法部署订阅分发站点。${PLAIN}"
+        return 1
+    fi
 
     mkdir -p "/etc/caddy/sites"
     

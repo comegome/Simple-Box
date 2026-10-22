@@ -2151,8 +2151,8 @@ menu() {
         if [[ -f "$ENV_FILE" ]]; then
             local hy_sni="${HY_DOMAIN:-$SERVER_IP}"
             local hy_ports="${HY_RANGE:-无}"
-            echo -e " ${BLUE}VLESS-Reality | TCP:${VL_PORT:-443} | servername: ${VL_SNI:-gateway.icloud.com}${PLAIN}"
-            echo -e " ${BLUE}Hysteria 2 | UDP:${HY_PORT:-8443} | sni: ${hy_sni} | ports: ${hy_ports}${PLAIN}"
+            echo -e " ${BLUE}VLESS-Reality | TCP:${VL_PORT:-443} | ServerName: ${VL_SNI:-gateway.icloud.com}${PLAIN}"
+            echo -e " ${BLUE}Hysteria 2 | UDP:${HY_PORT:-8443} | SNI: ${hy_sni} | Ports: ${hy_ports}${PLAIN}"
             
             local proto=${SUB_PROTO:-http}
             local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}

@@ -2294,9 +2294,9 @@ menu() {
             sb_ver=$(/usr/local/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
             sb_ver="v${sb_ver#v}"
             if systemctl is-active --quiet sing-box; then
-                sb_status="${GREEN}运行中${PLAIN} (sing-box ${sb_ver})"
+                sb_status="${GREEN}运行中 (sing-box ${sb_ver})${PLAIN}"
             else
-                sb_status="${RED}已停止${PLAIN} (sing-box ${sb_ver})"
+                sb_status="${RED}已停止 (sing-box ${sb_ver})${PLAIN}"
             fi
         else
             sb_status="${RED}未安装${PLAIN}"
@@ -2310,11 +2310,11 @@ menu() {
             caddy_ver=$(caddy version 2>/dev/null | head -n1 | awk '{print $1}')
             caddy_ver="v${caddy_ver#v}"
             if ! systemctl is-active --quiet caddy; then
-                caddy_status="${RED}已停止${PLAIN} (Caddy ${caddy_ver})"
+                caddy_status="${RED}已停止 (Caddy ${caddy_ver})${PLAIN}"
             elif [[ -f /etc/caddy/sites/simple-box-sub.caddy ]]; then
-                caddy_status="${GREEN}运行中${PLAIN} (Caddy ${caddy_ver})"
+                caddy_status="${GREEN}运行中 (Caddy ${caddy_ver})${PLAIN}"
             else
-                caddy_status="${YELLOW}无订阅地址${PLAIN} (Caddy ${caddy_ver})"
+                caddy_status="${YELLOW}无订阅地址 (Caddy ${caddy_ver})${PLAIN}"
             fi
         fi
 

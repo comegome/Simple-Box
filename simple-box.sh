@@ -284,7 +284,7 @@ manage_bbr() {
             target_action="disable"
         fi
 
-        echo -e "\n${GREEN}==================== 配置 BBR 加速 ====================${PLAIN}"
+        echo -e "\n${GREEN}==================== BBR 加速配置 =====================${PLAIN}"
         echo -e " 当前状态: ${bbr_tag} | 队列规则: ${CYAN}${cur_qdisc}${PLAIN}"
         echo -e "${GREEN}-------------------------------------------------------${PLAIN}"
         echo -e " 1. ${action_desc}"
@@ -883,7 +883,7 @@ EOF
     [[ "$hy_skip_cert" == "true" ]] && insecure_flag="1"
     local mport_param=""
     [[ -n "$hy_ports_display" && "$hy_ports_display" == *,* ]] && mport_param="&mport=${hy_ports_display}"
-    local hy2_link="hysteria2://${hy_password}@${domain_or_ip}:${hy_port}/?sni=${domain_or_ip}&insecure=${insecure_flag}${mport_param}#${node_prefix}-Hysteria2"
+    local hy2_link="hy2://${hy_password}@${domain_or_ip}:${hy_port}/?sni=${domain_or_ip}&insecure=${insecure_flag}${mport_param}#${node_prefix}-Hysteria2"
     echo "$hy2_link" >> "$links_out"
     cp -f "$links_out" "$LINKS_FILE"
 }
@@ -1538,7 +1538,7 @@ show_links() {
             [[ "${HY_SKIP_CERT:-false}" == "true" ]] && insecure_flag="1"
             local mport_param=""
             [[ -n "$hy_ports_display" && "$hy_ports_display" == *,* ]] && mport_param="&mport=${hy_ports_display}"
-            local hy2_link="hysteria2://${HY_PASS}@${host}:${HY_PORT}/?sni=${host}&insecure=${insecure_flag}${mport_param}#${NODE_PREFIX}-Hysteria2"
+            local hy2_link="hy2://${HY_PASS}@${host}:${HY_PORT}/?sni=${host}&insecure=${insecure_flag}${mport_param}#${NODE_PREFIX}-Hysteria2"
             echo "$hy2_link" >> "$LINKS_FILE"
         else
             echo -e "${RED}未找到节点环境配置，请先执行安装！${PLAIN}"
@@ -1549,20 +1549,20 @@ show_links() {
     local vless_url=$(head -n 1 "$LINKS_FILE")
     local hy2_url=$(sed -n '2p' "$LINKS_FILE")
 
-    echo -e "\n${GREEN}====================== 节点原生分享链接 ======================${PLAIN}"
-    echo -e "${YELLOW}[1] VLESS-Reality 链接:${PLAIN}"
+    echo -e "\n${GREEN}==================== vless / hy2 原生链接 ====================${PLAIN}"
+    echo -e "${YELLOW}[1] vless 链接:${PLAIN}"
     echo -e "${GREEN}${vless_url}${PLAIN}"
     if command -v qrencode &>/dev/null; then
-        echo -e "\n${YELLOW}[VLESS-Reality 二维码]:${PLAIN}"
+        echo -e "\n${YELLOW}[vless 二维码]:${PLAIN}"
         qrencode -t ANSIUTF8 "${vless_url}"
     fi
 
     if [[ -n "$hy2_url" ]]; then
         echo -e "\n--------------------------------------------------------------"
-        echo -e "${YELLOW}[2] Hysteria 2 链接:${PLAIN}"
+        echo -e "${YELLOW}[2] hy2 链接:${PLAIN}"
         echo -e "${GREEN}${hy2_url}${PLAIN}"
         if command -v qrencode &>/dev/null; then
-            echo -e "\n${YELLOW}[Hysteria 2 二维码]:${PLAIN}"
+            echo -e "\n${YELLOW}[hy2 二维码]:${PLAIN}"
             qrencode -t ANSIUTF8 "${hy2_url}"
         fi
     fi
@@ -1681,7 +1681,7 @@ uninstall_all() {
     echo -e "${YELLOW}本脚本自身的入口 (simbo) 也已删除，控制台即将退出。${PLAIN}"
     echo -e "${YELLOW}如需重装，请重新执行一键安装命令。${PLAIN}"
     echo -e "${CYAN}注: TCP BBR 是内核级 sysctl 设置（/etc/sysctl.d/99-bbr.conf），不属于本脚本，卸载不会还原。${PLAIN}"
-    echo -e "${CYAN}    如需恢复系统默认，请在卸载前先用「配置 BBR 加速」关闭，或手动删除该文件。${PLAIN}"
+    echo -e "${CYAN}    如需恢复系统默认，请在卸载前先用「BBR 加速配置」关闭，或手动删除该文件。${PLAIN}"
     # 卸载后目录与入口都已不存在，继续停留在菜单毫无意义（面板还会读到已删除的配置）
     UNINSTALL_DONE=true
 }
@@ -1702,7 +1702,7 @@ menu_reality_module() {
     while true; do
         [ -t 1 ] && clear
         echo -e "
-${GREEN}================= 配置 VLESS-Reality 模块 =================${PLAIN}"
+${GREEN}================= VLESS-Reality 模块配置 =================${PLAIN}"
         echo -e " 1. 重置并更新 VLESS-Reality 参数"
         echo -e " 0. 返回主菜单"
         echo -e "${GREEN}==========================================================${PLAIN}"
@@ -1800,7 +1800,7 @@ menu_hy2_module() {
     while true; do
         [ -t 1 ] && clear
         echo -e "
-${GREEN}================== 配置 Hysteria 2 模块 ===================${PLAIN}"
+${GREEN}=================== Hysteria 2 模块配置 ===================${PLAIN}"
         echo -e " 1. 重置并更新 Hysteria 2 参数"
         echo -e " 0. 返回主菜单"
         echo -e "${GREEN}==========================================================${PLAIN}"
@@ -1977,7 +1977,7 @@ echo -e "${CYAN}----------------------------------------------------------------
                 # 老版本 env.conf 没有 VL_PRIVKEY，缺失时无法重建 Reality，必须先补齐
                 if [[ -z "$vl_privkey" ]]; then
                     echo -e "${RED}环境配置缺少 Reality 私钥 (VL_PRIVKEY)，无法安全重建。${PLAIN}"
-                    echo -e "${YELLOW}请进入 [2] 配置 VLESS-Reality 模块 重新生成一次密钥，再回到此处。${PLAIN}"
+                    echo -e "${YELLOW}请进入 [2] VLESS-Reality 模块配置 重新生成一次密钥，再回到此处。${PLAIN}"
                     systemctl start sing-box 2>/dev/null || true
                     read -r -p "按回车键返回..." dummy || true
                     continue
@@ -2016,7 +2016,7 @@ menu_sub_module() {
     while true; do
         [ -t 1 ] && clear
         echo -e "
-${GREEN}================= 配置 Clash 订阅 ==================${PLAIN}"
+${GREEN}================= Clash 订阅地址配置 =================${PLAIN}"
         echo -e " 1. 重置并更新 Clash 订阅地址参数"
         echo -e " 2. 重置并更新节点名称前缀"
         echo -e " 0. 返回主菜单"
@@ -2157,7 +2157,7 @@ ${GREEN}================= 配置 Clash 订阅 ==================${PLAIN}"
 menu_singbox_manage() {
     while true; do
         [ -t 1 ] && clear
-        echo -e "\n${GREEN}=================== 管理 sing-box 内核 ===================${PLAIN}"
+        echo -e "\n${GREEN}====================== 内核管理 ======================${PLAIN}"
         echo -e " 1. 重启 / 启动 sing-box 服务"
         echo -e " 2. 检查并更新 sing-box 内核"
         echo -e " 3. 查看实时运行日志"
@@ -2284,14 +2284,14 @@ menu() {
         fi
 
         echo -e "${GREEN}----------------------------------------------------${PLAIN}"
-        echo -e " 1. 查看节点原生链接"
-        echo -e " 2. 配置 VLESS-Reality 模块"
-        echo -e " 3. 配置 Hysteria 2 模块"
-        echo -e " 4. 配置 Clash 订阅"
-        echo -e " 5. 配置 BBR 加速"
-        echo -e " 6. 管理 sing-box 内核"
-        echo -e " 7. 重装 Simple-Box 脚本"
-        echo -e " 8. 卸载 Simple-Box 脚本"
+        echo -e " 1. vless / hy2 原生链接查看"
+        echo -e " 2. VLESS-Reality 模块配置"
+        echo -e " 3. Hysteria 2 模块配置"
+        echo -e " 4. Clash 订阅地址配置"
+        echo -e " 5. BBR 加速配置"
+        echo -e " 6. 内核管理"
+        echo -e " 7. 脚本升级 / 重装"
+        echo -e " 8. 脚本卸载"
         echo -e " 0. 退出控制台"
         echo -e "${GREEN}====================================================${PLAIN}"
         

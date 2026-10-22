@@ -184,8 +184,18 @@ verify_cloudflare_token() {
 harden_private_key() {
     local key="${CERT_DIR}/private.key"
     [[ -f "$key" ]] || return 0
-    chown root:caddy "$key" 2>/dev/null || true
-    chmod 640 "$key" 2>/dev/null || true
+    # caddy 组可能尚不存在：全新机器上证书签发发生在 install_caddy 之前。
+    # 那种情况下 chown 会失败（invalid group），私钥会留在 root:root，
+    # caddy 装好后就读不到 —— 所以这里必须区分两种情况，不能一律 || true 吞掉。
+    if getent group caddy >/dev/null 2>&1; then
+        chown root:caddy "$key" 2>/dev/null || true
+        chmod 640 "$key" 2>/dev/null || true
+    else
+        # caddy 尚未安装：先按 root:root 640 收紧，装好 caddy 后由
+        # setup_caddy_subscription 再调一次本函数补上属组。
+        chmod 640 "$key" 2>/dev/null || true
+    fi
+    return 0
 }
 
 # 引导用户输入 Cloudflare API Token
@@ -769,6 +779,11 @@ setup_caddy_subscription() {
         return 1
     fi
 
+    # caddy 装好后 caddy 组才存在。全新机器上证书先于 caddy 签发，那时
+    # harden_private_key 只能把私钥留在 root:root，caddy 读不到会直接
+    # permission denied 起不来。这里补调一次把属组补上。
+    harden_private_key
+
     mkdir -p "/etc/caddy/sites"
     
     # 若 Caddy 为本脚本安装，或 Caddyfile 尚不存在：写入纯净配置，绝不监听 80 端口（杜绝与 Nginx/Apache 冲突）
@@ -973,6 +988,7 @@ ${ports_line}
     sni: ${domain_or_ip}
     skip-cert-verify: ${hy_skip_cert}
 EOF
+    mkdir -p "$CONF_DIR" 2>/dev/null || true
     cp -f "$provider_file" "$YAML_PROVIDER"
 
     # 3. 组装原生分享链接
@@ -1004,7 +1020,7 @@ install_simbo_command() {
 
     # 管道执行（$0 为 /dev/fd/xx）或复制失败时，从仓库拉取一份落地
     if [[ ! -s "$target" ]]; then
-        curl -fsSL https://raw.githubusercontent.com/comegome/Simple-Box/main/simple-box.sh -o "$target" 2>/dev/null || true
+        curl -fsSL "$SCRIPT_URL" -o "$target" 2>/dev/null || true
         chmod 755 "$target" 2>/dev/null || true
     fi
 
@@ -1037,7 +1053,7 @@ fetch_latest_script() {
     mv -f "$tmp" "$dest"
 }
 
-# 选项 7：先取仓库最新脚本，有更新就切换过去再用新版继续安装
+# 主菜单选项 6：先取仓库最新脚本，有更新就切换过去再用新版继续安装
 # 这样「重装」同时承担了「升级脚本」的职责，用户无需手动 curl 覆盖
 reinstall_with_latest() {
     local share_dir="/usr/local/share/simple-box"
@@ -1166,13 +1182,13 @@ write_env_config() {
     # 关键字段必须非空：这些值由调用方在函数内用 local 搬运，漏搬一行就会静默
     # 写入空串（曾导致 NODE_PREFIX="" 让节点名变成 "-VLESS-Reality"）。
     # 这里显式拦住，宁可报错也不写坏配置。
-    local missing="" v
+    local missing_keys="" v
     for v in node_prefix server_ip vl_port vl_sni user_uuid vl_privkey vl_pubkey \
              vl_shortid hy_port hy_password sub_port sub_token; do
-        [[ -z "${!v:-}" ]] && missing="${missing} ${v}"
+        [[ -z "${!v:-}" ]] && missing_keys="${missing_keys} ${v}"
     done
-    if [[ -n "$missing" ]]; then
-        echo -e "${RED}内部错误: 环境变量缺失 (${missing# })，已中止写入 ${ENV_FILE}。${PLAIN}" >&2
+    if [[ -n "$missing_keys" ]]; then
+        echo -e "${RED}内部错误: 环境变量缺失 (${missing_keys# })，已中止写入 ${ENV_FILE}。${PLAIN}" >&2
         return 1
     fi
 
@@ -1771,7 +1787,7 @@ uninstall_all() {
 # 1. VLESS-Reality 独立模块配置
 menu_reality_module() {
     if [[ ! -f "$ENV_FILE" ]]; then
-        echo -e "${RED}未检测到已安装的配置，请先运行选项 7 重新安装Simple-Box！${PLAIN}"
+        echo -e "${RED}未检测到已安装的配置，请先运行选项 6 重新安装Simple-Box！${PLAIN}"
         read -r -p "按回车键返回..." dummy || true
         return 0
     fi
@@ -1862,7 +1878,7 @@ ${GREEN}================= VLESS-Reality 模块配置 =================${PLAIN}"
 # 2. Hysteria 2 独立模块配置
 menu_hy2_module() {
     if [[ ! -f "$ENV_FILE" ]]; then
-        echo -e "${RED}未检测到已安装的配置，请先运行选项 7 重新安装Simple-Box！${PLAIN}"
+        echo -e "${RED}未检测到已安装的配置，请先运行选项 6 重新安装Simple-Box！${PLAIN}"
         read -r -p "按回车键返回..." dummy || true
         return 0
     fi
@@ -2053,7 +2069,7 @@ ${GREEN}=================== Hysteria 2 模块配置 ===================${PLAIN}"
 # 3. 在线订阅地址独立模块配置 (结构与模块 1、2 统一)
 menu_sub_module() {
     if [[ ! -f "$ENV_FILE" ]]; then
-        echo -e "${RED}未检测到已安装的配置，请先运行选项 7 重新安装Simple-Box！${PLAIN}"
+        echo -e "${RED}未检测到已安装的配置，请先运行选项 6 重新安装Simple-Box！${PLAIN}"
         read -r -p "按回车键返回..." dummy || true
         return 0
     fi

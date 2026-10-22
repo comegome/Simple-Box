@@ -361,32 +361,58 @@ install_caddy() {
 }
 
 # BBR 拥塞控制管理（开启与关闭）
+# BBR 配置文件路径与归属标记
+# 标记用于区分「本脚本创建的」与「用户自己配的」，
+# 卸载时只删带标记的，绝不覆盖或误删别人的 sysctl 配置。
+BBR_CONF="/etc/sysctl.d/99-bbr.conf"
+BBR_MARK="# managed-by: simple-box"
+
 # 开启 BBR（安装时调用，无交互）
+# 三种情况分别处理：已开启则跳过；已有他人配置则不动；否则写入并打标记
 enable_bbr() {
+    local cur
+    cur=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "")
+
+    if [[ "$cur" == "bbr" ]]; then
+        echo -e "${GREEN}✓ TCP BBR 已处于开启状态，无需调整${PLAIN}"
+        return 0
+    fi
+
+    # 文件存在但不带本脚本标记 → 是用户的配置，不动
+    if [[ -f "$BBR_CONF" ]] && ! grep -q "^${BBR_MARK}" "$BBR_CONF"; then
+        echo -e "${YELLOW}检测到已有的 ${BBR_CONF}（非本脚本创建），保留不覆盖。${PLAIN}"
+        echo -e "${YELLOW}如需 BBR 加速请手动确认该文件内容。${PLAIN}"
+        return 0
+    fi
+
     mkdir -p /etc/sysctl.d
-    cat > /etc/sysctl.d/99-bbr.conf <<EOF
+    cat > "$BBR_CONF" <<EOF
+${BBR_MARK}
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
-    sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
-    local cur
-    cur=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    sysctl -p "$BBR_CONF" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
+
+    cur=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "")
     if [[ "$cur" == "bbr" ]]; then
         echo -e "${GREEN}✓ TCP BBR 已开启${PLAIN}"
     else
-        echo -e "${YELLOW}BBR 配置已写入，但内核当前返回 ${cur}，可能需要重启系统。${PLAIN}"
+        echo -e "${YELLOW}BBR 配置已写入，但内核当前返回 ${cur:-未知}，可能需要重启系统。${PLAIN}"
     fi
 }
 
 # 恢复系统默认（卸载时调用）
-# 只删本脚本创建的 99-bbr.conf，不动用户自己的 sysctl 配置
+# 只处理带本脚本标记的文件；用户自己的 sysctl 配置一律不碰
 disable_bbr() {
-    if [[ -f /etc/sysctl.d/99-bbr.conf ]]; then
-        rm -f /etc/sysctl.d/99-bbr.conf
-        sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
-        sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || true
-        echo -e "${BLUE}已恢复系统默认拥塞控制算法${PLAIN}"
+    [[ -f "$BBR_CONF" ]] || return 0
+    if ! grep -q "^${BBR_MARK}" "$BBR_CONF"; then
+        echo -e "${YELLOW}${BBR_CONF} 非本脚本创建，保留不动。${PLAIN}"
+        return 0
     fi
+    rm -f "$BBR_CONF"
+    sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
+    sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || true
+    echo -e "${BLUE}已恢复系统默认拥塞控制算法${PLAIN}"
 }
 
 # 获取并升级官方 sing-box 内核（带精准版本校验）

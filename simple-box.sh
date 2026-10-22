@@ -65,7 +65,7 @@ require_arch() {
 # 支持范围：Ubuntu 24.04+ / Debian 12+（x86_64 / aarch64）。
 # 收缩到这个范围是为了让所有依赖都直接用发行版仓库，无需第三方 apt 源：
 #   - caddy 自 Ubuntu noble / Debian bookworm 起才进发行版仓库（22.04 jammy 没有这个包）
-#   - 两者仓库里的 2.6.2 已实测能完整承载本脚本的订阅地址证书配置
+#   - 两者仓库里的 2.6.2 已实测能完整承载本脚本的订阅地址配置
 #   - 两者共用 apt + systemd + iptables-persistent，脚本的系统调用完全同构
 # 已知版本下限（供后续新增依赖时对照）：
 #   caddy 2.6.2 | openssl 3.0 | iptables 1.8.10 | qrencode 4.1.1
@@ -601,7 +601,7 @@ setup_port_hopping() {
 # 安全重载 Caddy：先校验配置，优先 reload，失败才 restart，并解除 systemd 限流
 reload_caddy_safe() {
     if ! command -v caddy &>/dev/null; then
-        echo -e "${YELLOW}未安装 Caddy，跳过订阅地址证书重载。${PLAIN}"
+        echo -e "${YELLOW}未安装 Caddy，跳过订阅地址重载。${PLAIN}"
         return 1
     fi
 
@@ -721,7 +721,7 @@ EOF
         echo -e "${YELLOW}节点本身不受影响；可稍后手动安装 Caddy 再重跑本项。${PLAIN}"
         return 0
     fi
-    reload_caddy_safe || echo -e "${YELLOW}订阅地址证书配置已写入，但 Caddy 未能生效，可稍后手动 systemctl restart caddy。${PLAIN}"
+    reload_caddy_safe || echo -e "${YELLOW}订阅地址配置已写入，但 Caddy 未能生效，可稍后手动 systemctl restart caddy。${PLAIN}"
 }
 
 # 组装客户端订阅与独立链接
@@ -1261,7 +1261,7 @@ echo -e "${CYAN}----------------------------------------------------------------
         break
     done
 
-    echo -e "\n${YELLOW}=== 3. 配置在线订阅地址证书参数 ===${PLAIN}"
+    echo -e "\n${YELLOW}=== 3. 配置在线订阅地址参数 ===${PLAIN}"
     local sub_port
     while true; do
         read -r -p "请输入 Caddy 订阅监听端口 [默认 ${old_sub_port:-8444}]: " sub_port || sub_port=""
@@ -1564,7 +1564,7 @@ uninstall_all() {
     if [[ "$foreign_sites" -gt 0 ]]; then
         caddy_owned=false
         echo -e "${YELLOW}检测到 /etc/caddy/sites 下还有 ${foreign_sites} 个其它站点配置，${PLAIN}"
-        echo -e "${YELLOW}说明 Caddy 已承载你自己的服务，将保留软件包与 Caddyfile，仅移除本脚本的订阅地址证书。${PLAIN}"
+        echo -e "${YELLOW}说明 Caddy 已承载你自己的服务，将保留软件包与 Caddyfile，仅移除本脚本的订阅地址。${PLAIN}"
     fi
 
     if [[ "$caddy_owned" == "true" && "$caddyfile_created" == "true" ]]; then
@@ -1933,7 +1933,7 @@ echo -e "${CYAN}----------------------------------------------------------------
     done
 }
 
-# 3. 在线订阅地址证书独立模块配置 (结构与模块 1、2 统一)
+# 3. 在线订阅地址独立模块配置 (结构与模块 1、2 统一)
 menu_sub_module() {
     if [[ ! -f "$ENV_FILE" ]]; then
         echo -e "${RED}未检测到已安装的配置，请先运行选项 7 重新安装Simple-Box！${PLAIN}"
@@ -2025,7 +2025,7 @@ ${GREEN}================ 配置 Clash 订阅地址 ================${PLAIN}"
                 reload_caddy_safe || true
                 verify_caddy_listening "$SUB_PORT" || true
 
-                echo -e "\n${GREEN}✓ 在线订阅地址证书已成功更新！${PLAIN}"
+                echo -e "\n${GREEN}✓ 在线订阅地址已成功更新！${PLAIN}"
                 echo -e "当前在线订阅: ${CYAN}${sub_proto}://${target_host}:${SUB_PORT}/${new_token}/config.yaml${PLAIN}"
                 echo -e "${YELLOW}提示: 订阅参数已更新，请在客户端 (如 ClashX.Meta) 中修改端口或更新订阅 URL。${PLAIN}"
                 read -r -p "按回车键返回..." dummy || true
@@ -2114,7 +2114,7 @@ menu() {
             sb_status="${RED}未安装${PLAIN}"
         fi
 
-        # 证书管理 = Caddy 进程在跑 + 本脚本的订阅地址证书配置确实存在。
+        # 证书管理 = Caddy 进程在跑 + 本脚本的订阅地址配置确实存在。
         # 只判服务不判站点，卸载或站点丢失后会谎报「运行中」。
         local caddy_ver=""
         local caddy_status="${RED}未安装${PLAIN}"
@@ -2126,7 +2126,7 @@ menu() {
             elif [[ -f /etc/caddy/sites/simple-box-sub.caddy ]]; then
                 caddy_status="${GREEN}运行中 (Caddy ${caddy_ver})${PLAIN}"
             else
-                caddy_status="${YELLOW}无订阅地址证书 (Caddy ${caddy_ver})${PLAIN}"
+                caddy_status="${YELLOW}无订阅地址 (Caddy ${caddy_ver})${PLAIN}"
             fi
         fi
 

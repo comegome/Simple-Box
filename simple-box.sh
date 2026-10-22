@@ -1723,8 +1723,14 @@ uninstall_all() {
         # 必须 purge 而非 remove：caddy.postrm 的 remove 分支会 mask 服务且不解除，
         # 留下 rc 残留状态，下次重装时 caddy.service 仍是 masked，永远起不来。
         # purge 分支才会 unmask 并清掉 /etc/caddy 与 /var/lib/caddy。
-        apt-get purge -y -qq caddy >/dev/null 2>&1 || true
-        apt-get autoremove -y -qq >/dev/null 2>&1 || true
+        #
+        # DEBIAN_FRONTEND=noninteractive + force-confold 不能省：
+        # /etc/caddy/Caddyfile 被本脚本改过，purge 时 dpkg 会弹 conffile 询问；
+        # 无人应答（脚本里 stdin 是管道）就会报 "end of file on stdin at conffile
+        # prompt"，把包卡在 iU 半安装状态，之后任何 apt 操作都失败。
+        DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq \
+            -o Dpkg::Options::="--force-confold" caddy >/dev/null 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >/dev/null 2>&1 || true
         # apt remove 不删配置目录：只清理本脚本创建的站点文件，
         # 目录为空才 rmdir —— 用户后来自己加的站点配置必须保留。
         rm -f /etc/caddy/sites/simple-box*.caddy /etc/caddy/sites/*-"${SUB_PORT:-8444}".caddy 2>/dev/null || true

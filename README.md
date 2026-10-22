@@ -176,5 +176,3 @@ iptables -t nat -L PREROUTING -n --line-numbers   # 检查端口跳跃 REDIRECT 
 ### 📄 开源许可证
 
 本项目采用 [MIT 许可证](LICENSE)。
-
-修改脚本前建议先读 [MAINTAINING.md](MAINTAINING.md)，里面记着改权限、改菜单编号、写系统配置时容易踩的坑。

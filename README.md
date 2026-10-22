@@ -113,17 +113,18 @@ simbo
 ====================================================
             Simple-Box Manager - 控制台            
 ====================================================
- 服务器操作系统: Ubuntu 24.04.5 LTS (amd64)
- 流量算法: BBR
+ 操作系统: Ubuntu 24.04.5 LTS (amd64)
  公网地址: 203.0.113.10
+ TLS 证书: 自签 IP 证书
+ TCP 加速: BBR
  证书服务: 运行中 (Caddy v2.11.7)
- TLS 证书: IP 自签证书
  代理服务: 运行中 (sing-box v1.14.3)
  VLESS-Reality | TCP:443 | servername: gateway.icloud.com
- Hysteria 2 | UDP:8443 | sni: o2.ducto.net | ports: 20000:40000
+ Hysteria 2 | UDP:8443 | sni: node.example.com | ports: 20000:40000
 ----------------------------------------------------
- 在线订阅: http://203.0.113.10:8444/2dac50852729bf55bb61833d/config.yaml
- 节点列表: http://203.0.113.10:8444/2dac50852729bf55bb61833d/provider.yaml
+ Clash 订阅配置: http://203.0.113.10:8444/2dac50852729bf55bb61833d/config.yaml
+ Clash 节点列表: http://203.0.113.10:8444/2dac50852729bf55bb61833d/provider.yaml
+  (无域名证书加密，建议在可信网络下更新)
 ----------------------------------------------------
  1. 配置 VLESS-Reality 模块
  2. 配置 Hysteria 2 模块

@@ -2071,22 +2071,22 @@ menu() {
             fi
         fi
 
-        # 3. 打印系统面板
-        echo -e " 服务器操作系统: ${CYAN}${os_name} (${arch})${PLAIN}"
-        echo -e " 流量算法: ${bbr_status}"
-        echo -e " 公网地址: ${CYAN}${cur_ip}${PLAIN}"
-        echo -e " 证书服务: ${caddy_status}"
-        
         local cert_display="未配置"
         if [[ -f "$ENV_FILE" ]]; then
             set +e; source "$ENV_FILE"; set -e
             if [[ "${CERT_MODE:-selfsigned}" == "domain" && -n "${HY_DOMAIN:-}" ]]; then
                 cert_display="${HY_DOMAIN} (CA 证书)"
             else
-                cert_display="IP 自签证书"
+                cert_display="自签 IP 证书"
             fi
         fi
+
+        # 3. 打印系统面板
+        echo -e " 操作系统: ${CYAN}${os_name} (${arch})${PLAIN}"
+        echo -e " 公网地址: ${CYAN}${cur_ip}${PLAIN}"
         echo -e " TLS 证书: ${CYAN}${cert_display}${PLAIN}"
+        echo -e " TCP 加速: ${bbr_status}"
+        echo -e " 证书服务: ${caddy_status}"
         echo -e " 代理服务: ${sb_status}"
         
         if [[ -f "$ENV_FILE" ]]; then
@@ -2099,12 +2099,12 @@ menu() {
             local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
             local port=${SUB_PORT:-8444}
             echo -e "${GREEN}----------------------------------------------------${PLAIN}"
-            echo -e " 在线订阅: ${CYAN}${proto}://${host}:${port}/${SUB_TOKEN}/config.yaml${PLAIN}"
-            echo -e " 节点列表: ${CYAN}${proto}://${host}:${port}/${SUB_TOKEN}/provider.yaml${PLAIN}"
+            echo -e " Clash 订阅配置: ${CYAN}${proto}://${host}:${port}/${SUB_TOKEN}/config.yaml${PLAIN}"
+            echo -e " Clash 节点列表: ${CYAN}${proto}://${host}:${port}/${SUB_TOKEN}/provider.yaml${PLAIN}"
             if [[ "$proto" == "http" ]]; then
-                echo -e " 订阅安全: ${YELLOW}直连分发 (HTTP 未加密，建议在可信网络下更新)${PLAIN}"
+                echo -e "  ${YELLOW}(无域名证书加密，建议在可信网络下更新)${PLAIN}"
             else
-                echo -e " 订阅安全: ${GREEN}TLS 1.3 强加密保护 (权威 CA 证书，直连防死锁)${PLAIN}"
+                echo -e "  ${GREEN}(TLS 1.3 强加密保护，直连防死锁)${PLAIN}"
             fi
         fi
 

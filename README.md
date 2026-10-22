@@ -16,16 +16,8 @@
 
 以 root 权限运行以下命令：
 
-#### 官方直链
-
 ```bash
 curl -fsSL https://raw.githubusercontent.com/comegome/Simple-Box/main/simple-box.sh -o /tmp/simple-box.sh && sudo bash /tmp/simple-box.sh
-```
-
-#### CDN 加速
-
-```bash
-curl -fsSL https://cdn.jsdelivr.net/gh/comegome/Simple-Box@main/simple-box.sh -o /tmp/simple-box.sh && sudo bash /tmp/simple-box.sh
 ```
 
 ---

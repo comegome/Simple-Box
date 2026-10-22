@@ -204,26 +204,86 @@ install_deps() {
     fi
 }
 
-# 检查并自动安装 Caddy
+# 配置 Caddy 官方 apt 源（幂等）。
+# 必须先把内容落到临时文件并校验非空，再 dearmor/install：
+# 旧写法 `curl -1sL | gpg --dearmor` 在下载失败时会静默生成空 keyring，
+# apt 随后会以 NO_PUBKEY 忽略该源，install 便悄悄退回 Ubuntu 仓库的旧版 Caddy。
+setup_caddy_repo() {
+    command -v apt-get &>/dev/null || return 1
+    command -v gpg &>/dev/null || apt-get install -y -qq gnupg >/dev/null 2>&1 || true
+    apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl >/dev/null 2>&1 || true
+
+    local key_tmp src_tmp
+    key_tmp=$(mktemp) || return 1
+    src_tmp=$(mktemp) || return 1
+
+    if ! curl -fsSL --retry 3 --retry-delay 2 --max-time 30 \
+            'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' -o "$key_tmp" \
+       || [[ ! -s "$key_tmp" ]] \
+       || ! gpg --dearmor < "$key_tmp" > "${key_tmp}.gpg" 2>/dev/null \
+       || [[ ! -s "${key_tmp}.gpg" ]]; then
+        rm -f "$key_tmp" "${key_tmp}.gpg" "$src_tmp"
+        return 1
+    fi
+    install -m 644 "${key_tmp}.gpg" /usr/share/keyrings/caddy-stable-archive-keyring.gpg
+
+    if ! curl -fsSL --retry 3 --retry-delay 2 --max-time 30 \
+            'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' -o "$src_tmp" \
+       || ! grep -q 'dl.cloudsmith.io/public/caddy/stable/deb/debian' "$src_tmp"; then
+        rm -f "$key_tmp" "${key_tmp}.gpg" "$src_tmp"
+        return 1
+    fi
+    install -m 644 "$src_tmp" /etc/apt/sources.list.d/caddy-stable.list
+
+    rm -f "$key_tmp" "${key_tmp}.gpg" "$src_tmp"
+    return 0
+}
+
+# 检查并自动安装 / 升级 Caddy
+# 关键点：已存在 caddy 时不再直接 return —— 否则系统里那份发行版旧包（如 2.6.2）
+# 会永久占位，官方源的 2.11.x 永远装不上。
 install_caddy() {
+    local cur_ver="" cur_pkg="" cand="" repo_ok=false
     if command -v caddy &>/dev/null; then
-        return 0
+        cur_ver=$(caddy version 2>/dev/null | head -n1 | awk '{print $1}')
+        cur_pkg=$(dpkg-query -W -f='${Version}' caddy 2>/dev/null || echo "")
     fi
-    echo -e "${BLUE}正在安装 Caddy 用于安全的 HTTPS 订阅分发...${PLAIN}"
-    # 记录「Caddy 是本脚本装的」：卸载时才敢连软件包一起清理，
-    # 若用户机器上本来就有 caddy（可能还托管别的站点），卸载绝不能动它。
-    mkdir -p "$CONF_DIR" 2>/dev/null || true
-    : > "${CONF_DIR}/.caddy_installed_by_script" 2>/dev/null || true
+
     if command -v apt-get &>/dev/null; then
-        apt-get install -y -qq debian-keyring debian-archive-keyring apt-transport-https curl
-        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg --yes
-        curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' | tee /etc/apt/sources.list.d/caddy-stable.list
-        apt-get update -qq && apt-get install -y -qq caddy
-    elif command -v yum &>/dev/null; then
-        yum install -y yum-plugin-copr
-        yum copr enable -y @caddy/caddy
-        yum install -y caddy
+        if setup_caddy_repo; then
+            repo_ok=true
+            apt-get update -qq >/dev/null 2>&1 || true
+            cand=$(apt-cache policy caddy 2>/dev/null | awk '/Candidate:/{print $2; exit}')
+        fi
     fi
+
+    if [[ -z "$cur_ver" ]]; then
+        echo -e "${BLUE}正在安装 Caddy 用于安全的 HTTPS 订阅分发...${PLAIN}"
+        # 记录「Caddy 是本脚本装的」：卸载时才敢连软件包一起清理，
+        # 若用户机器上本来就有 caddy（可能还托管别的站点），卸载绝不能动它。
+        mkdir -p "$CONF_DIR" 2>/dev/null || true
+        : > "${CONF_DIR}/.caddy_installed_by_script" 2>/dev/null || true
+        [[ "$repo_ok" != "true" ]] && echo -e "${YELLOW}官方源不可用，回退到系统仓库安装（版本可能较旧）。${PLAIN}"
+        apt-get install -y -qq caddy || true
+    elif [[ -f "${CONF_DIR}/.caddy_installed_by_script" && -n "$cand" && "$cand" != "(none)" && "$cur_pkg" != "$cand" ]]; then
+        # 本脚本装的包 + 官方源有更新 -> 升级到最新
+        echo -e "${BLUE}正在升级 Caddy (${cur_ver} -> ${cand})...${PLAIN}"
+        apt-get install -y -qq --only-upgrade caddy >/dev/null 2>&1 || apt-get install -y -qq caddy >/dev/null 2>&1 || true
+        echo -e "${GREEN}Caddy 已升级至 $(caddy version 2>/dev/null | head -n1 | awk '{print $1}')${PLAIN}"
+    elif [[ -n "$cand" && "$cand" != "(none)" && "$cur_pkg" != "$cand" ]]; then
+        echo -e "${YELLOW}系统已有 Caddy ${cur_ver}，官方源可升级到 ${cand}。${PLAIN}"
+        echo -e "${CYAN}  为免影响你已有的站点，脚本不自动升级；如需升级请执行: apt-get install --only-upgrade -y caddy${PLAIN}"
+    fi
+
+    # 装了却仍不是官方源的最新版 -> 说明官方源没生效，必须明说，不能假装成功
+    if [[ "$repo_ok" == "true" && -n "$cand" && "$cand" != "(none)" ]]; then
+        local final_pkg
+        final_pkg=$(dpkg-query -W -f='${Version}' caddy 2>/dev/null || echo "")
+        if [[ -n "$final_pkg" && "$final_pkg" != "$cand" ]]; then
+            echo -e "${YELLOW}注意: 当前 Caddy ${final_pkg} 并非官方源最新版 ${cand}，可能是发行版仓库的旧包。${PLAIN}"
+        fi
+    fi
+
     systemctl enable caddy >/dev/null 2>&1 || true
 }
 

@@ -248,12 +248,15 @@ check_port_conflict() {
 }
 
 # 校验端口跳跃范围是否与已分配的端口冲突
-# $1=范围(起始:结束) $2=跳过比较的端口（通常是 Hy2 主端口自身）
+# $1=范围(起始:结束)
+# 注意：Hy2 主端口落在跳跃范围内必须拒绝。iptables 会对整段 UDP 做 DNAT，
+# 主端口若在段内会和跳跃端口抢同一批包，客户端握手随机失败。
+# 不要为「主端口是本次新选的值」而加 skip 参数放行 —— 那正是该拦的情况。
 check_range_conflict() {
-    local r="${1:-}" skip="${2:-}"
+    local r="${1:-}"
     local r_start="${r%%:*}" r_end="${r##*:}"
-    local p label
-    for p in "$VL_PORT:VLESS-Reality" "$SUB_PORT:Caddy 订阅"; do
+    local p
+    for p in "${VL_PORT:-}:VLESS-Reality" "${SUB_PORT:-}:Caddy 订阅" "${HY_PORT:-}:Hysteria 2 主端口"; do
         local val="${p%%:*}" name="${p#*:}"
         [[ -z "$val" ]] && continue
         if (( val >= r_start && val <= r_end )); then
@@ -261,11 +264,6 @@ check_range_conflict() {
             return 1
         fi
     done
-    if [[ -n "${HY_PORT:-}" && "$HY_PORT" != "$skip" ]] \
-        && (( HY_PORT >= r_start && HY_PORT <= r_end )); then
-        echo -e "${RED}范围冲突: 跳跃范围包含 Hysteria 2 主端口 (${HY_PORT})，请调整！${PLAIN}"
-        return 1
-    fi
     return 0
 }
 
@@ -1402,7 +1400,7 @@ install_node() {
         if ! validate_range "$hy_range"; then
             echo -e "${RED}范围格式非法，应为 起始:结束（如 20000:40000）。${PLAIN}"; continue
         fi
-        check_range_conflict "$hy_range" "$hy_port" && break
+        check_range_conflict "$hy_range" && break
     done
     HY_RANGE="$hy_range"
 
@@ -1939,10 +1937,13 @@ ${GREEN}=================== Hysteria 2 模块配置 ===================${PLAIN}"
                     if ! validate_range "$hy_range"; then
                         echo -e "${RED}范围格式非法，应为 起始:结束（如 20000:40000）。${PLAIN}"; continue
                     fi
-                    # 用本轮新选的 hy_port 参与比较，避免旧 HY_PORT 造成误判
+                    # HY_PORT 全局仍是旧值，临时换成本轮新选的 hy_port 参与比较，
+                    # 否则改端口后仍按旧端口判断范围冲突
                     local saved_hy="${HY_PORT:-}"
                     HY_PORT="$hy_port"
-                    check_range_conflict "$hy_range" "$hy_port" && { HY_PORT="$saved_hy"; break; }
+                    if check_range_conflict "$hy_range"; then
+                        HY_PORT="$saved_hy"; break
+                    fi
                     HY_PORT="$saved_hy"
                 done
 

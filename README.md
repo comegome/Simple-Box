@@ -14,7 +14,7 @@
 | :--- | :--- | :--- |
 | **网络协议栈** | **仅 IPv4** | sing-box 与 Caddy 均绑定 `0.0.0.0`，**不支持 IPv6**。 |
 | **TLS 证书来源** | **仅 Cloudflare DNS API** 或 **IP 自签证书** | 域名证书仅走 Cloudflare DNS-01 API（不占 80 端口）；无域名直接回车生成 10 年 IP ECC 证书。 |
-| **系统架构与内存** | **x86_64 / aarch64**，内存 $\ge$ 256MB | 支持 Ubuntu 20.04+、Debian 11+、CentOS/Rocky 8+、Alpine 3.16+。 |
+| **操作系统与架构** | **Ubuntu 24.04+**、**Debian 12+**<br>x86_64 (amd64) / aarch64 (arm64)，内存 $\ge$ 256MB | 仅支持上述版本（系统官方仓库内置 Caddy 2.6.2+，无需第三方源）；旧版本系统或 CentOS/Alpine 等不支持。 |
 
 ---
 
@@ -25,13 +25,13 @@
 ### 官方直链
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/simple-box.sh -o /tmp/simple-box.sh && sudo bash /tmp/simple-box.sh
+curl -fsSL https://raw.githubusercontent.com/comegome/Simple-Box/main/simple-box.sh -o /tmp/simple-box.sh && sudo bash /tmp/simple-box.sh
 ```
 
 ### CDN 加速
 
 ```bash
-curl -fsSL https://cdn.jsdelivr.net/gh/comegome/simple-box@main/simple-box.sh -o /tmp/simple-box.sh && sudo bash /tmp/simple-box.sh
+curl -fsSL https://cdn.jsdelivr.net/gh/comegome/Simple-Box@main/simple-box.sh -o /tmp/simple-box.sh && sudo bash /tmp/simple-box.sh
 ```
 
 ---
@@ -60,7 +60,10 @@ simbo
   * **智能协议切换**：域名模式开启 HTTPS 绿锁；IP 模式自动降级为 HTTP 分发，彻底解决 ClashX.Meta 等客户端因阻断自签证书无法导入的问题；
   * **订阅防死锁**：客户端配置顶层注入精准直连规则，节点失效也能正常刷新拉取订阅；
   * **Web 隔离与零冲突**：Caddy 订阅仅监听专用端口（默认 8444），不占用 80 端口，与既有 Nginx 互不抢占。
-* **极简管理与彻底卸载**：TCP BBR 加速独立管控；卸载时彻底移除 sing-box、订阅服务与网络规则，无隐藏残留。
+* **极简管理与安全卸载**：
+  * **TCP BBR 加速**：集成独立算法管控，一键开启或还原默认；
+  * **用户站点安全保护**：卸载时自动扫描 `/etc/caddy/sites`，若发现用户自建的其它站点，强制保留 Caddy 软件包、主配置及引入行，仅移除本脚本订阅，绝不破坏用户后装的服务；
+  * **纯净环境彻底卸载**：若未承载其它站点，则连同 Caddy 完整清理并解除 mask，无隐藏孤儿进程与残留。
 
 ---
 
@@ -110,7 +113,7 @@ simbo
  证书管理: 运行中 (Caddy v2.6.2)
  代理服务: 运行中 (sing-box v1.14.3)
  VLESS-Reality | TCP:443 | ServerName: gateway.icloud.com
- Hysteria 2 | UDP:8443 | SNI: node.example.com | Ports: 20000:40000
+ Hysteria 2 | UDP:8443 | SNI: 203.0.113.10 | Ports: 20000:40000
 ----------------------------------------------------
  Clash 订阅配置: http://203.0.113.10:8444/2dac50852729bf55bb61833d/config.yaml
  Clash 节点列表: http://203.0.113.10:8444/2dac50852729bf55bb61833d/provider.yaml
@@ -164,7 +167,12 @@ simbo
 不能。域名证书仅支持 Cloudflare DNS-01 API。若域名在其他提供商，建议直接回车使用 IP 自签模式，或者将域名 NS 托管至 Cloudflare。
 
 #### Q5：域名证书申请失败会怎样？
-脚本会自动降级为 10 年期 IP 自签证书兜底完成安装，保证节点立即可用；后续检查 CF Token 权限后，在 `simbo` 选项 2 中随时可重新配置升级为域名证书。
+脚本会自动降级为 10 年期 IP 自签证书兜底完成安装，保证节点立即可用；后续检查 CF Token 权限后，在 `simbo` 选项 3（配置 Hysteria 2 模块）中随时可重新配置升级为域名证书。
+
+#### Q6：如果我后来用这台机器上的 Caddy 部署了自己的网站，卸载 Simple-Box 会受影响吗？
+**完全不会。** Simple-Box 卸载时会自动扫描 `/etc/caddy/sites` 目录：
+- 若检测到用户自建的其它站点配置，脚本会自动放弃卸载 Caddy 软件包和主 Caddyfile，保留 `import sites/*.caddy` 引入，仅安全移除本脚本的订阅地址并重载 Caddy；你的个人网站与证书全程保持正常运行。
+- 仅当 Caddy 是由本脚本全新安装且无任何外部站点时，才会彻底卸载软件包并清除残留。
 </details>
 
 <details>

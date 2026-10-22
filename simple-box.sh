@@ -25,7 +25,7 @@ YAML_PROVIDER="${CONF_DIR}/clash_meta_provider.yaml"
 LINKS_FILE="${CONF_DIR}/links.txt"
 TEMPLATE_FILE="${CONF_DIR}/template.yaml"
 
-SCRIPT_URL="https://raw.githubusercontent.com/comegome/simple-box/main/simple-box.sh"
+SCRIPT_URL="https://raw.githubusercontent.com/comegome/Simple-Box/main/simple-box.sh"
 
 # 管道执行（curl ... | bash）不受支持，且必须在此处就拦下：
 # bash 从 stdin 读取脚本正文，脚本里的 read 会与 bash 抢同一条流，
@@ -762,7 +762,7 @@ generate_full_client_config() {
         if [[ -n "$script_dir" && -f "${script_dir}/template.yaml" ]]; then
             cp -f "${script_dir}/template.yaml" "$TEMPLATE_FILE" 2>/dev/null || true
         else
-            curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/template.yaml -o "$TEMPLATE_FILE" 2>/dev/null || true
+            curl -fsSL https://raw.githubusercontent.com/comegome/Simple-Box/main/template.yaml -o "$TEMPLATE_FILE" 2>/dev/null || true
         fi
     fi
 
@@ -899,7 +899,7 @@ install_simbo_command() {
 
     # 管道执行（$0 为 /dev/fd/xx）或复制失败时，从仓库拉取一份落地
     if [[ ! -s "$target" ]]; then
-        curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/simple-box.sh -o "$target" 2>/dev/null || true
+        curl -fsSL https://raw.githubusercontent.com/comegome/Simple-Box/main/simple-box.sh -o "$target" 2>/dev/null || true
         chmod 755 "$target" 2>/dev/null || true
     fi
 

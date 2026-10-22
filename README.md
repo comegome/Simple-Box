@@ -22,27 +22,17 @@
 
 在任意满足要求的 VPS 上以 `root` 权限运行：
 
-### 官方直链（海外 VPS 推荐）
+### 官方直链
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/simple-box.sh -o /tmp/simple-box.sh && sudo bash /tmp/simple-box.sh
 ```
 
-### CDN 加速直链（国内机器 / 抗 DNS 污染）
+### CDN 加速
 
 ```bash
 curl -fsSL https://cdn.jsdelivr.net/gh/comegome/simple-box@main/simple-box.sh -o /tmp/simple-box.sh && sudo bash /tmp/simple-box.sh
 ```
-
-> 💡 **为什么必须“先下载成文件再运行”？**
-> `sudo bash <(...)` 会因 `sudo` 默认关闭子进程文件描述符而报错 `/dev/fd/63: No such file or directory`；
-> `curl ... | sudo bash` 管道执行时，交互输入会与脚本正文争抢 stdin 导致提问错乱。
-> 唯有“先下载再运行”兼顾交互稳定与可审计性。
->
-> 🤖 **无人值守模式（全默认值、无交互直接安装）：**
-> ```bash
-> curl -fsSL https://raw.githubusercontent.com/comegome/simple-box/main/simple-box.sh -o /tmp/simple-box.sh && sudo bash /tmp/simple-box.sh install
-> ```
 
 ---
 

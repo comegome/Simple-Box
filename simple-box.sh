@@ -181,20 +181,11 @@ check_port_occupied() {
     local port="${1:-}"
     local proto="${2:-}"
     local in_use=""
-    local lister="ss"
-    command -v ss &>/dev/null || lister="netstat"
+    # 支持范围内（Ubuntu 24.04+/Debian 12+）的 iproute2 都带 ss，无需 netstat 回退
     if [[ "$proto" == "tcp" ]]; then
-        if [[ "$lister" == "ss" ]]; then
-            in_use=$(ss -tlnp 2>/dev/null | grep -E "[: ]${port} " || true)
-        else
-            in_use=$(netstat -tlnp 2>/dev/null | grep -E "[: ]${port} " || true)
-        fi
+        in_use=$(ss -tlnp 2>/dev/null | grep -E "[: ]${port} " || true)
     elif [[ "$proto" == "udp" ]]; then
-        if [[ "$lister" == "ss" ]]; then
-            in_use=$(ss -ulnp 2>/dev/null | grep -E "[: ]${port} " || true)
-        else
-            in_use=$(netstat -ulnp 2>/dev/null | grep -E "[: ]${port} " || true)
-        fi
+        in_use=$(ss -ulnp 2>/dev/null | grep -E "[: ]${port} " || true)
     fi
     if [[ -n "$in_use" ]]; then
         if echo "$in_use" | grep -q "sing-box"; then
@@ -213,22 +204,23 @@ check_port_occupied() {
 }
 
 # 基础依赖检查与安装
+# 支持范围内的系统必然是 apt + systemd，直接 apt 安装，无需分支。
 install_deps() {
     local missing=()
-    # 仅保留真正被调用的依赖：jq / socat 全程未使用，已移除
     for cmd in curl tar openssl iptables qrencode; do
-        if ! command -v "$cmd" &>/dev/null; then
-            missing+=("$cmd")
-        fi
+        command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
+    # netfilter-persistent 由 iptables-persistent 提供，是端口跳跃规则持久化的前提。
+    # 必须单独判定：iptables 在而持久化包缺失时，只看 missing 会漏装。
+    command -v netfilter-persistent &>/dev/null || missing+=(iptables-persistent)
+
     if [ ${#missing[@]} -gt 0 ]; then
-        echo -e "${BLUE}缺失依赖: ${missing[*]}${PLAIN}"
         echo -e "${BLUE}安装必要基础组件: ${missing[*]}...${PLAIN}"
         export DEBIAN_FRONTEND=noninteractive
         echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections 2>/dev/null || true
         echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections 2>/dev/null || true
         apt-get update -qq || echo -e "${YELLOW}apt-get update 失败，尝试直接安装。${PLAIN}"
-        apt-get install -y -qq "${missing[@]}" iptables-persistent \
+        apt-get install -y -qq "${missing[@]}" \
             || echo -e "${YELLOW}部分依赖安装失败，将尝试继续（缺少 qrencode 仅影响二维码显示）。${PLAIN}"
     fi
 
@@ -238,10 +230,11 @@ install_deps() {
         command -v "$cmd" &>/dev/null || critical_missing+=("$cmd")
     done
     if [ ${#critical_missing[@]} -gt 0 ]; then
-        echo -e "${RED}关键依赖仍缺失: ${critical_missing[*]}${PLAIN}"
-        echo -e "${YELLOW}请手动安装后重试（缺少 iptables 将导致端口跳跃失效）。${PLAIN}"
+        echo -e "${RED}关键依赖缺失: ${critical_missing[*]}${PLAIN}"
+        echo -e "${YELLOW}请手动安装后重试，例如: apt-get install -y ${critical_missing[*]}${PLAIN}"
         return 1
     fi
+    return 0
 }
 
 # 检查并自动安装 Caddy
@@ -2066,12 +2059,9 @@ menu() {
         echo -e "${GREEN}            Simple-Box Manager - 控制台             ${PLAIN}"
         echo -e "${GREEN}====================================================${PLAIN}"
         
-        # 1. 宿主机基本信息提取
-        local os_name="Linux"
-        if [ -f /etc/os-release ]; then
-            os_name=$(grep -oP 'PRETTY_NAME="\K[^"]+' /etc/os-release || grep -oP 'PRETTY_NAME=\K.+' /etc/os-release | tr -d '"')
-        fi
-        local arch cur_ip bbr_status
+        # 1. 宿主机基本信息提取（OS 已在入口解析并缓存，此处不再读文件）
+        local os_name arch cur_ip bbr_status
+        os_name="${OS_NAME:-Linux}"
         arch=$(get_arch 2>/dev/null || echo "unknown")
         # 优先读已持久化的 SERVER_IP，避免每次刷新面板都外呼 curl（菜单响应从 3s 降到瞬时）
         if [[ -f "$ENV_FILE" ]]; then
@@ -2196,7 +2186,8 @@ menu() {
 _ENTRY_SRC="${BASH_SOURCE[0]:-}"
 if [[ -z "$_ENTRY_SRC" || "$_ENTRY_SRC" == "$0" ]]; then
     # 系统不在支持范围内就直接退出，别让用户走到一半才失败
-    require_os >/dev/null || exit 1
+    OS_NAME=$(require_os) || exit 1
+    export OS_NAME
     case "${1:-}" in
         install|reinstall) install_node || exit 1 ;;
         "")

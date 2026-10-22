@@ -117,7 +117,7 @@ simbo
  公网地址: 203.0.113.10
  TLS 证书: 自签 IP 证书
  TCP 加速: BBR
- 证书服务: 运行中 (Caddy v2.11.7)
+ 证书管理: 运行中 (Caddy v2.6.2)
  代理服务: 运行中 (sing-box v1.14.3)
  VLESS-Reality | TCP:443 | servername: gateway.icloud.com
  Hysteria 2 | UDP:8443 | sni: node.example.com | ports: 20000:40000

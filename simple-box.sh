@@ -4,7 +4,7 @@
 # 协议支持: 
 #   1. VLESS-TCP-Reality-Vision (日常主力直连)
 #   2. Hysteria 2 (晚高峰弱网/UDP端口跳跃, 支持 Cloudflare 证书或自签证书)
-# 订阅分发:
+# 证书管理:
 #   集成 Caddy HTTPS 安全分发，输出完整规则模板订阅、纯节点订阅、URI 与二维码
 # ==============================================================================
 set -e
@@ -101,7 +101,7 @@ require_os() {
     if [[ -z "$ver" ]] || ! ver_ge "$ver" "$min"; then
         echo -e "${RED}系统版本过低: ${name:-$id $ver}${PLAIN}"
         echo -e "${YELLOW}本脚本要求 ${id} ${min} 及以上（当前 ${ver:-未知}）。${PLAIN}"
-        echo -e "${CYAN}  原因: 更早的版本仓库不含 caddy，无法直接安装订阅分发服务。${PLAIN}"
+        echo -e "${CYAN}  原因: 更早的版本仓库不含 caddy，无法直接安装证书管理服务。${PLAIN}"
         return 1
     fi
     echo "$name"
@@ -237,7 +237,7 @@ install_deps() {
     return 0
 }
 
-# 检查并自动安装 Caddy
+# 检查并自动安装 Caddy（证书管理）
 # 支持范围内（Ubuntu 24.04+ / Debian 12+）的发行版仓库自带 caddy，无需第三方源。
 # 已有 caddy 则原样使用：不升级、不重启，避免打断用户自己托管在它上面的站点。
 install_caddy() {
@@ -246,7 +246,7 @@ install_caddy() {
         return 0
     fi
 
-    echo -e "${BLUE}正在安装 Caddy 用于订阅分发...${PLAIN}"
+    echo -e "${BLUE}正在安装 Caddy 用于证书管理...${PLAIN}"
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq >/dev/null 2>&1 || true
     if ! apt-get install -y -qq caddy; then
@@ -410,7 +410,7 @@ update_singbox_core() {
     fi
 }
 
-# 证书管理（支持 CF API 证书与无域名自签证书）
+# 证书签发（支持 CF API 证书与无域名自签证书）
 # 结果通过全局 CERT_MODE 回传: domain | selfsigned
 CERT_MODE=""
 issue_cert_bundle() {
@@ -645,7 +645,7 @@ verify_caddy_listening() {
     return 1
 }
 
-# 部署 Caddy 订阅分发服务
+# 部署 Caddy 证书管理服务
 setup_caddy_subscription() {
     local domain_or_ip="${1:-}"
     local token="${2:-}"
@@ -653,7 +653,7 @@ setup_caddy_subscription() {
     local cert_mode="${4:-selfsigned}"
 
     if ! install_caddy; then
-        echo -e "${RED}Caddy 不可用，无法部署订阅分发站点。${PLAIN}"
+        echo -e "${RED}Caddy 不可用，无法部署证书管理站点。${PLAIN}"
         return 1
     fi
 
@@ -672,9 +672,9 @@ setup_caddy_subscription() {
     rm -f /etc/caddy/sites/*-${sub_port}.caddy /etc/caddy/sites/simple-box*.caddy
 
     if [[ "$cert_mode" == "domain" ]]; then
-        echo -e "${BLUE}配置 Caddy HTTPS 安全订阅站点 (端口 ${sub_port}, 域名 CA 证书)...${PLAIN}"
+        echo -e "${BLUE}配置 Caddy HTTPS 证书管理站点 (端口 ${sub_port}, 域名 CA 证书)...${PLAIN}"
         cat > "/etc/caddy/sites/simple-box-sub.caddy" <<EOF
-# Simple-Box HTTPS 订阅分发站点 (域名 CA 证书)
+# Simple-Box HTTPS 证书管理站点 (域名 CA 证书)
 :${sub_port} {
     bind tcp4/0.0.0.0
     tls ${CERT_DIR}/fullchain.cer ${CERT_DIR}/private.key
@@ -692,9 +692,9 @@ setup_caddy_subscription() {
 }
 EOF
     else
-        echo -e "${BLUE}配置 Caddy HTTP 订阅分发站点 (端口 ${sub_port}, 客户端直接导入免证书报错)...${PLAIN}"
+        echo -e "${BLUE}配置 Caddy HTTP 证书管理站点 (端口 ${sub_port}, 客户端直接导入免证书报错)...${PLAIN}"
         cat > "/etc/caddy/sites/simple-box-sub.caddy" <<EOF
-# Simple-Box HTTP 订阅分发站点 (IP 自签兼容模式)
+# Simple-Box HTTP 证书管理站点 (IP 自签兼容模式)
 http://:${sub_port} {
     bind tcp4/0.0.0.0
     @sub path /${token}/config.yaml /${token}/provider.yaml /${token}/links.txt
@@ -2114,7 +2114,7 @@ menu() {
             sb_status="${RED}未安装${PLAIN}"
         fi
 
-        # 证书服务 = Caddy 进程在跑 + 本脚本的订阅站点配置确实存在。
+        # 证书管理 = Caddy 进程在跑 + 本脚本的订阅站点配置确实存在。
         # 只判服务不判站点，卸载或站点丢失后会谎报「运行中」。
         local caddy_ver=""
         local caddy_status="${RED}未安装${PLAIN}"
@@ -2145,7 +2145,7 @@ menu() {
         echo -e " 公网地址: ${CYAN}${cur_ip}${PLAIN}"
         echo -e " TLS 证书: ${CYAN}${cert_display}${PLAIN}"
         echo -e " TCP 加速: ${bbr_status}"
-        echo -e " 证书服务: ${caddy_status}"
+        echo -e " 证书管理: ${caddy_status}"
         echo -e " 代理服务: ${sb_status}"
         
         if [[ -f "$ENV_FILE" ]]; then

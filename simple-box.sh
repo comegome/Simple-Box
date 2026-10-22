@@ -176,6 +176,99 @@ verify_cloudflare_token() {
     fi
 }
 
+# 引导用户输入 Cloudflare API Token
+# 成功时设置全局 PROMPTED_CF_TOKEN 并返回 0；用户放弃或输入为空时返回 1（调用方回退 IP 自签）
+# 注意：不能用 $(prompt_cf_token) 取返回值，函数内的指引文字会一起被捕获，
+# 所以结果走全局变量。不能叫 CF_TOKEN —— 那是支持无人值守部署的预置环境变量名。
+prompt_cf_token() {
+    PROMPTED_CF_TOKEN=""
+    echo -e "\n${CYAN}------------------- Cloudflare API Token 获取指引 -------------------${PLAIN}"
+    echo -e "${CYAN} 1. 登录 CF -> 右上角头像 -> [配置文件] -> 左侧导航 [API 令牌]${PLAIN}"
+    echo -e "${CYAN} 2. 点击 [创建令牌] -> 找到 [编辑区域 DNS (Edit zone DNS)] 点击 [使用模板]${PLAIN}"
+    echo -e "${CYAN} 3. 区域资源选择: [包括] -> [特定区域] -> 选择你的域名${PLAIN}"
+    echo -e "${CYAN} 4. 底部点击 [继续以显示摘要] -> 最终确认页点击 [创建令牌] 并复制生成的令牌${PLAIN}"
+    echo -e "${CYAN}---------------------------------------------------------------------${PLAIN}"
+    local token=""
+    while true; do
+        read -r -p "请输入 Cloudflare API Token: " token || token=""
+        token=$(trim_string "$token")
+        if [[ -z "$token" ]]; then
+            echo -e "${YELLOW}未输入 Token，将自动使用 IP 自签证书。${PLAIN}"
+            return 1
+        fi
+        if verify_cloudflare_token "$token"; then
+            PROMPTED_CF_TOKEN="$token"
+            return 0
+        fi
+        local retry=""
+        read -r -p "是否重新输入 Token？[Y/n (回车重试，输入 n 使用 IP 自签)]: " retry || retry=""
+        if [[ "${retry,,}" == "n" ]]; then
+            echo -e "${YELLOW}已放弃域名证书，将自动使用 IP 自签证书。${PLAIN}"
+            return 1
+        fi
+    done
+}
+
+# 校验一个 TCP/UDP 端口是否与已分配的其它服务冲突
+# $1=待校验端口 $2=tcp|udp $3=当前正在配置的服务名（跳过与自身的比较）
+# 冲突时打印原因并返回 1
+check_port_conflict() {
+    local port="${1:-}" proto="${2:-tcp}" self="${3:-}" range="${4:-}"
+    local label
+    [[ "$proto" == "udp" ]] && label="UDP" || label="TCP"
+
+    if [[ -n "${VL_PORT:-}" && "$self" != "vless" && "$port" == "$VL_PORT" ]]; then
+        echo -e "${RED}端口冲突: 该端口已分配给 VLESS-Reality (${VL_PORT})，不能共用！${PLAIN}"
+        return 1
+    fi
+    if [[ -n "${HY_PORT:-}" && "$self" != "hy2" && "$port" == "$HY_PORT" ]]; then
+        echo -e "${RED}端口冲突: 该端口已分配给 Hysteria 2 (${HY_PORT})，不能共用！${PLAIN}"
+        return 1
+    fi
+    if [[ -n "${SUB_PORT:-}" && "$self" != "sub" && "$port" == "$SUB_PORT" ]]; then
+        echo -e "${RED}端口冲突: 该端口已分配给 Caddy 订阅 (${SUB_PORT})，不能共用！${PLAIN}"
+        return 1
+    fi
+
+    # 端口落在 Hysteria 2 跳跃范围内也不行（UDP 段会被 iptables 整段转发）
+    local r="${range:-${HY_RANGE:-}}"
+    if [[ -n "$r" && "$r" == *:* ]]; then
+        local r_start="${r%%:*}" r_end="${r##*:}"
+        if (( port >= r_start && port <= r_end )); then
+            echo -e "${RED}范围冲突: 端口 ${port} 落在 Hysteria 2 跳跃范围 (${r}) 内，请调整！${PLAIN}"
+            return 1
+        fi
+    fi
+
+    if check_port_occupied "$port" "$proto"; then
+        return 0
+    fi
+    echo -e "${YELLOW}请更换其他未占用的 ${label} 端口！${PLAIN}"
+    return 1
+}
+
+# 校验端口跳跃范围是否与已分配的端口冲突
+# $1=范围(起始:结束) $2=跳过比较的端口（通常是 Hy2 主端口自身）
+check_range_conflict() {
+    local r="${1:-}" skip="${2:-}"
+    local r_start="${r%%:*}" r_end="${r##*:}"
+    local p label
+    for p in "$VL_PORT:VLESS-Reality" "$SUB_PORT:Caddy 订阅"; do
+        local val="${p%%:*}" name="${p#*:}"
+        [[ -z "$val" ]] && continue
+        if (( val >= r_start && val <= r_end )); then
+            echo -e "${RED}范围冲突: 跳跃范围包含 ${name} 端口 (${val})，请调整！${PLAIN}"
+            return 1
+        fi
+    done
+    if [[ -n "${HY_PORT:-}" && "$HY_PORT" != "$skip" ]] \
+        && (( HY_PORT >= r_start && HY_PORT <= r_end )); then
+        echo -e "${RED}范围冲突: 跳跃范围包含 Hysteria 2 主端口 (${HY_PORT})，请调整！${PLAIN}"
+        return 1
+    fi
+    return 0
+}
+
 # 端口冲突检测
 check_port_occupied() {
     local port="${1:-}"
@@ -1062,6 +1155,19 @@ EOF
 
 # 集中写入持久化环境变量
 write_env_config() {
+    # 关键字段必须非空：这些值由调用方在函数内用 local 搬运，漏搬一行就会静默
+    # 写入空串（曾导致 NODE_PREFIX="" 让节点名变成 "-VLESS-Reality"）。
+    # 这里显式拦住，宁可报错也不写坏配置。
+    local missing="" v
+    for v in node_prefix server_ip vl_port vl_sni user_uuid vl_privkey vl_pubkey \
+             vl_shortid hy_port hy_password sub_port sub_token; do
+        [[ -z "${!v:-}" ]] && missing="${missing} ${v}"
+    done
+    if [[ -n "$missing" ]]; then
+        echo -e "${RED}内部错误: 环境变量缺失 (${missing# })，已中止写入 ${ENV_FILE}。${PLAIN}" >&2
+        return 1
+    fi
+
     cat > "$ENV_FILE" <<EOF
 NODE_PREFIX="${node_prefix}"
 SERVER_IP="${server_ip}"
@@ -1185,9 +1291,10 @@ install_node() {
         if ! validate_port "$vl_port"; then
             echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
         fi
-        if check_port_occupied "$vl_port" "tcp"; then break; fi
-        echo -e "${YELLOW}请更换其他未占用的端口！${PLAIN}"
+        check_port_conflict "$vl_port" "tcp" "vless" && break
     done
+    # 写入全局，供后续 hy_port / sub_port 的冲突校验比较（新建时 env.conf 里还没有值）
+    VL_PORT="$vl_port"
 
     local vl_sni
     while true; do
@@ -1264,38 +1371,15 @@ install_node() {
         fi
 
         if [[ -z "$cf_token" && "$reuse_local_cert" != "true" ]]; then
-            echo -e "\n${CYAN}------------------- Cloudflare API Token 获取指引 -------------------${PLAIN}"
-echo -e "${CYAN} 1. 登录 CF -> 右上角头像 -> [配置文件] -> 左侧导航 [API 令牌]${PLAIN}"
-echo -e "${CYAN} 2. 点击 [创建令牌] -> 找到 [编辑区域 DNS (Edit zone DNS)] 点击 [使用模板]${PLAIN}"
-echo -e "${CYAN} 3. 区域资源选择: [包括] -> [特定区域] -> 选择你的域名${PLAIN}"
-echo -e "${CYAN} 4. 底部点击 [继续以显示摘要] -> 最终确认页点击 [创建令牌] 并复制生成的令牌${PLAIN}"
-echo -e "${CYAN}---------------------------------------------------------------------${PLAIN}"
-            while true; do
-                read -r -p "请输入 Cloudflare API Token: " cf_token || cf_token=""
-                cf_token=$(trim_string "$cf_token")
-                if [[ -z "$cf_token" ]]; then
-                    echo -e "${YELLOW}未输入 Token，将自动使用 IP 自签证书。${PLAIN}"
-                    target_host="$server_ip"
-                    hy_skip_cert="true"
-                    hy_domain=""
-                    cert_fell_back="true"
-                    break
-                fi
-                if verify_cloudflare_token "$cf_token"; then
-                    break
-                fi
-                local retry=""
-                read -r -p "是否重新输入 Token？[Y/n (回车重试，输入 n 使用 IP 自签)]: " retry || retry=""
-                if [[ "${retry,,}" == "n" ]]; then
-                    echo -e "${YELLOW}已放弃域名证书，将自动使用 IP 自签证书。${PLAIN}"
-                    target_host="$server_ip"
-                    hy_skip_cert="true"
-                    hy_domain=""
-                    cf_token=""
-                    cert_fell_back="true"
-                    break
-                fi
-            done
+            if prompt_cf_token; then
+                cf_token="$PROMPTED_CF_TOKEN"
+            else
+                cf_token=""
+                target_host="$server_ip"
+                hy_skip_cert="true"
+                hy_domain=""
+                cert_fell_back="true"
+            fi
         fi
     fi
 
@@ -1307,12 +1391,9 @@ echo -e "${CYAN}----------------------------------------------------------------
         if ! validate_port "$hy_port"; then
             echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
         fi
-        if [[ "$hy_port" == "$vl_port" ]]; then
-            echo -e "${RED}端口冲突: 该端口已分配给 VLESS-Reality (${vl_port})，不能共用！${PLAIN}"; continue
-        fi
-        if check_port_occupied "$hy_port" "udp"; then break; fi
-        echo -e "${YELLOW}请更换其他未占用的 UDP 端口！${PLAIN}"
+        check_port_conflict "$hy_port" "udp" "hy2" "" && break
     done
+    HY_PORT="$hy_port"
 
     while true; do
         read -r -p "请输入端口跳跃范围 [默认 ${old_hy_range:-20000:40000}] (none=不启用): " hy_range || hy_range=""
@@ -1321,16 +1402,9 @@ echo -e "${CYAN}----------------------------------------------------------------
         if ! validate_range "$hy_range"; then
             echo -e "${RED}范围格式非法，应为 起始:结束（如 20000:40000）。${PLAIN}"; continue
         fi
-        local r_start="${hy_range%%:*}"
-        local r_end="${hy_range##*:}"
-        if (( vl_port >= r_start && vl_port <= r_end )); then
-            echo -e "${RED}范围冲突: 端口跳跃范围包含已设定的 Reality 端口 (${vl_port})，请调整！${PLAIN}"; continue
-        fi
-        if (( hy_port >= r_start && hy_port <= r_end )); then
-            echo -e "${RED}范围冲突: 端口跳跃范围包含 Hysteria 2 主端口 (${hy_port})，请调整！${PLAIN}"; continue
-        fi
-        break
+        check_range_conflict "$hy_range" "$hy_port" && break
     done
+    HY_RANGE="$hy_range"
 
     echo -e "\n${YELLOW}=== 3. 配置在线订阅地址参数 ===${PLAIN}"
     local sub_port
@@ -1340,21 +1414,7 @@ echo -e "${CYAN}----------------------------------------------------------------
         if ! validate_port "$sub_port"; then
             echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
         fi
-        if [[ "$sub_port" == "$vl_port" ]]; then
-            echo -e "${RED}端口冲突: 该端口已分配给 VLESS-Reality (${vl_port})，不能共用！${PLAIN}"; continue
-        fi
-        if [[ -n "$hy_port" && "$sub_port" == "$hy_port" ]]; then
-            echo -e "${RED}端口冲突: 该端口已分配给 Hysteria 2 主端口 (${hy_port})，不能共用！${PLAIN}"; continue
-        fi
-        if [[ -n "$hy_range" ]]; then
-            local r_start="${hy_range%%:*}"
-            local r_end="${hy_range##*:}"
-            if (( sub_port >= r_start && sub_port <= r_end )); then
-                echo -e "${RED}范围冲突: 订阅端口 (${sub_port}) 落在 Hysteria 2 跳跃范围 (${hy_range}) 内，请更换！${PLAIN}"; continue
-            fi
-        fi
-        if check_port_occupied "$sub_port" "tcp"; then break; fi
-        echo -e "${YELLOW}请更换其他未占用的 TCP 端口！${PLAIN}"
+        check_port_conflict "$sub_port" "tcp" "sub" && break
     done
 
     local node_prefix
@@ -1723,20 +1783,9 @@ ${GREEN}================= VLESS-Reality 模块配置 =================${PLAIN}"
                     if ! validate_port "$vl_port"; then
                         echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
                     fi
-                    if [[ -n "${HY_PORT:-}" && "$vl_port" == "$HY_PORT" ]]; then
-                        echo -e "${RED}端口冲突: 该端口已分配给 Hysteria 2 (${HY_PORT})，不能共用！${PLAIN}"; continue
-                    fi
-                    if [[ -n "${SUB_PORT:-}" && "$vl_port" == "$SUB_PORT" ]]; then
-                        echo -e "${RED}端口冲突: 该端口已分配给 Caddy 订阅 (${SUB_PORT})，不能共用！${PLAIN}"; continue
-                    fi
-                    if [[ -n "${HY_RANGE:-}" ]]; then
-                        local r_start="${HY_RANGE%%:*}" r_end="${HY_RANGE##*:}"
-                        if (( vl_port >= r_start && vl_port <= r_end )); then
-                            echo -e "${RED}范围冲突: 端口落在 Hysteria 2 跳跃范围 (${HY_RANGE}) 内，请调整！${PLAIN}"; continue
-                        fi
-                    fi
-                    if [[ "$vl_port" == "$VL_PORT" ]] || check_port_occupied "$vl_port" "tcp"; then break; fi
-                    echo -e "${YELLOW}请更换其他未占用的 TCP 端口！${PLAIN}"
+                    # 端口未变 = 沿用当前配置，无需重新检测占用
+                    [[ "$vl_port" == "$VL_PORT" ]] && break
+                    check_port_conflict "$vl_port" "tcp" "vless" && break
                 done
 
                 local vl_sni
@@ -1856,32 +1905,12 @@ ${GREEN}=================== Hysteria 2 模块配置 ===================${PLAIN}"
                         echo -e "${GREEN}检测到本地已有 ${hy_domain} 的有效证书，已自动复用（免输 CF Token）。${PLAIN}"
                     fi
                     if [[ "$reuse_menu_cert" != "true" ]]; then
-                        echo -e "\n${CYAN}------------------- Cloudflare API Token 获取指引 -------------------${PLAIN}"
-echo -e "${CYAN} 1. 登录 CF -> 右上角头像 -> [配置文件] -> 左侧导航 [API 令牌]${PLAIN}"
-echo -e "${CYAN} 2. 点击 [创建令牌] -> 找到 [编辑区域 DNS (Edit zone DNS)] 点击 [使用模板]${PLAIN}"
-echo -e "${CYAN} 3. 区域资源选择: [包括] -> [特定区域] -> 选择你的域名${PLAIN}"
-echo -e "${CYAN} 4. 底部点击 [继续以显示摘要] -> 最终确认页点击 [创建令牌] 并复制生成的令牌${PLAIN}"
-echo -e "${CYAN}---------------------------------------------------------------------${PLAIN}"
-                        while true; do
-                            read -r -p "请输入 Cloudflare API Token: " cf_token || cf_token=""
-                            cf_token=$(trim_string "$cf_token")
-                            if [[ -z "$cf_token" ]]; then
-                                echo -e "${YELLOW}未输入 Token，将自动使用 IP 自签证书。${PLAIN}"
-                                hy_domain=""
-                                break
-                            fi
-                            if verify_cloudflare_token "$cf_token"; then
-                                break
-                            fi
-                            local retry=""
-                            read -r -p "是否重新输入 Token？[Y/n (回车重试，输入 n 使用 IP 自签)]: " retry || retry=""
-                            if [[ "${retry,,}" == "n" ]]; then
-                                echo -e "${YELLOW}已放弃域名证书，将自动使用 IP 自签证书。${PLAIN}"
-                                hy_domain=""
-                                cf_token=""
-                                break
-                            fi
-                        done
+                        if prompt_cf_token; then
+                            cf_token="$PROMPTED_CF_TOKEN"
+                        else
+                            hy_domain=""
+                            cf_token=""
+                        fi
                     fi
                 fi
 
@@ -1892,14 +1921,8 @@ echo -e "${CYAN}----------------------------------------------------------------
                     if ! validate_port "$hy_port"; then
                         echo -e "${RED}端口非法，请重新输入。${PLAIN}"; continue
                     fi
-                    if [[ "$hy_port" == "$VL_PORT" ]]; then
-                        echo -e "${RED}端口冲突: 该端口已分配给 VLESS-Reality (${VL_PORT})，不能共用！${PLAIN}"; continue
-                    fi
-                    if [[ "$hy_port" == "$SUB_PORT" ]]; then
-                        echo -e "${RED}端口冲突: 该端口已分配给 Caddy 订阅 (${SUB_PORT})，不能共用！${PLAIN}"; continue
-                    fi
-                    if [[ "$hy_port" == "$HY_PORT" ]] || check_port_occupied "$hy_port" "udp"; then break; fi
-                    echo -e "${YELLOW}请更换其他未占用的 UDP 端口！${PLAIN}"
+                    [[ "$hy_port" == "$HY_PORT" ]] && break
+                    check_port_conflict "$hy_port" "udp" "hy2" "" && break
                 done
 
                 local hy_range
@@ -1910,17 +1933,11 @@ echo -e "${CYAN}----------------------------------------------------------------
                     if ! validate_range "$hy_range"; then
                         echo -e "${RED}范围格式非法，应为 起始:结束（如 20000:40000）。${PLAIN}"; continue
                     fi
-                    local r_start="${hy_range%%:*}" r_end="${hy_range##*:}"
-                    if (( VL_PORT >= r_start && VL_PORT <= r_end )); then
-                        echo -e "${RED}范围冲突: 跳跃范围包含 Reality 端口 (${VL_PORT})，请调整！${PLAIN}"; continue
-                    fi
-                    if (( hy_port >= r_start && hy_port <= r_end )); then
-                        echo -e "${RED}范围冲突: 跳跃范围包含 Hy2 主端口 (${hy_port})，请调整！${PLAIN}"; continue
-                    fi
-                    if [[ -n "$SUB_PORT" ]] && (( SUB_PORT >= r_start && SUB_PORT <= r_end )); then
-                        echo -e "${RED}范围冲突: 跳跃范围包含 Caddy 订阅端口 (${SUB_PORT})，请调整！${PLAIN}"; continue
-                    fi
-                    break
+                    # 用本轮新选的 hy_port 参与比较，避免旧 HY_PORT 造成误判
+                    local saved_hy="${HY_PORT:-}"
+                    HY_PORT="$hy_port"
+                    check_range_conflict "$hy_range" "$hy_port" && { HY_PORT="$saved_hy"; break; }
+                    HY_PORT="$saved_hy"
                 done
 
                 # 重签证书前必须先停 sing-box，否则文件监视器会读到「新 cert + 旧 key」
@@ -2038,20 +2055,8 @@ ${GREEN}================= Clash 订阅地址配置 =================${PLAIN}"
                     if ! validate_port "$sub_port"; then
                         echo -e "${RED}端口非法，请重新输入。${PLAIN}"; continue
                     fi
-                    if [[ "$sub_port" == "$VL_PORT" ]]; then
-                        echo -e "${RED}端口冲突: 该端口已分配给 VLESS-Reality (${VL_PORT})！${PLAIN}"; continue
-                    fi
-                    if [[ -n "${HY_PORT:-}" && "$sub_port" == "$HY_PORT" ]]; then
-                        echo -e "${RED}端口冲突: 该端口已分配给 Hysteria 2 (${HY_PORT})！${PLAIN}"; continue
-                    fi
-                    if [[ -n "${HY_RANGE:-}" ]]; then
-                        local r_start="${HY_RANGE%%:*}" r_end="${HY_RANGE##*:}"
-                        if (( sub_port >= r_start && sub_port <= r_end )); then
-                            echo -e "${RED}范围冲突: 订阅端口落在 Hysteria 2 跳跃范围 (${HY_RANGE}) 内！${PLAIN}"; continue
-                        fi
-                    fi
-                    if [[ "$sub_port" == "$SUB_PORT" ]] || check_port_occupied "$sub_port" "tcp"; then break; fi
-                    echo -e "${YELLOW}请更换其他未占用的 TCP 端口！${PLAIN}"
+                    [[ "$sub_port" == "$SUB_PORT" ]] && break
+                    check_port_conflict "$sub_port" "tcp" "sub" && break
                 done
 
                 local rotate_token=""

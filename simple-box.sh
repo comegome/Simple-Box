@@ -135,7 +135,7 @@ check_domain_ip_binding() {
     local server_ip="${2:-}"
     [[ -z "$domain" || -z "$server_ip" ]] && return 0
 
-    echo -e "${BLUE}正在检测域名 ${domain} 的 DNS 解析...${PLAIN}"
+    echo -e "正在检测域名 ${domain} 的 DNS 解析..."
     local resolved_ips
     resolved_ips=$(timeout 4 getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u || true)
 
@@ -200,7 +200,7 @@ verify_cloudflare_token() {
     token=$(trim_string "$token")
     [[ -z "$token" ]] && return 1
 
-    echo -e "${BLUE}正在在线校验 Cloudflare API Token...${PLAIN}"
+    echo -e "正在在线校验 Cloudflare API Token..."
     local check_res
     check_res=$(curl -s -m 8 -H "Authorization: Bearer ${token}" https://api.cloudflare.com/client/v4/user/tokens/verify || true)
     if echo "$check_res" | grep -q '"status":"active"'; then
@@ -241,12 +241,12 @@ harden_private_key() {
 # 所以结果走全局变量。不能叫 CF_TOKEN —— 那是支持无人值守部署的预置环境变量名。
 prompt_cf_token() {
     PROMPTED_CF_TOKEN=""
-    echo -e "\n${CYAN}------------------- Cloudflare API Token 获取指引 -------------------${PLAIN}"
-    echo -e "${CYAN} 1. 登录 CF -> 右上角头像 -> [配置文件] -> 左侧导航 [API 令牌]${PLAIN}"
-    echo -e "${CYAN} 2. 点击 [创建令牌] -> 找到 [编辑区域 DNS (Edit zone DNS)] 点击 [使用模板]${PLAIN}"
-    echo -e "${CYAN} 3. 区域资源选择: [包括] -> [特定区域] -> 选择你的域名${PLAIN}"
-    echo -e "${CYAN} 4. 底部点击 [继续以显示摘要] -> 最终确认页点击 [创建令牌] 并复制生成的令牌${PLAIN}"
-    echo -e "${CYAN}---------------------------------------------------------------------${PLAIN}"
+    echo -e "\n${GRAY}----------------- Cloudflare API Token 获取指引 -----------------${PLAIN}"
+    echo -e " 1. 登录 CF -> 右上角头像 -> [配置文件] -> 左侧导航 [API 令牌]"
+    echo -e " 2. 点击 [创建令牌] -> 找到 [编辑区域 DNS (Edit zone DNS)] 点击 [使用模板]"
+    echo -e " 3. 区域资源选择: [包括] -> [特定区域] -> 选择你的域名"
+    echo -e " 4. 底部点击 [继续以显示摘要] -> 最终确认页点击 [创建令牌] 并复制生成的令牌"
+    echo -e "${GRAY}-----------------------------------------------------------------${PLAIN}"
     local token=""
     while true; do
         read -r -p "请输入 Cloudflare API Token: " token || token=""
@@ -339,10 +339,10 @@ check_port_occupied() {
     fi
     if [[ -n "$in_use" ]]; then
         if echo "$in_use" | grep -q "sing-box"; then
-            echo -e "${BLUE}提示: 端口 ${port} 当前由已有 sing-box 进程使用，重置安装将自动平滑接管。${PLAIN}"
+            echo -e "提示: 端口 ${port} 当前由已有 sing-box 进程使用，重置安装将自动平滑接管。"
             return 0
         elif echo "$in_use" | grep -q "caddy"; then
-            echo -e "${BLUE}提示: 端口 ${port} 当前由已有 caddy 订阅服务使用，重置安装将自动复用。${PLAIN}"
+            echo -e "提示: 端口 ${port} 当前由已有 caddy 订阅服务使用，重置安装将自动复用。"
             return 0
         else
             echo -e "${RED}警告: ${proto^^} 端口 ${port} 已被外部服务占用！${PLAIN}"
@@ -365,7 +365,7 @@ install_deps() {
     command -v netfilter-persistent &>/dev/null || missing+=(iptables-persistent)
 
     if [ ${#missing[@]} -gt 0 ]; then
-        echo -e "${BLUE}安装必要基础组件: ${missing[*]}...${PLAIN}"
+        echo -e "安装必要基础组件: ${missing[*]}..."
         export DEBIAN_FRONTEND=noninteractive
         echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections 2>/dev/null || true
         echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections 2>/dev/null || true
@@ -401,7 +401,7 @@ install_caddy() {
         return 0
     fi
 
-    echo -e "${BLUE}正在安装 Caddy 用于证书管理...${PLAIN}"
+    echo -e "正在安装 Caddy 用于证书管理..."
     export DEBIAN_FRONTEND=noninteractive
     apt-get update -qq >/dev/null 2>&1 || true
     if ! apt-get install -y -qq caddy; then
@@ -471,13 +471,13 @@ disable_bbr() {
     rm -f "$BBR_CONF"
     sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
     sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || true
-    echo -e "${BLUE}已恢复系统默认拥塞控制算法${PLAIN}"
+    echo -e "已恢复系统默认拥塞控制算法"
 }
 
 # 获取并升级官方 sing-box 内核（带精准版本校验）
 update_singbox_core() {
     local force_flag="${1:-}"
-    echo -e "${BLUE}检查 sing-box 官方最新版本...${PLAIN}"
+    echo -e "检查 sing-box 官方最新版本..."
 
     local cur_ver="未安装"
     if [[ -f /usr/local/bin/sing-box ]]; then
@@ -518,7 +518,7 @@ update_singbox_core() {
     local tmp_dir=$(mktemp -d)
     local tmp_tar="${tmp_dir}/sing-box.tar.gz"
 
-    echo -e "${BLUE}正在下载并更新内核...${PLAIN}"
+    echo -e "正在下载并更新内核..."
     if ! curl -fsSL "$url" -o "$tmp_tar"; then
         echo -e "${RED}内核下载失败（网络不通或该版本无 ${arch} 构建），已保留现有版本。${PLAIN}"
         rm -rf "$tmp_dir"
@@ -592,7 +592,7 @@ issue_cert_bundle() {
 
     # 模式 A: 自有域名 + CF Token，走 DNS-01 申请 Let's Encrypt
     if [[ -n "$domain" && -n "$cf_token" ]]; then
-        echo -e "${BLUE}配置 acme.sh 证书环境...${PLAIN}"
+        echo -e "配置 acme.sh 证书环境..."
         if [[ ! -f "$acme_bin" ]]; then
             curl -sSL https://get.acme.sh | sh -s email="admin@${domain}" || true
         fi
@@ -603,7 +603,7 @@ issue_cert_bundle() {
             if [[ -f "$HOME/.acme.sh/${domain}_ecc/fullchain.cer" && -f "$HOME/.acme.sh/${domain}_ecc/${domain}.key" ]]; then
                 echo -e "${GREEN}检测到本地已有 ${domain} 的证书，直接同步部署...${PLAIN}"
             else
-                echo -e "${BLUE}通过 Cloudflare DNS API 申请证书（DNS-01，无需 80 端口）...${PLAIN}"
+                echo -e "通过 Cloudflare DNS API 申请证书（DNS-01，无需 80 端口）..."
                 "$acme_bin" --set-default-ca --server letsencrypt || true
                 "$acme_bin" --issue --dns dns_cf -d "$domain" --dnssleep 20 --keylength ec-256 --force || true
             fi
@@ -740,7 +740,7 @@ setup_port_hopping() {
     local hy_port="${1:-}"
     local range="${2:-}"
 
-    echo -e "${BLUE}配置 Hysteria 2 端口跳跃 (UDP ${range} -> ${hy_port})...${PLAIN}"
+    echo -e "配置 Hysteria 2 端口跳跃 (UDP ${range} -> ${hy_port})..."
     iptables -t nat -D PREROUTING -p udp --dport "$range" -j REDIRECT --to-ports "$hy_port" 2>/dev/null || true
     iptables -t nat -A PREROUTING -p udp --dport "$range" -j REDIRECT --to-ports "$hy_port"
 
@@ -836,7 +836,7 @@ setup_caddy_subscription() {
     rm -f /etc/caddy/sites/*-${sub_port}.caddy /etc/caddy/sites/simple-box*.caddy
 
     if [[ "$cert_mode" == "domain" ]]; then
-        echo -e "${BLUE}配置 Caddy HTTPS 域名证书 (端口 ${sub_port})...${PLAIN}"
+        echo -e "配置 Caddy HTTPS 域名证书 (端口 ${sub_port})..."
         cat > "/etc/caddy/sites/simple-box-sub.caddy" <<EOF
 # Simple-Box HTTPS 域名证书
 :${sub_port} {
@@ -856,7 +856,7 @@ setup_caddy_subscription() {
 }
 EOF
     else
-        echo -e "${BLUE}配置 Caddy HTTP 自签证书 (端口 ${sub_port}, 客户端直接导入免证书报错)...${PLAIN}"
+        echo -e "配置 Caddy HTTP 自签证书 (端口 ${sub_port}, 客户端直接导入免证书报错)..."
         cat > "/etc/caddy/sites/simple-box-sub.caddy" <<EOF
 # Simple-Box HTTP 自签证书
 http://:${sub_port} {
@@ -1096,7 +1096,7 @@ reinstall_with_latest() {
     local target="${share_dir}/simple-box.sh"
     local latest="/tmp/simple-box.latest.$$"
 
-    echo -e "${BLUE}正在检查仓库最新脚本...${PLAIN}"
+    echo -e "正在检查仓库最新脚本..."
     if ! fetch_latest_script "$latest"; then
         echo -e "${YELLOW}获取最新脚本失败（网络不通或被限流），将用当前版本继续重装。${PLAIN}"
         rm -f "$latest"
@@ -1339,7 +1339,9 @@ install_node() {
         return 1
     fi
 
-    echo -e "\n${YELLOW}=== 1. 配置 VLESS-Reality 参数 ===${PLAIN}"
+    echo -e "\n${GRAY}----------------------------------------------------${PLAIN}"
+    echo -e "${BOLD}[1/3] 配置 VLESS-Reality 参数${PLAIN}"
+    echo -e "${GRAY}----------------------------------------------------${PLAIN}"
     local vl_port
     while true; do
         read -r -p "请输入 Reality 监听端口 [默认 ${old_vl_port:-443}]: " vl_port || vl_port=""
@@ -1366,7 +1368,9 @@ install_node() {
         break
     done
 
-    echo -e "\n${YELLOW}=== 2. 配置 Hysteria 2 参数 ===${PLAIN}"
+    echo -e "\n${GRAY}----------------------------------------------------${PLAIN}"
+    echo -e "${BOLD}[2/3] 配置 Hysteria 2 参数${PLAIN}"
+    echo -e "${GRAY}----------------------------------------------------${PLAIN}"
     local hy_skip_cert="false"
     local cert_fell_back=""
 
@@ -1374,12 +1378,12 @@ install_node() {
 
     # 1. 优先检测本地已存在的域名配置
     if [[ -n "$old_domain" ]]; then
-        echo -e "${GREEN}检测到当前已配置域名: ${CYAN}${old_domain}${PLAIN}"
+        echo -e "检测到当前已配置域名: ${CYAN}${old_domain}${PLAIN}"
         local reuse_domain=""
         read -r -p "是否继续使用此域名？[Y/n (回车沿用，输入 n 更换域名或使用 IP)]: " reuse_domain || reuse_domain=""
         if [[ -z "$reuse_domain" || "${reuse_domain,,}" == "y" || "${reuse_domain,,}" == "yes" ]]; then
             hy_domain="$old_domain"
-            echo -e "${BLUE}已选择沿用当前域名: ${hy_domain}${PLAIN}"
+            echo -e "已选择沿用当前域名: ${hy_domain}"
             if ! check_domain_ip_binding "$hy_domain" "$server_ip"; then
                 hy_domain=""
             fi
@@ -1388,10 +1392,10 @@ install_node() {
 
     # 2. 若无已配置域名，或用户输入 n 放弃沿用，则提示输入
     if [[ -z "$hy_domain" ]]; then
-        echo -e "${CYAN}提示:${PLAIN}"
-        echo -e "${CYAN}  1. 使用自有域名: 需在 Cloudflare 将域名 A 记录解析至本机 IP (${server_ip})${PLAIN}"
-        echo -e "${CYAN}  2. CF 代理状态必须为【仅限 DNS】(灰色云朵)，小黄云 CDN 会阻断 UDP${PLAIN}"
-        echo -e "${CYAN}  3. 直接回车 = 使用 IP 自签证书（10 年 ECC，客户端自动开启 skip-cert-verify）${PLAIN}"
+        echo -e "提示:"
+        echo -e "  • 使用自有域名: 需在 Cloudflare 将 A 记录解析至本机公网 IP (${CYAN}${server_ip}${PLAIN})"
+        echo -e "  • Cloudflare 代理状态必须为【仅限 DNS】(灰色云朵)，开启小黄云会阻断 UDP"
+        echo -e "  • 直接回车 = 使用 IP 自签证书（10 年 ECC，客户端自动开启跳过证书校验）"
 
         while true; do
             read -r -p "请输入域名 [回车=IP自签]: " hy_domain || hy_domain=""
@@ -1470,7 +1474,9 @@ install_node() {
     done
     HY_RANGE="$hy_range"
 
-    echo -e "\n${YELLOW}=== 3. 配置在线订阅地址参数 ===${PLAIN}"
+    echo -e "\n${GRAY}----------------------------------------------------${PLAIN}"
+    echo -e "${BOLD}[3/3] 配置在线订阅与节点参数${PLAIN}"
+    echo -e "${GRAY}----------------------------------------------------${PLAIN}"
     local sub_port
     while true; do
         read -r -p "请输入 Caddy 订阅监听端口 [默认 ${old_sub_port:-8444}]: " sub_port || sub_port=""
@@ -1512,7 +1518,7 @@ install_node() {
     fi
 
     # 生成密钥凭证（任一步失败都必须中止，否则空值会写进配置导致服务起不来）
-    echo -e "${BLUE}生成安全密钥凭证...${PLAIN}"
+    echo -e "生成安全密钥凭证..."
     local key_pair vl_privkey vl_pubkey vl_shortid user_uuid hy_password sub_token
     key_pair=$(/usr/local/bin/sing-box generate reality-keypair) || {
         echo -e "${RED}Reality 密钥对生成失败，已中止。${PLAIN}"; return 1; }
@@ -1598,9 +1604,10 @@ EOF
         echo -e "${YELLOW}注意: 本次因域名证书申请失败已回退为 IP 自签证书，客户端已自动设为 skip-cert-verify。${PLAIN}"
     fi
 
-    echo -e "\n${GREEN}===================================================================${PLAIN}"
-    echo -e "${GREEN}🎉 Simple-Box 安装就绪！随时在终端输入 ${YELLOW}simbo${GREEN} 即可打开控制台。${PLAIN}"
-    echo -e "${GREEN}===================================================================${PLAIN}\n"
+    echo -e "\n${GRAY}====================================================${PLAIN}"
+    echo -e " ${GREEN}✓${PLAIN} ${BOLD}Simple-Box 安装就绪！${PLAIN}"
+    echo -e " 随时在终端输入 ${CYAN}simbo${PLAIN} 即可打开控制台。"
+    echo -e "${GRAY}====================================================${PLAIN}\n"
 }
 
 # 展示单独节点链接与二维码
@@ -1637,24 +1644,24 @@ show_links() {
     local vless_url="$vless_link"
     local hy2_url="$hy2_link"
 
-    echo -e "\n${GREEN}==================== vless / hy2 原生链接 ====================${PLAIN}"
-    echo -e "${YELLOW}[1] vless 链接:${PLAIN}"
-    echo -e "${GREEN}${vless_url}${PLAIN}"
+    echo -e "\n${GRAY}==================== vless / hy2 原生链接 ====================${PLAIN}"
+    echo -e " [1] vless 链接:"
+    echo -e " ${CYAN}${vless_url}${PLAIN}"
     if command -v qrencode &>/dev/null; then
-        echo -e "\n${YELLOW}[vless 二维码]:${PLAIN}"
+        echo -e "\n [vless 二维码]:"
         qrencode -t ANSIUTF8 "${vless_url}"
     fi
 
     if [[ -n "$hy2_url" ]]; then
-        echo -e "\n--------------------------------------------------------------"
-        echo -e "${YELLOW}[2] hy2 链接:${PLAIN}"
-        echo -e "${GREEN}${hy2_url}${PLAIN}"
+        echo -e "\n${GRAY}--------------------------------------------------------------${PLAIN}"
+        echo -e " [2] hy2 链接:"
+        echo -e " ${CYAN}${hy2_url}${PLAIN}"
         if command -v qrencode &>/dev/null; then
-            echo -e "\n${YELLOW}[hy2 二维码]:${PLAIN}"
+            echo -e "\n [hy2 二维码]:"
             qrencode -t ANSIUTF8 "${hy2_url}"
         fi
     fi
-    echo -e "${GREEN}==============================================================${PLAIN}\n"
+    echo -e "${GRAY}==============================================================${PLAIN}\n"
     read -r -p "按回车键返回主菜单..." dummy || true
 }
 
@@ -1666,7 +1673,7 @@ uninstall_all() {
     read -r -p "确认卸载吗？(y/N): " confirm || confirm=""
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && echo "已取消。" && return 0
 
-    echo -e "${BLUE}正在停止并移除服务...${PLAIN}"
+    echo -e "正在停止并移除服务..."
     systemctl stop sing-box 2>/dev/null || true
     systemctl disable sing-box 2>/dev/null || true
     rm -f /etc/systemd/system/sing-box.service
@@ -1675,7 +1682,7 @@ uninstall_all() {
     if [[ -f "$ENV_FILE" ]]; then
         set +e; source "$ENV_FILE"; set -e
         if [[ -n "${HY_RANGE:-}" && -n "${HY_PORT:-}" ]]; then
-            echo -e "${BLUE}精准清理端口跳跃规则...${PLAIN}"
+            echo -e "精准清理端口跳跃规则..."
             iptables -t nat -D PREROUTING -p udp --dport "$HY_RANGE" -j REDIRECT --to-ports "$HY_PORT" 2>/dev/null || true
             # 清理历史版本可能遗留的 IPv6 规则
             if command -v ip6tables &>/dev/null; then
@@ -1728,7 +1735,7 @@ uninstall_all() {
     if [[ "$caddy_owned" == "true" && "$caddyfile_created" == "true" ]]; then
         # 包是本脚本装的、Caddyfile 也是本脚本建的：一并删除（包已卸载，无副作用）
         rm -f /etc/caddy/Caddyfile
-        echo -e "${BLUE}已移除本脚本创建的 Caddyfile${PLAIN}"
+        echo -e "已移除本脚本创建的 Caddyfile"
     elif [[ "$caddyfile_created" == "true" || "$caddyfile_appended" == "true" ]]; then
         # Caddy 归用户使用（原有的，或已被用户接管）：只回退本脚本加的 import 行。
         # 有用户站点时 import 必须留着，否则用户的站点不会生效。
@@ -1737,12 +1744,12 @@ uninstall_all() {
         elif [[ -f /etc/caddy/Caddyfile ]]; then
             sed -i '\|^import sites/\*\.caddy$|d' /etc/caddy/Caddyfile
             sed -i -e :a -e '/^\n*$/{$d;N;};/\n$/ba' /etc/caddy/Caddyfile 2>/dev/null || true
-            echo -e "${BLUE}已回退本脚本追加的 Caddyfile import 行${PLAIN}"
+            echo -e "已回退本脚本追加的 Caddyfile import 行"
         fi
     fi
 
     if [[ "$caddy_owned" == "true" ]]; then
-        echo -e "${BLUE}正在卸载本脚本安装的 Caddy...${PLAIN}"
+        echo -e "正在卸载本脚本安装的 Caddy..."
         # 必须 purge 而非 remove：caddy.postrm 的 remove 分支会 mask 服务且不解除，
         # 留下 rc 残留状态，下次重装时 caddy.service 仍是 masked，永远起不来。
         # purge 分支才会 unmask 并清掉 /etc/caddy 与 /var/lib/caddy。
@@ -1759,7 +1766,7 @@ uninstall_all() {
         rm -f /etc/caddy/sites/simple-box*.caddy /etc/caddy/sites/*-"${SUB_PORT:-8444}".caddy 2>/dev/null || true
         rmdir /etc/caddy/sites 2>/dev/null || true
         rmdir /etc/caddy 2>/dev/null || true
-        echo -e "${BLUE}已卸载本脚本安装的 Caddy 软件包${PLAIN}"
+        echo -e "已卸载本脚本安装的 Caddy 软件包"
     elif command -v caddy &>/dev/null; then
         systemctl reload caddy 2>/dev/null || systemctl restart caddy 2>/dev/null || true
         if [[ "$foreign_sites" -gt 0 ]]; then
@@ -1829,7 +1836,7 @@ ${GRAY}================= VLESS-Reality 模块配置 =================${PLAIN}"
                     break
                 done
 
-                echo -e "${BLUE}生成新的 Reality 密钥凭证...${PLAIN}"
+                echo -e "生成新的 Reality 密钥凭证..."
                 local key_pair
                 key_pair=$(/usr/local/bin/sing-box generate reality-keypair)
                 local vl_privkey vl_pubkey vl_shortid user_uuid
@@ -1903,12 +1910,12 @@ ${GRAY}=================== Hysteria 2 模块配置 ===================${PLAIN}"
                 local old_hy_domain="${HY_DOMAIN:-}"
                 # 1. 优先检测当前已配置域名
                 if [[ -n "$old_hy_domain" ]]; then
-                    echo -e "${GREEN}检测到当前已配置域名: ${CYAN}${old_hy_domain}${PLAIN}"
+                    echo -e "检测到当前已配置域名: ${CYAN}${old_hy_domain}${PLAIN}"
                     local reuse_d=""
                     read -r -p "是否继续使用该域名？[Y/n (回车沿用，输入 n 更换域名或使用 IP)]: " reuse_d || reuse_d=""
                     if [[ -z "$reuse_d" || "${reuse_d,,}" == "y" || "${reuse_d,,}" == "yes" ]]; then
                         hy_domain="$old_hy_domain"
-                        echo -e "${BLUE}已选择沿用当前域名: ${hy_domain}${PLAIN}"
+                        echo -e "已选择沿用当前域名: ${hy_domain}"
                         if ! check_domain_ip_binding "$hy_domain" "$SERVER_IP"; then
                             hy_domain=""
                         fi
@@ -2245,7 +2252,7 @@ menu_singbox_manage() {
                 read -r -p "按回车键返回..." dummy || true
                 ;;
             3)
-                echo -e "\n${BLUE}正在获取 sing-box 最近 40 行运行日志：${PLAIN}\n"
+                echo -e "\n正在获取 sing-box 最近 40 行运行日志：\n"
                 journalctl -u sing-box -o cat -n 40 --no-pager || true
                 echo ""
                 read -r -p "按回车键返回..." dummy || true

@@ -242,7 +242,7 @@ manage_bbr() {
             target_action="disable"
         fi
 
-        echo -e "\n${GREEN}================ 打开 / 关闭 TCP BBR 加速 ================${PLAIN}"
+        echo -e "\n${GREEN}==================== 配置 BBR 加速 ====================${PLAIN}"
         echo -e " 当前状态: ${bbr_tag} | 队列规则: ${CYAN}${cur_qdisc}${PLAIN}"
         echo -e "${GREEN}-------------------------------------------------------${PLAIN}"
         echo -e " 1. ${action_desc}"
@@ -1390,7 +1390,7 @@ show_subscription() {
         echo -e "${YELLOW}⚠️  安全与隐私提示 (IP 模式):${PLAIN}"
         echo -e "   • 分流规则已将 VPS IP 设为直连，确保节点更新/失效时订阅拉取绝不死锁。"
         echo -e "   • ${RED}注意: 当前订阅通过 HTTP 明文传输，不受 TLS 保护${PLAIN}，请勿在公共 Wi-Fi / 不可信网络环境下更新。"
-        echo -e "   • 若需全链路隐私防嗅探保护，请在菜单 [2] 中配置自有域名启用 HTTPS 模式。"
+        echo -e "   • 若需全链路隐私防嗅探保护，请在菜单 [3] 中配置自有域名启用 HTTPS 模式。"
     else
         echo -e "${GREEN}🛡️  隐私安全提示 (域名 HTTPS 模式):${PLAIN}"
         echo -e "   • 分流规则已将订阅域名 (${host}) 设为直连，确保节点更新/失效时订阅拉取绝不死锁。"
@@ -1550,7 +1550,7 @@ uninstall_all() {
     echo -e "${YELLOW}本脚本自身的入口 (simbo) 也已删除，控制台即将退出。${PLAIN}"
     echo -e "${YELLOW}如需重装，请重新执行一键安装命令。${PLAIN}"
     echo -e "${CYAN}注: TCP BBR 是内核级 sysctl 设置（/etc/sysctl.d/99-bbr.conf），不属于本脚本，卸载不会还原。${PLAIN}"
-    echo -e "${CYAN}    如需恢复系统默认，请在卸载前先用「打开 / 关闭 TCP BBR 加速」关闭，或手动删除该文件。${PLAIN}"
+    echo -e "${CYAN}    如需恢复系统默认，请在卸载前先用「配置 BBR 加速」关闭，或手动删除该文件。${PLAIN}"
     # 卸载后目录与入口都已不存在，继续停留在菜单毫无意义（面板还会读到已删除的配置）
     UNINSTALL_DONE=true
 }
@@ -1848,7 +1848,7 @@ echo -e "${CYAN}----------------------------------------------------------------
                 # 老版本 env.conf 没有 VL_PRIVKEY，缺失时无法重建 Reality，必须先补齐
                 if [[ -z "$vl_privkey" ]]; then
                     echo -e "${RED}环境配置缺少 Reality 私钥 (VL_PRIVKEY)，无法安全重建。${PLAIN}"
-                    echo -e "${YELLOW}请进入 [1] 配置 VLESS-Reality 模块 重新生成一次密钥，再回到此处。${PLAIN}"
+                    echo -e "${YELLOW}请进入 [2] 配置 VLESS-Reality 模块 重新生成一次密钥，再回到此处。${PLAIN}"
                     systemctl start sing-box 2>/dev/null || true
                     read -r -p "按回车键返回..." dummy || true
                     continue
@@ -2109,13 +2109,13 @@ menu() {
         fi
 
         echo -e "${GREEN}----------------------------------------------------${PLAIN}"
-        echo -e " 1. 配置 VLESS-Reality 模块"
-        echo -e " 2. 配置 Hysteria 2 模块"
-        echo -e " 3. 配置Clash 订阅地址"
-        echo -e " 4. 查看节点原生分享链接"
-        echo -e " 5. 打开 / 关闭 TCP BBR 加速"
+        echo -e " 1. 查看节点原生链接"
+        echo -e " 2. 配置 VLESS-Reality 模块"
+        echo -e " 3. 配置 Hysteria 2 模块"
+        echo -e " 4. 配置 Clash 订阅地址"
+        echo -e " 5. 配置 BBR 加速"
         echo -e " 6. 管理 sing-box 内核"
-        echo -e " 7. 重新安装Simple-Box"
+        echo -e " 7. 重装 Simple-Box 脚本"
         echo -e " 8. 卸载 Simple-Box 脚本"
         echo -e " 0. 退出控制台"
         echo -e "${GREEN}====================================================${PLAIN}"
@@ -2123,10 +2123,10 @@ menu() {
         local opt=""
         read -r -p "请输入选项 [0-8]: " opt || opt="0"
         case "$opt" in
-            1) menu_reality_module || true ;;
-            2) menu_hy2_module || true ;;
-            3) menu_sub_module || true ;;
-            4) show_links || true ;;
+            1) show_links || true ;;
+            2) menu_reality_module || true ;;
+            3) menu_hy2_module || true ;;
+            4) menu_sub_module || true ;;
             5) manage_bbr || true ;;
             6) menu_singbox_manage || true ;;
             7) install_node || true ;;

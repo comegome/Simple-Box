@@ -126,13 +126,13 @@ simbo
  Clash 节点列表: http://203.0.113.10:8444/2dac50852729bf55bb61833d/provider.yaml
   (无域名证书加密，建议在可信网络下更新)
 ----------------------------------------------------
- 1. 配置 VLESS-Reality 模块
- 2. 配置 Hysteria 2 模块
- 3. 配置Clash 订阅地址
- 4. 查看节点原生分享链接
- 5. 打开 / 关闭 TCP BBR 加速
+ 1. 查看节点原生链接
+ 2. 配置 VLESS-Reality 模块
+ 3. 配置 Hysteria 2 模块
+ 4. 配置 Clash 订阅地址
+ 5. 配置 BBR 加速
  6. 管理 sing-box 内核
- 7. 重新安装Simple-Box
+ 7. 重装 Simple-Box 脚本
  8. 卸载 Simple-Box 脚本
  0. 退出控制台
 ====================================================
@@ -160,7 +160,7 @@ simbo
 1. **80 端口零冲突**：Simple-Box 的 Caddy 专用于订阅分发，只监听在 8444 端口（通过 `bind tcp4/0.0.0.0`），脚本会自动清除 Caddy 默认占用的 80 端口，**80 端口完全留给 Nginx 使用**。
 2. **443 端口注意事项**：
    - 如果你的 Nginx 已经配置了 HTTPS 网站占用了 443 端口，安装 Simple-Box 时 Reality 端口输入不能选 443（脚本会自动检测并提示已被占用），请将 Reality 端口改为其他端口（如 `20443`、`34443` 等）。
-   - 如果先安装了 Simple-Box（Reality 默认占用了 443），后续在 Nginx 里配置监听 443 的 HTTPS 站点时，Nginx 会报端口被占；此时在 `simbo` 控制台选项 1 中将 Reality 端口改成其他端口即可。
+   - 如果先安装了 Simple-Box（Reality 默认占用了 443），后续在 Nginx 里配置监听 443 的 HTTPS 站点时，Nginx 会报端口被占；此时在 `simbo` 控制台选项 2 中将 Reality 端口改成其他端口即可。
 3. **证书申请零冲突**：Simple-Box 走 Cloudflare DNS API 验证，不需要占用 80 端口做 HTTP-01 验证，完全不会与 Certbot 或 Nginx 的证书续签产生冲突。
 
 #### Q2：没有域名能用 Hysteria 2 吗？为什么自签模式下订阅是 HTTP？

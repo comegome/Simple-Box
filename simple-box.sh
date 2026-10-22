@@ -125,6 +125,42 @@ validate_domain() {
     [[ "$d" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$ ]]
 }
 
+# 校验域名是否已解析到本机公网 IP（软提示，不强行阻断）
+# $1=域名 $2=本机公网 IP
+# 匹配返回 0；不匹配或未解析时给出诊断提示并询问用户是否强行使用（选 y 返回 0，放弃返回 1）
+check_domain_ip_binding() {
+    local domain="${1:-}"
+    local server_ip="${2:-}"
+    [[ -z "$domain" || -z "$server_ip" ]] && return 0
+
+    echo -e "${BLUE}正在检测域名 ${domain} 的 DNS 解析...${PLAIN}"
+    local resolved_ips
+    resolved_ips=$(timeout 4 getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u || true)
+
+    if [[ -z "$resolved_ips" ]]; then
+        echo -e "${YELLOW}⚠️  警告: 域名 ${domain} 当前未检测到任何 A 记录解析！${PLAIN}"
+        echo -e "${YELLOW}可能原因: 1. A 记录尚未在 Cloudflare 添加 2. 全球 DNS 尚未刷新生效${PLAIN}"
+    elif echo "$resolved_ips" | grep -qw "$server_ip"; then
+        echo -e "${GREEN}✓ 域名解析已成功指向本机公网 IP (${server_ip})！${PLAIN}"
+        return 0
+    else
+        local ip_list
+        ip_list=$(echo "$resolved_ips" | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+        echo -e "${YELLOW}⚠️  警告: 域名 ${domain} 当前解析为 [${ip_list}]，未指向本机公网 IP (${server_ip})！${PLAIN}"
+        echo -e "${YELLOW}可能原因:${PLAIN}"
+        echo -e "${YELLOW}  1. Cloudflare 开启了【小黄云】代理（必须设为灰色云朵【仅限 DNS】，否则 UDP 无法连通）${PLAIN}"
+        echo -e "${YELLOW}  2. A 记录填写错误或尚未更新生效${PLAIN}"
+    fi
+
+    local confirm=""
+    read -r -p "是否仍要继续使用该域名？[y/N (回车放弃，重新输入域名或使用 IP)]: " confirm || confirm=""
+    if [[ "${confirm,,}" == "y" || "${confirm,,}" == "yes" ]]; then
+        echo -e "${YELLOW}已确认继续使用未匹配的域名: ${domain}${PLAIN}"
+        return 0
+    fi
+    return 1
+}
+
 # 剔除字符串首尾的空白字符与引号（清洗换行符、制表符、空格与单双引号任意层嵌套）
 trim_string() {
     local val="${1:-}"
@@ -1342,6 +1378,9 @@ install_node() {
         if [[ -z "$reuse_domain" || "${reuse_domain,,}" == "y" || "${reuse_domain,,}" == "yes" ]]; then
             hy_domain="$old_domain"
             echo -e "${BLUE}已选择沿用当前域名: ${hy_domain}${PLAIN}"
+            if ! check_domain_ip_binding "$hy_domain" "$server_ip"; then
+                hy_domain=""
+            fi
         fi
     fi
 
@@ -1360,10 +1399,15 @@ install_node() {
                 ""|ip|self|selfsigned) hy_domain=""; break ;;
             esac
 
-            if validate_domain "$hy_domain"; then
-                break
+            if ! validate_domain "$hy_domain"; then
+                echo -e "${RED}域名格式非法: ${hy_domain}（示例: node.example.com）${PLAIN}"
+                continue
             fi
-            echo -e "${RED}域名格式非法: ${hy_domain}（示例: node.example.com）${PLAIN}"
+            if ! check_domain_ip_binding "$hy_domain" "$server_ip"; then
+                echo -e "${YELLOW}请重新输入域名，或直接回车使用 IP 自签。${PLAIN}"
+                continue
+            fi
+            break
         done
     fi
 
@@ -1863,6 +1907,9 @@ ${GREEN}=================== Hysteria 2 模块配置 ===================${PLAIN}"
                     if [[ -z "$reuse_d" || "${reuse_d,,}" == "y" || "${reuse_d,,}" == "yes" ]]; then
                         hy_domain="$old_hy_domain"
                         echo -e "${BLUE}已选择沿用当前域名: ${hy_domain}${PLAIN}"
+                        if ! check_domain_ip_binding "$hy_domain" "$SERVER_IP"; then
+                            hy_domain=""
+                        fi
                     fi
                 fi
 
@@ -1878,6 +1925,10 @@ ${GREEN}=================== Hysteria 2 模块配置 ===================${PLAIN}"
                         fi
                         if ! validate_domain "$hy_domain"; then
                             echo -e "${RED}域名格式不合法（示例: node.example.com），请重新输入。${PLAIN}"; continue
+                        fi
+                        if ! check_domain_ip_binding "$hy_domain" "$SERVER_IP"; then
+                            echo -e "${YELLOW}请重新输入域名，或直接回车使用 IP 自签。${PLAIN}"
+                            continue
                         fi
                         break
                     done

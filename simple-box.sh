@@ -239,17 +239,19 @@ setup_caddy_repo() {
     return 0
 }
 
-# 检查并自动安装 / 升级 Caddy
-# 一条 apt-get install 同时覆盖「没装就装」和「装了旧版就升级」：
-# apt 在 candidate 高于已安装版本时默认就会升级，不需要自己比版本号。
+# 检查并自动安装 Caddy
+# 只有「机器上完全没有 caddy」时才装；已有则原样使用，绝不升级、不重启，
+# 避免打断用户自己托管在 Caddy 上的站点。
 install_caddy() {
-    local had_caddy=false
-    command -v caddy &>/dev/null && had_caddy=true
+    if command -v caddy &>/dev/null; then
+        systemctl enable caddy >/dev/null 2>&1 || true
+        return 0
+    fi
 
+    echo -e "${BLUE}正在安装 Caddy 用于安全的 HTTPS 订阅分发...${PLAIN}"
     if command -v apt-get &>/dev/null; then
-        setup_caddy_repo || echo -e "${YELLOW}官方源配置失败，回退到系统仓库（版本可能较旧）${PLAIN}"
+        setup_caddy_repo || echo -e "${YELLOW}官方源不可用，回退到系统仓库安装${PLAIN}"
         apt-get update -qq >/dev/null 2>&1 || true
-        echo -e "${BLUE}正在安装 / 更新 Caddy...${PLAIN}"
         apt-get install -y -qq caddy || true
     elif command -v yum &>/dev/null; then
         yum install -y yum-plugin-copr >/dev/null 2>&1 || true
@@ -257,13 +259,9 @@ install_caddy() {
         yum install -y caddy || true
     fi
 
-    # 归属标记只在本机原本没有 caddy 时才写：
-    # 卸载时据此决定是否连软件包一起删，绝不误删用户自己装的 Caddy。
-    if [[ "$had_caddy" != "true" ]]; then
-        mkdir -p "$CONF_DIR" 2>/dev/null || true
-        : > "${CONF_DIR}/.caddy_installed_by_script" 2>/dev/null || true
-    fi
-
+    # 归属标记：只有本脚本装的包，卸载时才连软件包一起清理
+    mkdir -p "$CONF_DIR" 2>/dev/null || true
+    : > "${CONF_DIR}/.caddy_installed_by_script" 2>/dev/null || true
     systemctl enable caddy >/dev/null 2>&1 || true
 }
 
@@ -2099,15 +2097,19 @@ menu() {
             sb_status="${RED}未安装${PLAIN}"
         fi
 
+        # 证书服务 = Caddy 进程在跑 + 本脚本的订阅站点配置确实存在。
+        # 只判服务不判站点，卸载或站点丢失后会谎报「运行中」。
         local caddy_ver=""
         local caddy_status="${RED}未安装${PLAIN}"
         if command -v caddy &>/dev/null; then
             caddy_ver=$(caddy version 2>/dev/null | head -n1 | awk '{print $1}')
             caddy_ver="v${caddy_ver#v}"
-            if systemctl is-active --quiet caddy; then
+            if ! systemctl is-active --quiet caddy; then
+                caddy_status="${RED}已停止 (Caddy ${caddy_ver})${PLAIN}"
+            elif [[ -f /etc/caddy/sites/simple-box-sub.caddy ]]; then
                 caddy_status="${GREEN}运行中 (Caddy ${caddy_ver})${PLAIN}"
             else
-                caddy_status="${RED}已停止 (Caddy ${caddy_ver})${PLAIN}"
+                caddy_status="${YELLOW}无订阅站点 (Caddy ${caddy_ver})${PLAIN}"
             fi
         fi
 

@@ -1870,8 +1870,8 @@ ${GRAY}================= VLESS-Reality 模块配置 =================${PLAIN}"
                     continue
                 fi
 
-                echo -e "\n${GREEN}VLESS-Reality 模块已成功更新！${PLAIN}"
-                echo -e "${CYAN}提示: 订阅链接与 Token 保持完全一致，客户端仅需点击“更新订阅”即可自动同步新节点。${PLAIN}"
+                echo -e "\n${GREEN}✓ VLESS-Reality 模块已成功更新！${PLAIN}"
+                echo -e "提示: 订阅链接保持不变，客户端仅需点击「更新订阅」即可自动同步新节点。"
                 read -r -p "按回车键返回..." dummy || true
                 set +e; source "$ENV_FILE"; set -e
                 ;;
@@ -1902,6 +1902,10 @@ ${GRAY}=================== Hysteria 2 模块配置 ===================${PLAIN}"
         case "$opt" in
             1)
                 echo -e "\n${YELLOW}=== 重置 Hysteria 2 参数 ===${PLAIN}"
+                local old_sub_proto="${SUB_PROTO:-http}"
+                local old_target_host="${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}"
+                local old_sub_url="${old_sub_proto}://${old_target_host}:${SUB_PORT:-8444}/${SUB_TOKEN}/config.yaml"
+
                 local hy_domain="" cf_token=""
                 local CERT_MODE="selfsigned"
                 local target_host="$SERVER_IP"
@@ -2068,8 +2072,15 @@ ${GRAY}=================== Hysteria 2 模块配置 ===================${PLAIN}"
                     continue
                 fi
 
-                echo -e "\n${GREEN}Hysteria 2 模块已成功更新！${PLAIN}"
-                echo -e "${CYAN}提示: 订阅链接与 Token 保持完全一致，客户端仅需点击“更新订阅”即可自动同步新节点。${PLAIN}"
+                local new_sub_url="${sub_proto}://${target_host}:${sub_port}/${sub_token}/config.yaml"
+                echo -e "\n${GREEN}✓ Hysteria 2 模块已成功更新！${PLAIN}"
+                if [[ "$new_sub_url" == "$old_sub_url" ]]; then
+                    echo -e "提示: 订阅链接保持不变，客户端仅需点击「更新订阅」即可自动同步新节点。"
+                else
+                    echo -e "${YELLOW}⚠️  提示: 域名或证书模式已变更，在线订阅地址已更新为:${PLAIN}"
+                    echo -e "   ${CYAN}${new_sub_url}${PLAIN}"
+                    echo -e "${YELLOW}   请在客户端 (如 Clash / Mihomo) 中替换为新的订阅地址。${PLAIN}"
+                fi
                 read -r -p "按回车键返回..." dummy || true
                 set +e; source "$ENV_FILE"; set -e
                 ;;
@@ -2215,7 +2226,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
 
                 echo -e "\n${GREEN}✓ 节点名称前缀已更新为: ${new_prefix}${PLAIN}"
-                echo -e "${CYAN}订阅链接与 Token 保持不变，客户端点击「更新订阅」即可看到新节点名。${PLAIN}"
+                echo -e "提示: 订阅链接保持不变，客户端点击「更新订阅」即可同步新节点名。"
                 read -r -p "按回车键返回..." dummy || true
                 set +e; source "$ENV_FILE"; set -e
                 ;;

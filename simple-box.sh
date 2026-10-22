@@ -21,7 +21,6 @@ CONF_FILE="${CONF_DIR}/config.json"
 CERT_DIR="${CONF_DIR}/cert"
 WEB_DIR="${CONF_DIR}/web"
 ENV_FILE="${CONF_DIR}/env.conf"
-YAML_PROVIDER="${CONF_DIR}/clash_meta_provider.yaml"
 LINKS_FILE="${CONF_DIR}/links.txt"
 TEMPLATE_FILE="${CONF_DIR}/template.yaml"
 
@@ -988,8 +987,7 @@ ${ports_line}
     sni: ${domain_or_ip}
     skip-cert-verify: ${hy_skip_cert}
 EOF
-    mkdir -p "$CONF_DIR" 2>/dev/null || true
-    cp -f "$provider_file" "$YAML_PROVIDER"
+
 
     # 3. 组装原生分享链接
     local vless_link="vless://${user_uuid}@${server_ip}:${vl_port}?security=reality&encryption=none&pbk=${vl_pubkey}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${vl_sni}&sid=${vl_shortid}#${node_prefix}-VLESS-Reality"
@@ -1550,9 +1548,6 @@ EOF
     generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
     setup_caddy_subscription "$target_host" "$sub_token" "$sub_port" "$CERT_MODE"
 
-    show_subscription
-
-
     if [[ "${cert_fell_back:-}" == "true" ]]; then
         echo -e "${YELLOW}注意: 本次因域名证书申请失败已回退为 IP 自签证书，客户端已自动设为 skip-cert-verify。${PLAIN}"
     fi
@@ -1560,48 +1555,6 @@ EOF
     echo -e "\n${GREEN}===================================================================${PLAIN}"
     echo -e "${GREEN}🎉 Simple-Box 安装就绪！随时在终端输入 ${YELLOW}simbo${GREEN} 即可打开控制台。${PLAIN}"
     echo -e "${GREEN}===================================================================${PLAIN}\n"
-}
-
-# 输出订阅详情与节点 YAML
-show_subscription() {
-    if [[ ! -f "$ENV_FILE" ]]; then
-        echo -e "${RED}未找到已安装的环境配置！${PLAIN}"
-        return 1
-    fi
-    set +e
-    source "$ENV_FILE"
-    set -e
-    local port=${SUB_PORT:-8444}
-    # 与 write_env_config / 看板保持一致：缺 SUB_PROTO 时按自签 HTTP 处理
-    local proto=${SUB_PROTO:-http}
-    local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
-    local sub_url="${proto}://${host}:${port}/${SUB_TOKEN}/config.yaml"
-    local provider_url="${proto}://${host}:${port}/${SUB_TOKEN}/provider.yaml"
-
-    echo -e "\n${GREEN}====================== 节点在线订阅已生成 ======================${PLAIN}"
-    echo -e "1. ${YELLOW}完整配置订阅 (推荐 ClashX.Meta / Mihomo 直接导入托管)${PLAIN}:"
-    echo -e "   ${GREEN}${sub_url}${PLAIN}"
-    echo -e "   (内置 MIPS TUN、纯 IP DoH、ARC 缓存与 📌节点选择 分流规则)\n"
-    echo -e "2. ${YELLOW}纯节点 Provider 订阅 (供自建规则文件引用)${PLAIN}:"
-    echo -e "   ${GREEN}${provider_url}${PLAIN}"
-    echo -e "${GREEN}=================================================================${PLAIN}"
-
-    if [[ "$proto" == "http" ]]; then
-        echo -e "${YELLOW}⚠️  安全与隐私提示 (IP 模式):${PLAIN}"
-        echo -e "   • 分流规则已将 VPS IP 设为直连，确保节点更新/失效时订阅拉取绝不死锁。"
-        echo -e "   • ${RED}注意: 当前订阅通过 HTTP 明文传输，不受 TLS 保护${PLAIN}，请勿在公共 Wi-Fi / 不可信网络环境下更新。"
-        echo -e "   • 若需全链路隐私防嗅探保护，请在菜单 [3] 中配置自有域名启用 HTTPS 模式。"
-    else
-        echo -e "${GREEN}🛡️  隐私安全提示 (域名 HTTPS 模式):${PLAIN}"
-        echo -e "   • 分流规则已将订阅域名 (${host}) 设为直连，确保节点更新/失效时订阅拉取绝不死锁。"
-        echo -e "   • 订阅内容由权威 CA 证书 (TLS 1.3) 全程强加密传输，防链路嗅探，隐私受到完整保护。"
-    fi
-
-    if [[ -f "$YAML_PROVIDER" ]]; then
-        echo -e "\n${YELLOW}=== 本地节点 YAML 片段 (亦可手动复制) ===${PLAIN}"
-        cat "$YAML_PROVIDER"
-        echo -e "${YELLOW}==========================================${PLAIN}\n"
-    fi
 }
 
 # 展示单独节点链接与二维码

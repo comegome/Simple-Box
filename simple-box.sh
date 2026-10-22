@@ -241,6 +241,11 @@ install_deps() {
 # 支持范围内（Ubuntu 24.04+ / Debian 12+）的发行版仓库自带 caddy，无需第三方源。
 # 已有 caddy 则原样使用：不升级、不重启，避免打断用户自己托管在它上面的站点。
 install_caddy() {
+    # deb-systemd-helper 在 apt remove 时会 mask caddy.service，
+    # 而 unmask 只在 configure 阶段执行；包处于 rc 状态重装时不会触发，
+    # 服务将永久起不来。因此无论走哪条路径都先解除 mask。
+    [[ "$(systemctl is-enabled caddy 2>/dev/null)" == "masked" ]] && systemctl unmask caddy >/dev/null 2>&1
+
     if command -v caddy &>/dev/null; then
         systemctl enable caddy >/dev/null 2>&1 || true
         return 0
@@ -254,6 +259,9 @@ install_caddy() {
         echo -e "${YELLOW}请先执行 apt-get update 后重试，或手动安装: apt-get install -y caddy${PLAIN}"
         return 1
     fi
+
+    # 全新安装后也解除一次，避免 rc 残留状态导致 mask 未清
+    systemctl unmask caddy >/dev/null 2>&1 || true
 
     # 归属标记：只有本脚本装的包，卸载时才连软件包一起清理
     mkdir -p "$CONF_DIR" 2>/dev/null || true
@@ -611,6 +619,9 @@ reload_caddy_safe() {
         caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile 2>&1 | tail -5
         return 1
     fi
+
+    # 包被 apt remove 后 deb-systemd-helper 会留下 mask，此处兜底解除
+    [[ "$(systemctl is-enabled caddy 2>/dev/null)" == "masked" ]] && systemctl unmask caddy >/dev/null 2>&1
 
     # 2. 运行中优先热重载，避免反复 restart 触发 systemd start-limit-hit
     if systemctl is-active --quiet caddy; then
@@ -1585,7 +1596,10 @@ uninstall_all() {
 
     if [[ "$caddy_owned" == "true" ]]; then
         echo -e "${BLUE}正在卸载本脚本安装的 Caddy...${PLAIN}"
-        apt-get remove -y -qq caddy >/dev/null 2>&1 || true
+        # 必须 purge 而非 remove：caddy.postrm 的 remove 分支会 mask 服务且不解除，
+        # 留下 rc 残留状态，下次重装时 caddy.service 仍是 masked，永远起不来。
+        # purge 分支才会 unmask 并清掉 /etc/caddy 与 /var/lib/caddy。
+        apt-get purge -y -qq caddy >/dev/null 2>&1 || true
         apt-get autoremove -y -qq >/dev/null 2>&1 || true
         # apt remove 不删配置目录：只清理本脚本创建的站点文件，
         # 目录为空才 rmdir —— 用户后来自己加的站点配置必须保留。

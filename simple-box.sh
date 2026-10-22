@@ -2361,9 +2361,9 @@ menu() {
         echo -e " 2. VLESS-Reality 模块配置"
         echo -e " 3. Hysteria 2 模块配置"
         echo -e " 4. Clash 订阅地址配置"
-        echo -e " 5. 内核管理"
-        echo -e " 6. 脚本升级 / 重装"
-        echo -e " 7. 脚本卸载"
+        echo -e " 5. sing-box 内核管理"
+        echo -e " 6. Simple-Box 脚本升级"
+        echo -e " 7. Simple-Box 脚本卸载"
         echo -e " 0. 退出控制台"
         echo -e "${GRAY}====================================================${PLAIN}"
         

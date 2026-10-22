@@ -1540,10 +1540,19 @@ show_links() {
     local mport_param=""
     [[ -n "$hy_ports_display" && "$hy_ports_display" == *,* ]] && mport_param="&mport=${hy_ports_display}"
     local hy2_link="hy2://${HY_PASS}@${host}:${HY_PORT}/?sni=${host}&insecure=${insecure_flag}${mport_param}#${NODE_PREFIX}-Hysteria2"
-    printf '%s\n%s\n' "$vless_link" "$hy2_link" > "$LINKS_FILE"
 
-    local vless_url=$(head -n 1 "$LINKS_FILE")
-    local hy2_url=$(sed -n '2p' "$LINKS_FILE")
+    # 两处都要写：$LINKS_FILE 是本地工作副本，WEB_DIR/$SUB_TOKEN/links.txt 才是
+    # 订阅对外提供的文件（客户端可能拉它）。只写前者会导致面板显示新格式、
+    # 订阅端仍是旧格式，两边不一致。
+    printf '%s\n%s\n' "$vless_link" "$hy2_link" > "$LINKS_FILE"
+    local web_links="${WEB_DIR}/${SUB_TOKEN}/links.txt"
+    if [[ -d "${WEB_DIR}/${SUB_TOKEN}" ]]; then
+        printf '%s\n%s\n' "$vless_link" "$hy2_link" > "$web_links" 2>/dev/null || true
+        chmod 644 "$web_links" 2>/dev/null || true
+    fi
+
+    local vless_url="$vless_link"
+    local hy2_url="$hy2_link"
 
     echo -e "\n${GREEN}==================== vless / hy2 原生链接 ====================${PLAIN}"
     echo -e "${YELLOW}[1] vless 链接:${PLAIN}"

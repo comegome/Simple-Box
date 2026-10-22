@@ -361,63 +361,32 @@ install_caddy() {
 }
 
 # BBR 拥塞控制管理（开启与关闭）
-manage_bbr() {
-    while true; do
-        [ -t 1 ] && clear
-        local cur_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "unknown")
-        local cur_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null || echo "unknown")
-        local bbr_tag="${YELLOW}未开启 (${cur_bbr})${PLAIN}"
-        local action_desc="开启加速 (bbr + fq)"
-        local target_action="enable"
-        if [[ "$cur_bbr" == "bbr" ]]; then
-            bbr_tag="${GREEN}已开启 (bbr)${PLAIN}"
-            action_desc="恢复默认 (cubic + fq_codel)"
-            target_action="disable"
-        fi
-
-        echo -e "\n${GREEN}==================== BBR 加速配置 =====================${PLAIN}"
-        echo -e " 当前状态: ${bbr_tag} | 队列规则: ${CYAN}${cur_qdisc}${PLAIN}"
-        echo -e "${GREEN}-------------------------------------------------------${PLAIN}"
-        echo -e " 1. ${action_desc}"
-        echo -e " 0. 返回主菜单"
-        echo -e "${GREEN}=======================================================${PLAIN}"
-        local opt=""
-        read -r -p "请输入选项 [0-1]: " opt || opt=""
-        case "$opt" in
-            1)
-                if [[ "$target_action" == "enable" ]]; then
-                    mkdir -p /etc/sysctl.d
-                    cat > /etc/sysctl.d/99-bbr.conf <<EOF
+# 开启 BBR（安装时调用，无交互）
+enable_bbr() {
+    mkdir -p /etc/sysctl.d
+    cat > /etc/sysctl.d/99-bbr.conf <<EOF
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
-                    sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
-                    local check_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
-                    local check_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
-                    echo -e "\n${BLUE}正在验证内核参数...${PLAIN}"
-                    sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc
-                    if [[ "$check_bbr" == "bbr" ]]; then
-                        echo -e "\n${GREEN}✓ 验证成功: TCP BBR 与 fq 队列调度已在内核立即生效！${PLAIN}"
-                    else
-                        echo -e "\n${YELLOW}! 配置已写入，但内核当前返回: ${check_bbr}，若未生效请检查内核并重启系统。${PLAIN}"
-                    fi
-                else
-                    rm -f /etc/sysctl.d/99-bbr.conf
-                    sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
-                    sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || true
-                    local check_bbr=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
-                    local check_qdisc=$(sysctl -n net.core.default_qdisc 2>/dev/null)
-                    echo -e "\n${BLUE}正在验证内核参数...${PLAIN}"
-                    sysctl net.ipv4.tcp_congestion_control net.core.default_qdisc
-                    echo -e "\n${GREEN}✓ 验证成功: 已关闭 BBR，当前内核已恢复为默认 (${check_bbr} + ${check_qdisc})！${PLAIN}"
-                fi
-                echo ""
-                read -r -p "按回车键继续..." dummy || true
-                ;;
-            0) break ;;
-            *) echo -e "${RED}无效选项${PLAIN}"; sleep 1 ;;
-        esac
-    done
+    sysctl -p /etc/sysctl.d/99-bbr.conf >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
+    local cur
+    cur=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null)
+    if [[ "$cur" == "bbr" ]]; then
+        echo -e "${GREEN}✓ TCP BBR 已开启${PLAIN}"
+    else
+        echo -e "${YELLOW}BBR 配置已写入，但内核当前返回 ${cur}，可能需要重启系统。${PLAIN}"
+    fi
+}
+
+# 恢复系统默认（卸载时调用）
+# 只删本脚本创建的 99-bbr.conf，不动用户自己的 sysctl 配置
+disable_bbr() {
+    if [[ -f /etc/sysctl.d/99-bbr.conf ]]; then
+        rm -f /etc/sysctl.d/99-bbr.conf
+        sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
+        sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || true
+        echo -e "${BLUE}已恢复系统默认拥塞控制算法${PLAIN}"
+    fi
 }
 
 # 获取并升级官方 sing-box 内核（带精准版本校验）
@@ -528,6 +497,7 @@ issue_cert_bundle() {
             echo -e "${GREEN}本地已有覆盖 ${domain} 的有效证书，直接复用（无需重新申请）。${PLAIN}"
             chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
             chmod 644 "${CERT_DIR}"/* 2>/dev/null || true
+            chmod 600 "${CERT_DIR}/private.key" 2>/dev/null || true
             CERT_MODE="domain"
             echo -e "${GREEN}TLS 证书已就绪: ${CERT_DIR} (模式: ${CERT_MODE})${PLAIN}"
             return 0
@@ -600,6 +570,7 @@ issue_cert_bundle() {
 
     chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
     chmod 644 "${CERT_DIR}"/* 2>/dev/null || true
+    chmod 600 "${CERT_DIR}/private.key" 2>/dev/null || true
 
     if [[ ! -s "${CERT_DIR}/fullchain.cer" || ! -s "${CERT_DIR}/private.key" ]]; then
         echo -e "${RED}致命错误: 证书文件未能生成，请检查 openssl 是否可用。${PLAIN}"
@@ -642,6 +613,7 @@ issue_self_signed_cert() {
     mv -f "$tmp_crt" "${CERT_DIR}/fullchain.cer"
     chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
     chmod 644 "${CERT_DIR}"/* 2>/dev/null || true
+    chmod 600 "${CERT_DIR}/private.key" 2>/dev/null || true
     echo -e "${GREEN}IP 自签证书已就绪 (10 年有效期，公私钥已配对校验)。${PLAIN}"
     return 0
 }
@@ -1166,7 +1138,8 @@ write_env_config() {
         return 1
     fi
 
-    cat > "$ENV_FILE" <<EOF
+    # 600：env.conf 含 Reality 私钥、Hy2 密码、订阅 Token，不能给其它本地用户读
+    ( umask 077; cat > "$ENV_FILE" <<EOF
 NODE_PREFIX="${node_prefix}"
 SERVER_IP="${server_ip}"
 VL_PORT="${vl_port}"
@@ -1186,6 +1159,8 @@ SUB_PROTO="${sub_proto}"
 SUB_TOKEN="${sub_token}"
 CERT_MODE="${CERT_MODE:-selfsigned}"
 EOF
+    )
+    chmod 600 "$ENV_FILE" 2>/dev/null || true
 }
 
 # 校验 sing-box 配置、重启并全量刷新客户端文件与 Caddy 订阅
@@ -1195,22 +1170,15 @@ render_and_reload() {
         return 1
     fi
 
-    # 写配置前先备份当前可用版本，校验失败时真正回滚（原来只提示不动作）
-    local backup="${CONF_FILE}.bak"
-    [[ -f "$CONF_FILE" ]] && cp -f "$CONF_FILE" "$backup" 2>/dev/null || true
-
+    # 不做配置回滚：调用方已经用 write_singbox_config 把新配置 mv 到正式位置，
+    # 此处再备份只会备份到「刚写入的新配置」，回滚等于把坏配置复制回自己。
+    # 与其保留一个假的保护，不如直接失败并要求重装（重装会用同一份输入重建）。
     if ! /usr/local/bin/sing-box check -c "$CONF_FILE" >/dev/null 2>&1; then
-        echo -e "${RED}生成的 sing-box 配置校验失败！正在回滚到上一份可用配置...${PLAIN}"
+        echo -e "${RED}sing-box 配置校验失败，服务未启动。${PLAIN}"
         /usr/local/bin/sing-box check -c "$CONF_FILE" 2>&1 | tail -3 || true
-        if [[ -s "$backup" ]]; then
-            cp -f "$backup" "$CONF_FILE"
-            echo -e "${GREEN}已回滚，原配置保持不变。${PLAIN}"
-        else
-            echo -e "${YELLOW}无备份可回滚（首次安装），请检查上方报错。${PLAIN}"
-        fi
+        echo -e "${YELLOW}请重新运行本脚本并选择「脚本升级 / 重装」重建配置。${PLAIN}"
         return 1
     fi
-    rm -f "$backup" 2>/dev/null || true
 
     if systemctl is-active --quiet sing-box 2>/dev/null; then
         systemctl restart sing-box 2>/dev/null || { echo -e "${RED}sing-box 重启失败，请查看: journalctl -u sing-box -n 30${PLAIN}"; return 1; }
@@ -1481,6 +1449,7 @@ install_node() {
 
     write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "$hy_port" "$hy_password"
     write_env_config
+    enable_bbr
 
     # 配置 systemd 服务
     cat > /etc/systemd/system/sing-box.service <<EOF
@@ -1749,8 +1718,7 @@ uninstall_all() {
     echo -e "${GREEN}sing-box 与订阅配置已彻底干净卸载！${PLAIN}"
     echo -e "${YELLOW}本脚本自身的入口 (simbo) 也已删除，控制台即将退出。${PLAIN}"
     echo -e "${YELLOW}如需重装，请重新执行一键安装命令。${PLAIN}"
-    echo -e "${CYAN}注: TCP BBR 是内核级 sysctl 设置（/etc/sysctl.d/99-bbr.conf），不属于本脚本，卸载不会还原。${PLAIN}"
-    echo -e "${CYAN}    如需恢复系统默认，请在卸载前先用「BBR 加速配置」关闭，或手动删除该文件。${PLAIN}"
+    disable_bbr
     # 卸载后目录与入口都已不存在，继续停留在菜单毫无意义（面板还会读到已删除的配置）
     UNINSTALL_DONE=true
 }
@@ -2305,24 +2273,22 @@ menu() {
         echo -e " 2. VLESS-Reality 模块配置"
         echo -e " 3. Hysteria 2 模块配置"
         echo -e " 4. Clash 订阅地址配置"
-        echo -e " 5. BBR 加速配置"
-        echo -e " 6. 内核管理"
-        echo -e " 7. 脚本升级 / 重装"
-        echo -e " 8. 脚本卸载"
+        echo -e " 5. 内核管理"
+        echo -e " 6. 脚本升级 / 重装"
+        echo -e " 7. 脚本卸载"
         echo -e " 0. 退出控制台"
         echo -e "${GREEN}====================================================${PLAIN}"
         
         local opt=""
-        read -r -p "请输入选项 [0-8]: " opt || opt="0"
+        read -r -p "请输入选项 [0-7]: " opt || opt="0"
         case "$opt" in
             1) show_links || true ;;
             2) menu_reality_module || true ;;
             3) menu_hy2_module || true ;;
             4) menu_sub_module || true ;;
-            5) manage_bbr || true ;;
-            6) menu_singbox_manage || true ;;
-            7) reinstall_with_latest || true ;;
-            8)
+            5) menu_singbox_manage || true ;;
+            6) reinstall_with_latest || true ;;
+            7)
                 uninstall_all || true
                 # 卸载已彻底完成：脚本与配置目录均被删除，直接退出
                 if [[ "${UNINSTALL_DONE:-false}" == "true" ]]; then

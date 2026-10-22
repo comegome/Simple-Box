@@ -1796,8 +1796,8 @@ menu_reality_module() {
         [ -t 1 ] && clear
         echo -e "
 ${GRAY}================= VLESS-Reality 模块配置 =================${PLAIN}"
-        echo -e " ${CYAN}1.${PLAIN} 重置并更新 VLESS-Reality 参数"
-        echo -e " ${CYAN}0.${PLAIN} 返回主菜单"
+        echo -e " 1. 重置并更新 VLESS-Reality 参数"
+        echo -e " 0. 返回主菜单"
         echo -e "${GRAY}==========================================================${PLAIN}"
         local opt=""
         read -r -p "请输入选项 [0-1]: " opt || opt=""
@@ -1887,8 +1887,8 @@ menu_hy2_module() {
         [ -t 1 ] && clear
         echo -e "
 ${GRAY}=================== Hysteria 2 模块配置 ===================${PLAIN}"
-        echo -e " ${CYAN}1.${PLAIN} 重置并更新 Hysteria 2 参数"
-        echo -e " ${CYAN}0.${PLAIN} 返回主菜单"
+        echo -e " 1. 重置并更新 Hysteria 2 参数"
+        echo -e " 0. 返回主菜单"
         echo -e "${GRAY}==========================================================${PLAIN}"
         local opt=""
         read -r -p "请输入选项 [0-1]: " opt || opt=""
@@ -2085,9 +2085,9 @@ menu_sub_module() {
         [ -t 1 ] && clear
         echo -e "
 ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
-        echo -e " ${CYAN}1.${PLAIN} 重置并更新 Clash 订阅地址参数"
-        echo -e " ${CYAN}2.${PLAIN} 重置并更新节点名称前缀"
-        echo -e " ${CYAN}0.${PLAIN} 返回主菜单"
+        echo -e " 1. 重置并更新 Clash 订阅地址参数"
+        echo -e " 2. 重置并更新节点名称前缀"
+        echo -e " 0. 返回主菜单"
         echo -e "${GRAY}======================================================${PLAIN}"
         local opt=""
         read -r -p "请输入选项 [0-2]: " opt || opt=""
@@ -2223,10 +2223,10 @@ menu_singbox_manage() {
     while true; do
         [ -t 1 ] && clear
         echo -e "\n${GRAY}====================== 内核管理 ======================${PLAIN}"
-        echo -e " ${CYAN}1.${PLAIN} 重启 / 启动 sing-box 服务"
-        echo -e " ${CYAN}2.${PLAIN} 检查并更新 sing-box 内核"
-        echo -e " ${CYAN}3.${PLAIN} 查看实时运行日志"
-        echo -e " ${CYAN}0.${PLAIN} 返回主菜单"
+        echo -e " 1. 重启 / 启动 sing-box 服务"
+        echo -e " 2. 检查并更新 sing-box 内核"
+        echo -e " 3. 查看实时运行日志"
+        echo -e " 0. 返回主菜单"
         echo -e "${GRAY}==========================================================${PLAIN}"
         local opt=""
         read -r -p "请输入选项 [0-3]: " opt || opt=""
@@ -2333,8 +2333,8 @@ menu() {
             local hy_sni="${HY_DOMAIN:-$SERVER_IP}"
             local hy_ports="${HY_RANGE:-无}"
             echo -e "${GRAY}----------------------------------------------------${PLAIN}"
-            echo -e " VLESS-Reality | ${CYAN}TCP: ${VL_PORT:-443}${PLAIN}  | ServerName: ${VL_SNI:-gateway.icloud.com}"
-            echo -e " Hysteria 2    | ${CYAN}UDP: ${HY_PORT:-8443}${PLAIN} | SNI: ${hy_sni} | Ports: ${hy_ports}"
+            echo -e " VLESS-Reality | TCP: ${CYAN}${VL_PORT:-443}${PLAIN}  | ServerName: ${CYAN}${VL_SNI:-gateway.icloud.com}${PLAIN}"
+            echo -e " Hysteria 2    | UDP: ${CYAN}${HY_PORT:-8443}${PLAIN} | SNI: ${CYAN}${hy_sni}${PLAIN} | Ports: ${CYAN}${hy_ports}${PLAIN}"
             
             local proto=${SUB_PROTO:-http}
             local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
@@ -2343,21 +2343,21 @@ menu() {
             echo -e " Clash 订阅配置: ${CYAN}${proto}://${host}:${port}/${SUB_TOKEN}/config.yaml${PLAIN}"
             echo -e " Clash 节点列表: ${CYAN}${proto}://${host}:${port}/${SUB_TOKEN}/provider.yaml${PLAIN}"
             if [[ "$proto" == "http" ]]; then
-                echo -e " ${YELLOW}⚠️  (无域名证书加密，建议在可信网络下更新)${PLAIN}"
+                echo -e " ${YELLOW}✗ (无域名证书加密，建议在可信网络下更新)${PLAIN}"
             else
                 echo -e " ${GREEN}✓ (TLS 1.3 强加密保护，直连防死锁)${PLAIN}"
             fi
         fi
 
         echo -e "${GRAY}----------------------------------------------------${PLAIN}"
-        echo -e " ${CYAN}1.${PLAIN} vless / hy2 原生链接查看"
-        echo -e " ${CYAN}2.${PLAIN} VLESS-Reality 模块配置"
-        echo -e " ${CYAN}3.${PLAIN} Hysteria 2 模块配置"
-        echo -e " ${CYAN}4.${PLAIN} Clash 订阅地址配置"
-        echo -e " ${CYAN}5.${PLAIN} 内核管理"
-        echo -e " ${CYAN}6.${PLAIN} 脚本升级 / 重装"
-        echo -e " ${CYAN}7.${PLAIN} 脚本卸载"
-        echo -e " ${CYAN}0.${PLAIN} 退出控制台"
+        echo -e " 1. vless / hy2 原生链接查看"
+        echo -e " 2. VLESS-Reality 模块配置"
+        echo -e " 3. Hysteria 2 模块配置"
+        echo -e " 4. Clash 订阅地址配置"
+        echo -e " 5. 内核管理"
+        echo -e " 6. 脚本升级 / 重装"
+        echo -e " 7. 脚本卸载"
+        echo -e " 0. 退出控制台"
         echo -e "${GRAY}====================================================${PLAIN}"
         
         local opt=""

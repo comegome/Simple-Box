@@ -176,6 +176,18 @@ verify_cloudflare_token() {
     fi
 }
 
+# 收紧私钥权限
+# 私钥不能 644（任何本地用户可读），也不能 600 root:root
+# —— caddy 以 caddy 用户运行，要读它来做 TLS，600 root:root 会让 caddy
+# 启动/reload 直接失败（permission denied）。
+# 正确做法：属主 root、属组 caddy、640。sing-box 以 root 运行，不受影响。
+harden_private_key() {
+    local key="${CERT_DIR}/private.key"
+    [[ -f "$key" ]] || return 0
+    chown root:caddy "$key" 2>/dev/null || true
+    chmod 640 "$key" 2>/dev/null || true
+}
+
 # 引导用户输入 Cloudflare API Token
 # 成功时设置全局 PROMPTED_CF_TOKEN 并返回 0；用户放弃或输入为空时返回 1（调用方回退 IP 自签）
 # 注意：不能用 $(prompt_cf_token) 取返回值，函数内的指引文字会一起被捕获，
@@ -523,7 +535,7 @@ issue_cert_bundle() {
             echo -e "${GREEN}本地已有覆盖 ${domain} 的有效证书，直接复用（无需重新申请）。${PLAIN}"
             chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
             chmod 644 "${CERT_DIR}"/* 2>/dev/null || true
-            chmod 600 "${CERT_DIR}/private.key" 2>/dev/null || true
+            harden_private_key
             CERT_MODE="domain"
             echo -e "${GREEN}TLS 证书已就绪: ${CERT_DIR} (模式: ${CERT_MODE})${PLAIN}"
             return 0
@@ -596,7 +608,7 @@ issue_cert_bundle() {
 
     chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
     chmod 644 "${CERT_DIR}"/* 2>/dev/null || true
-    chmod 600 "${CERT_DIR}/private.key" 2>/dev/null || true
+    harden_private_key
 
     if [[ ! -s "${CERT_DIR}/fullchain.cer" || ! -s "${CERT_DIR}/private.key" ]]; then
         echo -e "${RED}致命错误: 证书文件未能生成，请检查 openssl 是否可用。${PLAIN}"
@@ -639,7 +651,7 @@ issue_self_signed_cert() {
     mv -f "$tmp_crt" "${CERT_DIR}/fullchain.cer"
     chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
     chmod 644 "${CERT_DIR}"/* 2>/dev/null || true
-    chmod 600 "${CERT_DIR}/private.key" 2>/dev/null || true
+    harden_private_key
     echo -e "${GREEN}IP 自签证书已就绪 (10 年有效期，公私钥已配对校验)。${PLAIN}"
     return 0
 }
@@ -1474,7 +1486,10 @@ install_node() {
     [[ "$CERT_MODE" == "domain" ]] && sub_proto="https"
 
     write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "$hy_port" "$hy_password"
-    write_env_config
+    if ! write_env_config; then
+        echo -e "${RED}环境配置写入失败，安装中止。${PLAIN}"
+        return 1
+    fi
     enable_bbr
 
     # 配置 systemd 服务
@@ -1822,7 +1837,11 @@ ${GREEN}================= VLESS-Reality 模块配置 =================${PLAIN}"
                 local CERT_MODE="${CERT_MODE:-selfsigned}"
 
                 write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "$hy_port" "$hy_password"
-                write_env_config
+                if ! write_env_config; then
+                    echo -e "${RED}环境配置写入失败，操作已中止。${PLAIN}"
+                    read -r -p "按回车键返回..." dummy || true
+                    continue
+                fi
                 if ! render_and_reload; then
                     echo -e "${RED}Reality 模块更新失败，请检查上面的错误信息。${PLAIN}"
                     read -r -p "按回车键返回..." dummy || true
@@ -2007,7 +2026,11 @@ ${GREEN}=================== Hysteria 2 模块配置 ===================${PLAIN}"
                 fi
 
                 write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "$hy_port" "$hy_password"
-                write_env_config
+                if ! write_env_config; then
+                    echo -e "${RED}环境配置写入失败，操作已中止。${PLAIN}"
+                    read -r -p "按回车键返回..." dummy || true
+                    continue
+                fi
                 if ! render_and_reload; then
                     echo -e "${RED}Hysteria 2 模块更新失败，请检查上面的错误信息。${PLAIN}"
                     # 证书阶段可能已停服务，失败路径必须把服务拉回来
@@ -2097,7 +2120,11 @@ ${GREEN}================= Clash 订阅地址配置 =================${PLAIN}"
                 local sub_proto="http"
                 [[ "$CERT_MODE" == "domain" ]] && sub_proto="https"
                 local sub_token="$new_token"
-                write_env_config
+                if ! write_env_config; then
+                    echo -e "${RED}订阅参数写入失败，配置未变更。${PLAIN}"
+                    read -r -p "按回车键返回..." dummy || true
+                    continue
+                fi
 
                 local hy_ports_display="$hy_port"
                 [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"
@@ -2135,6 +2162,7 @@ ${GREEN}================= Clash 订阅地址配置 =================${PLAIN}"
                 local user_uuid="$VL_UUID"
                 local vl_pubkey="$VL_PUBKEY"
                 local vl_shortid="$VL_SHORTID"
+                local vl_privkey="${VL_PRIVKEY:-}"
                 local hy_domain="${HY_DOMAIN:-}"
                 local target_host="${TARGET_HOST:-$server_ip}"
                 local hy_port="${HY_PORT:-8443}"
@@ -2147,7 +2175,11 @@ ${GREEN}================= Clash 订阅地址配置 =================${PLAIN}"
                 local sub_proto="http"
                 [[ "$CERT_MODE" == "domain" ]] && sub_proto="https"
 
-                write_env_config
+                if ! write_env_config; then
+                    echo -e "${RED}节点前缀写入失败，配置未变更。${PLAIN}"
+                    read -r -p "按回车键返回..." dummy || true
+                    continue
+                fi
 
                 local hy_ports_display="$hy_port"
                 [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"

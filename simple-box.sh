@@ -2102,9 +2102,9 @@ menu() {
             echo -e " Clash 订阅配置: ${CYAN}${proto}://${host}:${port}/${SUB_TOKEN}/config.yaml${PLAIN}"
             echo -e " Clash 节点列表: ${CYAN}${proto}://${host}:${port}/${SUB_TOKEN}/provider.yaml${PLAIN}"
             if [[ "$proto" == "http" ]]; then
-                echo -e "  ${YELLOW}(无域名证书加密，建议在可信网络下更新)${PLAIN}"
+                echo -e " ${YELLOW}(无域名证书加密，建议在可信网络下更新)${PLAIN}"
             else
-                echo -e "  ${GREEN}(TLS 1.3 强加密保护，直连防死锁)${PLAIN}"
+                echo -e " ${GREEN}(TLS 1.3 强加密保护，直连防死锁)${PLAIN}"
             fi
         fi
 

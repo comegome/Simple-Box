@@ -1522,29 +1522,25 @@ show_subscription() {
 
 # 展示单独节点链接与二维码
 show_links() {
-    # 若 links.txt 比 env.conf 旧，说明配置已变更，需重新生成，避免展示陈旧链接
-    if [[ -f "$LINKS_FILE" && -f "$ENV_FILE" && "$ENV_FILE" -nt "$LINKS_FILE" ]]; then
-        rm -f "$LINKS_FILE"
+    # 每次都按 env.conf 现算一遍，不缓存：
+    # 曾经按 mtime 判断是否陈旧，但升级脚本后 links.txt 仍是旧格式（如 hysteria2://），
+    # 而它的 mtime 比 env.conf 新，于是永远不重算，用户看到的还是旧链接。
+    # 这里无网络开销、纯本地拼字符串，直接重算最稳。
+    if [[ ! -f "$ENV_FILE" ]]; then
+        echo -e "${RED}未找到节点环境配置，请先执行安装！${PLAIN}"
+        return 1
     fi
-    if [[ ! -f "$LINKS_FILE" ]]; then
-        if [[ -f "$ENV_FILE" ]]; then
-            set +e; source "$ENV_FILE"; set -e
-            local hy_ports_display="${HY_PORT}"
-            [[ -n "${HY_RANGE:-}" ]] && hy_ports_display="${HY_PORT},${HY_RANGE/:/-}"
-            local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
-            local vless_link="vless://${VL_UUID}@${SERVER_IP}:${VL_PORT}?security=reality&encryption=none&pbk=${VL_PUBKEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${VL_SNI}&sid=${VL_SHORTID}#${NODE_PREFIX}-VLESS-Reality"
-            echo "$vless_link" > "$LINKS_FILE"
-            local insecure_flag="0"
-            [[ "${HY_SKIP_CERT:-false}" == "true" ]] && insecure_flag="1"
-            local mport_param=""
-            [[ -n "$hy_ports_display" && "$hy_ports_display" == *,* ]] && mport_param="&mport=${hy_ports_display}"
-            local hy2_link="hy2://${HY_PASS}@${host}:${HY_PORT}/?sni=${host}&insecure=${insecure_flag}${mport_param}#${NODE_PREFIX}-Hysteria2"
-            echo "$hy2_link" >> "$LINKS_FILE"
-        else
-            echo -e "${RED}未找到节点环境配置，请先执行安装！${PLAIN}"
-            return 1
-        fi
-    fi
+    set +e; source "$ENV_FILE"; set -e
+    local hy_ports_display="${HY_PORT}"
+    [[ -n "${HY_RANGE:-}" ]] && hy_ports_display="${HY_PORT},${HY_RANGE/:/-}"
+    local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
+    local vless_link="vless://${VL_UUID}@${SERVER_IP}:${VL_PORT}?security=reality&encryption=none&pbk=${VL_PUBKEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${VL_SNI}&sid=${VL_SHORTID}#${NODE_PREFIX}-VLESS-Reality"
+    local insecure_flag="0"
+    [[ "${HY_SKIP_CERT:-false}" == "true" ]] && insecure_flag="1"
+    local mport_param=""
+    [[ -n "$hy_ports_display" && "$hy_ports_display" == *,* ]] && mport_param="&mport=${hy_ports_display}"
+    local hy2_link="hy2://${HY_PASS}@${host}:${HY_PORT}/?sni=${host}&insecure=${insecure_flag}${mport_param}#${NODE_PREFIX}-Hysteria2"
+    printf '%s\n%s\n' "$vless_link" "$hy2_link" > "$LINKS_FILE"
 
     local vless_url=$(head -n 1 "$LINKS_FILE")
     local hy2_url=$(sed -n '2p' "$LINKS_FILE")

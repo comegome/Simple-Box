@@ -746,11 +746,10 @@ generate_full_client_config() {
     local vl_sni="${7:-}"
     local vl_pubkey="${8:-}"
     local vl_shortid="${9:-}"
-    local hy_enabled="${10}"
-    local hy_port="${11}"
-    local hy_ports_display="${12}"
-    local hy_password="${13}"
-    local hy_skip_cert="${14}"
+    local hy_port="${10}"
+    local hy_ports_display="${11}"
+    local hy_password="${12}"
+    local hy_skip_cert="${13}"
 
     mkdir -p "${WEB_DIR}/${token}"
 
@@ -771,15 +770,26 @@ generate_full_client_config() {
     if [ -f "$TEMPLATE_FILE" ]; then
         cat "$TEMPLATE_FILE" > "$full_config_file"
     else
-        echo "mixed-port: 7890" > "$full_config_file"
-        echo "mode: rule" >> "$full_config_file"
+        # 模板缺失时的兜底必须自带 rules: 段，否则下面的防死锁规则无处可插
+        {
+            echo "mixed-port: 7890"
+            echo "mode: rule"
+            echo "rules:"
+        } > "$full_config_file"
     fi
 
     # 分流规则防死锁：域名模式精准直连该域名；IP 模式直连 VPS 本机 IP
+    # 模板可能没有 rules: 段（兜底模板、或用户自定义模板），此时直接追加，避免静默丢失
+    local direct_rule
     if [[ "$domain_or_ip" == "$server_ip" || -z "$domain_or_ip" ]]; then
-        sed -i "/^rules:/a \  - IP-CIDR,${server_ip}/32,DIRECT,no-resolve" "$full_config_file"
+        direct_rule="  - IP-CIDR,${server_ip}/32,DIRECT,no-resolve"
     else
-        sed -i "/^rules:/a \  - DOMAIN,${domain_or_ip},DIRECT" "$full_config_file"
+        direct_rule="  - DOMAIN,${domain_or_ip},DIRECT"
+    fi
+    if grep -q '^rules:' "$full_config_file"; then
+        sed -i "/^rules:/a ${direct_rule}" "$full_config_file"
+    else
+        printf 'rules:\n%s\n' "$direct_rule" >> "$full_config_file"
     fi
 
     local ports_line=""
@@ -805,8 +815,7 @@ proxies:
     client-fingerprint: chrome
 EOF
 
-    if [ "$hy_enabled" = true ]; then
-        cat >> "$full_config_file" <<EOF
+    cat >> "$full_config_file" <<EOF
   - name: "${node_prefix}-Hysteria2"
     type: hysteria2
     server: ${domain_or_ip}
@@ -816,7 +825,6 @@ ${ports_line}
     sni: ${domain_or_ip}
     skip-cert-verify: ${hy_skip_cert}
 EOF
-    fi
 
     cat >> "$full_config_file" <<EOF
 
@@ -827,11 +835,7 @@ proxy-groups:
       - "${node_prefix}-VLESS-Reality"
 EOF
 
-    if [ "$hy_enabled" = true ]; then
-        cat >> "$full_config_file" <<EOF
-      - "${node_prefix}-Hysteria2"
-EOF
-    fi
+    printf '      - "%s-Hysteria2"\n' "$node_prefix" >> "$full_config_file"
     printf '      - "DIRECT"\n' >> "$full_config_file"
 
     # 2. 组装纯 Provider 片段
@@ -854,8 +858,7 @@ proxies:
     client-fingerprint: chrome
 EOF
 
-    if [ "$hy_enabled" = true ]; then
-        cat >> "$provider_file" <<EOF
+    cat >> "$provider_file" <<EOF
   - name: "${node_prefix}-Hysteria2"
     type: hysteria2
     server: ${domain_or_ip}
@@ -865,7 +868,6 @@ ${ports_line}
     sni: ${domain_or_ip}
     skip-cert-verify: ${hy_skip_cert}
 EOF
-    fi
     cp -f "$provider_file" "$YAML_PROVIDER"
 
     # 3. 组装原生分享链接
@@ -873,14 +875,12 @@ EOF
     local links_out="${WEB_DIR}/${token}/links.txt"
     echo "$vless_link" > "$links_out"
 
-    if [ "$hy_enabled" = true ]; then
-        local insecure_flag="0"
-        [[ "$hy_skip_cert" == "true" ]] && insecure_flag="1"
-        local mport_param=""
-        [[ -n "$hy_ports_display" && "$hy_ports_display" == *,* ]] && mport_param="&mport=${hy_ports_display}"
-        local hy2_link="hysteria2://${hy_password}@${domain_or_ip}:${hy_port}/?sni=${domain_or_ip}&insecure=${insecure_flag}${mport_param}#${node_prefix}-Hysteria2"
-        echo "$hy2_link" >> "$links_out"
-    fi
+    local insecure_flag="0"
+    [[ "$hy_skip_cert" == "true" ]] && insecure_flag="1"
+    local mport_param=""
+    [[ -n "$hy_ports_display" && "$hy_ports_display" == *,* ]] && mport_param="&mport=${hy_ports_display}"
+    local hy2_link="hysteria2://${hy_password}@${domain_or_ip}:${hy_port}/?sni=${domain_or_ip}&insecure=${insecure_flag}${mport_param}#${node_prefix}-Hysteria2"
+    echo "$hy2_link" >> "$links_out"
     cp -f "$links_out" "$LINKS_FILE"
 }
 
@@ -919,9 +919,8 @@ write_singbox_config() {
     local user_uuid="${3:-}"
     local vl_privkey="${4:-}"
     local vl_shortid="${5:-}"
-    local hy_enabled="${6:-}"
-    local hy_port="${7:-}"
-    local hy_password="${8:-}"
+    local hy_port="${6:-}"
+    local hy_password="${7:-}"
 
     # 先写临时文件再原子替换，避免 sing-box 文件监视器读到半截 JSON
     local tmp_conf="${CONF_FILE}.tmp.$$"
@@ -962,8 +961,7 @@ write_singbox_config() {
     }
 EOF
 
-    if [ "$hy_enabled" = true ]; then
-        cat >> "$tmp_conf" <<EOF
+    cat >> "$tmp_conf" <<EOF
     ,
     {
       "type": "hysteria2",
@@ -982,7 +980,6 @@ EOF
       }
     }
 EOF
-    fi
 
     cat >> "$tmp_conf" <<EOF
   ],
@@ -1009,7 +1006,6 @@ VL_UUID="${user_uuid}"
 VL_PRIVKEY="${vl_privkey}"
 VL_PUBKEY="${vl_pubkey}"
 VL_SHORTID="${vl_shortid}"
-HY_ENABLED="${hy_enabled}"
 HY_DOMAIN="${hy_domain}"
 TARGET_HOST="${target_host}"
 HY_PORT="${hy_port}"
@@ -1060,7 +1056,7 @@ render_and_reload() {
 
     local hy_ports_display="$hy_port"
     [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"
-    generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "true" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
+    generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
 
     setup_caddy_subscription "$target_host" "$sub_token" "$sub_port" "$CERT_MODE"
     reload_caddy_safe || true
@@ -1143,7 +1139,6 @@ install_node() {
     done
 
     echo -e "\n${YELLOW}=== 2. 配置 Hysteria 2 参数 ===${PLAIN}"
-    local hy_enabled=true
     local hy_skip_cert="false"
     local cert_fell_back=""
 
@@ -1298,7 +1293,7 @@ echo -e "${CYAN}----------------------------------------------------------------
     done
 
     local node_prefix
-    read -r -p "请输入节点名称前缀 (如 HK / US / Oracle-O2) [默认 ${old_prefix:-Node}]: " node_prefix || node_prefix=""
+    read -r -p "请输入节点名称前缀 (如 HK / US / JP) [默认 ${old_prefix:-Node}]: " node_prefix || node_prefix=""
     node_prefix=$(trim_string "${node_prefix:-${old_prefix:-Node}}")
     # 去掉会破坏 YAML/URI 的字符（引号、逗号、井号、冒号、反斜杠）
     node_prefix=$(printf '%s' "$node_prefix" | tr -d '\"'"'"',#:\\')
@@ -1361,7 +1356,7 @@ echo -e "${CYAN}----------------------------------------------------------------
     local sub_proto="http"
     [[ "$CERT_MODE" == "domain" ]] && sub_proto="https"
 
-    write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "true" "$hy_port" "$hy_password"
+    write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "$hy_port" "$hy_password"
     write_env_config
 
     # 配置 systemd 服务
@@ -1403,7 +1398,7 @@ EOF
     # 部署 Caddy 订阅并组装完整客户端配置
     local hy_ports_display="$hy_port"
     [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"
-    generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "true" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
+    generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
     setup_caddy_subscription "$target_host" "$sub_token" "$sub_port" "$CERT_MODE"
 
     show_subscription
@@ -1428,7 +1423,8 @@ show_subscription() {
     source "$ENV_FILE"
     set -e
     local port=${SUB_PORT:-8444}
-    local proto=${SUB_PROTO:-https}
+    # 与 write_env_config / 看板保持一致：缺 SUB_PROTO 时按自签 HTTP 处理
+    local proto=${SUB_PROTO:-http}
     local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
     local sub_url="${proto}://${host}:${port}/${SUB_TOKEN}/config.yaml"
     local provider_url="${proto}://${host}:${port}/${SUB_TOKEN}/provider.yaml"
@@ -1473,14 +1469,12 @@ show_links() {
             local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
             local vless_link="vless://${VL_UUID}@${SERVER_IP}:${VL_PORT}?security=reality&encryption=none&pbk=${VL_PUBKEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${VL_SNI}&sid=${VL_SHORTID}#${NODE_PREFIX}-VLESS-Reality"
             echo "$vless_link" > "$LINKS_FILE"
-            if [ "${HY_ENABLED:-true}" = true ]; then
-                local insecure_flag="0"
-                [[ "${HY_SKIP_CERT:-false}" == "true" ]] && insecure_flag="1"
-                local mport_param=""
-                [[ -n "$hy_ports_display" && "$hy_ports_display" == *,* ]] && mport_param="&mport=${hy_ports_display}"
-                local hy2_link="hysteria2://${HY_PASS}@${host}:${HY_PORT}/?sni=${host}&insecure=${insecure_flag}${mport_param}#${NODE_PREFIX}-Hysteria2"
-                echo "$hy2_link" >> "$LINKS_FILE"
-            fi
+            local insecure_flag="0"
+            [[ "${HY_SKIP_CERT:-false}" == "true" ]] && insecure_flag="1"
+            local mport_param=""
+            [[ -n "$hy_ports_display" && "$hy_ports_display" == *,* ]] && mport_param="&mport=${hy_ports_display}"
+            local hy2_link="hysteria2://${HY_PASS}@${host}:${HY_PORT}/?sni=${host}&insecure=${insecure_flag}${mport_param}#${NODE_PREFIX}-Hysteria2"
+            echo "$hy2_link" >> "$LINKS_FILE"
         else
             echo -e "${RED}未找到节点环境配置，请先执行安装！${PLAIN}"
             return 1
@@ -1699,7 +1693,6 @@ ${GREEN}================= 配置 VLESS-Reality 模块 =================${PLAIN}"
 
                 local node_prefix="$NODE_PREFIX"
                 local server_ip="$SERVER_IP"
-                local hy_enabled="${HY_ENABLED:-true}"
                 local hy_domain="${HY_DOMAIN:-}"
                 local target_host="${TARGET_HOST:-$server_ip}"
                 local hy_port="${HY_PORT:-8443}"
@@ -1711,7 +1704,7 @@ ${GREEN}================= 配置 VLESS-Reality 模块 =================${PLAIN}"
                 local sub_token="${SUB_TOKEN}"
                 local CERT_MODE="${CERT_MODE:-selfsigned}"
 
-                write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "true" "$hy_port" "$hy_password"
+                write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "$hy_port" "$hy_password"
                 write_env_config
                 if ! render_and_reload; then
                     echo -e "${RED}Reality 模块更新失败，请检查上面的错误信息。${PLAIN}"
@@ -1896,7 +1889,6 @@ echo -e "${CYAN}----------------------------------------------------------------
 
                 local hy_password
                 hy_password=$(/usr/local/bin/sing-box generate rand 16 --base64 | tr -dc 'a-zA-Z0-9' | head -c 16)
-                local hy_enabled="true"
 
                 local sub_proto="http"
                 [[ "$CERT_MODE" == "domain" ]] && sub_proto="https"
@@ -1926,7 +1918,7 @@ echo -e "${CYAN}----------------------------------------------------------------
                     continue
                 fi
 
-                write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "true" "$hy_port" "$hy_password"
+                write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "$hy_port" "$hy_password"
                 write_env_config
                 if ! render_and_reload; then
                     echo -e "${RED}Hysteria 2 模块更新失败，请检查上面的错误信息。${PLAIN}"
@@ -1959,12 +1951,13 @@ menu_sub_module() {
     while true; do
         [ -t 1 ] && clear
         echo -e "
-${GREEN}================ 配置 Clash 订阅地址 ================${PLAIN}"
-        echo -e " 1. Clash 订阅地址参数"
+${GREEN}================= 配置 Clash 订阅 ==================${PLAIN}"
+        echo -e " 1. 重置并更新 Clash 订阅地址参数"
+        echo -e " 2. 重置并更新节点名称前缀"
         echo -e " 0. 返回主菜单"
         echo -e "${GREEN}======================================================${PLAIN}"
         local opt=""
-        read -r -p "请输入选项 [0-1]: " opt || opt=""
+        read -r -p "请输入选项 [0-2]: " opt || opt=""
         case "$opt" in
             1)
                 echo -e "\n${YELLOW}=== Clash 订阅地址参数 ===${PLAIN}"
@@ -2018,7 +2011,6 @@ ${GREEN}================ 配置 Clash 订阅地址 ================${PLAIN}"
                 local vl_privkey="${VL_PRIVKEY:-}"
                 local vl_pubkey="$VL_PUBKEY"
                 local vl_shortid="$VL_SHORTID"
-                local hy_enabled="${HY_ENABLED:-true}"
                 local hy_domain="${HY_DOMAIN:-}"
                 local target_host="${TARGET_HOST:-$server_ip}"
                 local hy_port="${HY_PORT:-8443}"
@@ -2033,7 +2025,7 @@ ${GREEN}================ 配置 Clash 订阅地址 ================${PLAIN}"
 
                 local hy_ports_display="$hy_port"
                 [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"
-                generate_full_client_config "$target_host" "$new_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_enabled" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
+                generate_full_client_config "$target_host" "$new_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
 
                 setup_caddy_subscription "$target_host" "$new_token" "$SUB_PORT" "$CERT_MODE"
                 reload_caddy_safe || true
@@ -2042,6 +2034,51 @@ ${GREEN}================ 配置 Clash 订阅地址 ================${PLAIN}"
                 echo -e "\n${GREEN}✓ 在线订阅地址已成功更新！${PLAIN}"
                 echo -e "当前在线订阅: ${CYAN}${sub_proto}://${target_host}:${SUB_PORT}/${new_token}/config.yaml${PLAIN}"
                 echo -e "${YELLOW}提示: 订阅参数已更新，请在客户端 (如 ClashX.Meta) 中修改端口或更新订阅 URL。${PLAIN}"
+                read -r -p "按回车键返回..." dummy || true
+                set +e; source "$ENV_FILE"; set -e
+                ;;
+            2)
+                echo -e "\n${YELLOW}=== 重置节点名称前缀 ===${PLAIN}"
+                echo -e "${CYAN}前缀用于节点显示名，如 HK-VLESS-Reality、US-Hysteria2。${PLAIN}"
+                echo -e "${CYAN}会过滤引号、逗号、井号、冒号与反斜杠，避免破坏 YAML 与分享链接。${PLAIN}"
+                local new_prefix=""
+                while true; do
+                    read -r -p "请输入节点名称前缀 [当前 ${NODE_PREFIX:-Node}]: " new_prefix || new_prefix=""
+                    new_prefix=$(trim_string "${new_prefix:-${NODE_PREFIX:-Node}}")
+                    new_prefix=$(printf '%s' "$new_prefix" | tr -d '\"'"'"',#:\\')
+                    if [[ -z "$new_prefix" ]]; then
+                        echo -e "${RED}前缀不能为空（过滤特殊字符后为空），请重新输入。${PLAIN}"; continue
+                    fi
+                    break
+                done
+
+                local node_prefix="$new_prefix"
+                local server_ip="$SERVER_IP"
+                local vl_port="$VL_PORT"
+                local vl_sni="$VL_SNI"
+                local user_uuid="$VL_UUID"
+                local vl_pubkey="$VL_PUBKEY"
+                local vl_shortid="$VL_SHORTID"
+                local hy_domain="${HY_DOMAIN:-}"
+                local target_host="${TARGET_HOST:-$server_ip}"
+                local hy_port="${HY_PORT:-8443}"
+                local hy_range="${HY_RANGE:-}"
+                local hy_password="${HY_PASS:-}"
+                local hy_skip_cert="${HY_SKIP_CERT:-true}"
+                local sub_port="${SUB_PORT:-8444}"
+                local sub_token="${SUB_TOKEN}"
+                local CERT_MODE="${CERT_MODE:-selfsigned}"
+                local sub_proto="http"
+                [[ "$CERT_MODE" == "domain" ]] && sub_proto="https"
+
+                write_env_config
+
+                local hy_ports_display="$hy_port"
+                [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"
+                generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
+
+                echo -e "\n${GREEN}✓ 节点名称前缀已更新为: ${new_prefix}${PLAIN}"
+                echo -e "${CYAN}订阅链接与 Token 保持不变，客户端点击「更新订阅」即可看到新节点名。${PLAIN}"
                 read -r -p "按回车键返回..." dummy || true
                 set +e; source "$ENV_FILE"; set -e
                 ;;
@@ -2185,7 +2222,7 @@ menu() {
         echo -e " 1. 查看节点原生链接"
         echo -e " 2. 配置 VLESS-Reality 模块"
         echo -e " 3. 配置 Hysteria 2 模块"
-        echo -e " 4. 配置 Clash 订阅地址"
+        echo -e " 4. 配置 Clash 订阅"
         echo -e " 5. 配置 BBR 加速"
         echo -e " 6. 管理 sing-box 内核"
         echo -e " 7. 重装 Simple-Box 脚本"

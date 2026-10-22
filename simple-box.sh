@@ -653,7 +653,7 @@ setup_caddy_subscription() {
     local cert_mode="${4:-selfsigned}"
 
     if ! install_caddy; then
-        echo -e "${RED}Caddy 不可用，无法部署证书服务。${PLAIN}"
+        echo -e "${RED}Caddy 不可用，无法部署证书管理服务。${PLAIN}"
         return 1
     fi
 

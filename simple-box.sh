@@ -1887,7 +1887,7 @@ menu_sub_module() {
     while true; do
         [ -t 1 ] && clear
         echo -e "
-${GREEN}================ 配置Clash 订阅地址 ================${PLAIN}"
+${GREEN}================ 配置 Clash 订阅地址 ================${PLAIN}"
         echo -e " 1. Clash 订阅地址参数"
         echo -e " 0. 返回主菜单"
         echo -e "${GREEN}======================================================${PLAIN}"

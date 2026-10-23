@@ -582,7 +582,7 @@ issue_cert_bundle() {
         if cert_covers_domain "$domain"; then
             echo -e "${GREEN}本地已有覆盖 ${domain} 的有效证书，直接复用（无需重新申请）。${PLAIN}"
             chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
-            chmod 640 "${CERT_DIR}"/* 2>/dev/null; chmod 644 "${CERT_DIR}/fullchain.cer" 2>/dev/null || true
+            chmod 640 "${CERT_DIR}"/* 2>/dev/null || true; chmod 644 "${CERT_DIR}/fullchain.cer" 2>/dev/null || true
             harden_private_key
             CERT_MODE="domain"
             echo -e "${GREEN}TLS 证书已就绪: ${CERT_DIR} (模式: ${CERT_MODE})${PLAIN}"
@@ -656,7 +656,7 @@ issue_cert_bundle() {
     fi
 
     chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
-    chmod 640 "${CERT_DIR}"/* 2>/dev/null; chmod 644 "${CERT_DIR}/fullchain.cer" 2>/dev/null || true
+    chmod 640 "${CERT_DIR}"/* 2>/dev/null || true; chmod 644 "${CERT_DIR}/fullchain.cer" 2>/dev/null || true
     harden_private_key
 
     if [[ ! -s "${CERT_DIR}/fullchain.cer" || ! -s "${CERT_DIR}/private.key" ]]; then
@@ -699,7 +699,7 @@ issue_self_signed_cert() {
     mv -f "$tmp_key" "${CERT_DIR}/private.key"
     mv -f "$tmp_crt" "${CERT_DIR}/fullchain.cer"
     chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
-    chmod 640 "${CERT_DIR}"/* 2>/dev/null; chmod 644 "${CERT_DIR}/fullchain.cer" 2>/dev/null || true
+    chmod 640 "${CERT_DIR}"/* 2>/dev/null || true; chmod 644 "${CERT_DIR}/fullchain.cer" 2>/dev/null || true
     harden_private_key
     echo -e "${GREEN}IP 自签证书已就绪 (10 年有效期，公私钥已配对校验)。${PLAIN}"
     return 0

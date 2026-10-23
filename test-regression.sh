@@ -271,8 +271,63 @@ grep -qE 'curl[^|]*\|[[:space:]]*(ba)?sh' "$TARGET" && printf '  \033[33m!\033[0
 grep -q 'eval ' "$TARGET" && bad "存在 eval 调用" || ok "无 eval 调用"
 grep -q 'chmod 777' "$TARGET" && bad "存在 chmod 777" || ok "无 chmod 777"
 
-# ---------- 11. 清理 ----------
-group "11. 清理"
+# ---------- 11. 端到端功能测试：write_singbox_config ----------
+group "11. 端到端：write_singbox_config 真实调用"
+E2E=$(mktemp -d)
+(
+  CONF_DIR="$E2E"
+  CONF_FILE="$E2E/config.json"
+  U=$(cat /proc/sys/kernel/random/uuid)
+  PK=$(head -c 32 /dev/urandom | base64 | tr -d '=/+')
+  SI=$(head -c 4 /dev/urandom | xxd -p)
+  HP=$(head -c 16 /dev/urandom | base64 | tr -d '=/+')
+  write_singbox_config 443 www.microsoft.com "$U" "$PK" "$SI" 8443 "$HP"
+  echo "$U" > "$E2E/.uuid"; echo "$PK" > "$E2E/.pk"; echo "$HP" > "$E2E/.hp"
+) >/dev/null 2>&1
+
+if [[ -s "$E2E/config.json" ]]; then
+    ok "11.1 配置已生成"
+    P=$(stat -c %a "$E2E/config.json")
+    [[ "$P" == "600" ]] && ok "11.2 配置权限 600" || bad "11.2 配置权限为 $P"
+    if command -v jq >/dev/null 2>&1 && jq -e . "$E2E/config.json" >/dev/null 2>&1; then
+        ok "11.3 JSON 合法"
+        N=$(jq '.inbounds | length' "$E2E/config.json")
+        [[ "$N" == "2" ]] && ok "11.4 inbounds 数量为 2 (vless + hysteria2)" || bad "11.4 inbounds 数量为 $N"
+        T=$(jq -r '[.inbounds[].type] | join(",")' "$E2E/config.json")
+        [[ "$T" == "vless,hysteria2" ]] && ok "11.5 协议类型正确" || bad "11.5 协议类型为 $T"
+        VP=$(jq -r '.inbounds[] | select(.type=="vless") | .listen_port' "$E2E/config.json")
+        [[ "$VP" == "443" ]] && ok "11.6 VLESS 端口正确" || bad "11.6 VLESS 端口为 $VP"
+        HP2=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port' "$E2E/config.json")
+        [[ "$HP2" == "8443" ]] && ok "11.7 Hy2 端口正确" || bad "11.7 Hy2 端口为 $HP2"
+    else
+        bad "11.3 JSON 非法"
+    fi
+    # 敏感字段确实写入（非空壳）
+    U=$(cat "$E2E/.uuid" 2>/dev/null); PK=$(cat "$E2E/.pk" 2>/dev/null); HP=$(cat "$E2E/.hp" 2>/dev/null)
+    grep -qF "$U" "$E2E/config.json" 2>/dev/null && ok "11.8 UUID 已写入" || bad "11.8 UUID 缺失"
+    grep -qF "$PK" "$E2E/config.json" 2>/dev/null && ok "11.9 Reality 私钥已写入" || bad "11.9 私钥缺失"
+    grep -qF "$HP" "$E2E/config.json" 2>/dev/null && ok "11.10 Hy2 密码已写入" || bad "11.10 密码缺失"
+else
+    bad "11.1 配置未生成"
+fi
+
+# 临时文件无残留（原子替换后应清理干净）
+LEFT=$(find "$E2E" -name '*.tmp.*' 2>/dev/null | wc -l)
+[[ "$LEFT" -eq 0 ]] && ok "11.11 无 .tmp 残留" || bad "11.11 残留 $LEFT 个临时文件"
+
+# 幂等：重复调用仍正常
+(
+  CONF_DIR="$E2E"; CONF_FILE="$E2E/config.json"
+  write_singbox_config 443 www.microsoft.com "$(cat "$E2E/.uuid")" "$(cat "$E2E/.pk")" abcd 8443 "$(cat "$E2E/.hp")"
+) >/dev/null 2>&1
+P2=$(stat -c %a "$E2E/config.json" 2>/dev/null)
+[[ "$P2" == "600" ]] && ok "11.12 重复调用后权限仍为 600" || bad "11.12 重复调用后权限为 $P2"
+LEFT2=$(find "$E2E" -name '*.tmp.*' 2>/dev/null | wc -l)
+[[ "$LEFT2" -eq 0 ]] && ok "11.13 重复调用后无残留" || bad "11.13 重复调用残留 $LEFT2 个"
+rm -rf "$E2E"
+
+# ---------- 12. 清理 ----------
+group "12. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
 ok "临时文件已清理"
 

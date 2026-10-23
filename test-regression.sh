@@ -65,26 +65,13 @@ M4_COUNT=$(grep -c 'chmod 640 "\${CERT_DIR}"/\* 2>/dev/null || true; chmod 644 "
 if [[ "$M4_COUNT" -eq 3 ]]; then ok "M-4: 3 处证书权限逻辑均已改造"; else bad "M-4: 期望 3 处，实际 $M4_COUNT 处"; fi
 if grep -q 'chmod 644 "\${CERT_DIR}"/\* 2>/dev/null || true$' "$TARGET"; then bad "M-4: 仍残留整体 chmod 644 通配"; else ok "M-4: 无整体 644 通配残留"; fi
 
-# M-1: unset CF_Token
-if grep -q 'unset CF_Token' "$TARGET"; then ok "M-1: 存在 unset CF_Token"; else bad "M-1: 缺少 unset CF_Token"; fi
-CF_EXPORT_LINE=$(grep -n 'export CF_Token=' "$TARGET" | cut -d: -f1 | head -1)
-CF_UNSET_LINE=$(grep -n 'unset CF_Token' "$TARGET" | cut -d: -f1 | head -1)
-if [[ -n "$CF_EXPORT_LINE" && -n "$CF_UNSET_LINE" && "$CF_UNSET_LINE" -gt "$CF_EXPORT_LINE" ]]; then
-    ok "M-1: unset 在 export 之后 (行 $CF_UNSET_LINE > $CF_EXPORT_LINE)"
+# M-1/M-2: 已按"简单优先"决策回退，不再断言 unset 存在。
+# 保留一项反向断言：确认没有 unset 破坏大写 CF_TOKEN 预置变量路径。
+if grep -q 'unset CF_TOKEN' "$TARGET"; then
+    bad "M-1: 误删大写 CF_TOKEN 预置变量（会破坏无人值守部署）"
 else
-    bad "M-1: unset 位置异常 (export=$CF_EXPORT_LINE unset=$CF_UNSET_LINE)"
+    ok "M-1/M-2: 未触碰大写 CF_TOKEN 预置路径（回退后仍安全）"
 fi
-
-# M-2: unset PROMPTED_CF_TOKEN（两处消费点）
-M2_UNSET=$(grep -c 'unset PROMPTED_CF_TOKEN' "$TARGET")
-if [[ "$M2_UNSET" -eq 2 ]]; then ok "M-2: 两处消费点均已 unset"; else bad "M-2: 期望 2 处 unset，实际 $M2_UNSET 处"; fi
-# 每处 unset 必须紧跟赋值（下一行）
-M2_ADJ=0
-while IFS= read -r ln; do
-    nxt=$((ln+1))
-    if sed -n "${nxt}p" "$TARGET" | grep -q 'unset PROMPTED_CF_TOKEN'; then M2_ADJ=$((M2_ADJ+1)); fi
-done < <(grep -n 'cf_token="\$PROMPTED_CF_TOKEN"' "$TARGET" | cut -d: -f1)
-if [[ "$M2_ADJ" -eq 2 ]]; then ok "M-2: 两处 unset 均紧跟赋值"; else bad "M-2: 仅 $M2_ADJ/2 处 unset 紧跟赋值"; fi
 
 # M-5: mktemp 替代可预测 PID 路径
 if grep -q 'latest=$(mktemp /tmp/simple-box.latest.XXXXXX)' "$TARGET"; then ok "M-5: 使用 mktemp 生成临时文件"; else bad "M-5: 未使用 mktemp"; fi
@@ -148,13 +135,12 @@ rm -f "$T1" "$T2"
 
 # ---------- 6. 功能测试：Token 生命周期 ----------
 group "6. Token 生命周期测试"
-# 6.1 unset CF_Token 后环境变量确实消失
+# 6.1 CF_Token 能正常传递到 acme.sh 子进程（export 语义未被破坏）
 (
   export CF_Token="dummy-token-for-test"
-  unset CF_Token 2>/dev/null || true
-  [[ -z "${CF_Token:-}" ]] && echo "GONE" || echo "STILL_THERE"
+  bash -c '[[ -n "${CF_Token:-}" ]] && echo "VISIBLE" || echo "HIDDEN"'
 ) > /tmp/t61.out 2>&1
-grep -q 'GONE' /tmp/t61.out && ok "6.1 unset CF_Token 后变量已清除" || bad "6.1 CF_Token 残留"
+grep -q 'VISIBLE' /tmp/t61.out && ok "6.1 CF_Token 可传递至 acme.sh 子进程" || bad "6.1 CF_Token 无法传递（证书申请会失败）"
 
 # 6.2 unset 不影响 CF_TOKEN（大写，无人值守预置变量）
 (
@@ -165,14 +151,10 @@ grep -q 'GONE' /tmp/t61.out && ok "6.1 unset CF_Token 后变量已清除" || bad
 ) > /tmp/t62.out 2>&1
 grep -q 'PRESERVED' /tmp/t62.out && ok "6.2 大写 CF_TOKEN 预置变量未受影响" || bad "6.2 CF_TOKEN 被误删（破坏无人值守部署）"
 
-# 6.3 unset PROMPTED_CF_TOKEN 后变量清除
-(
-  PROMPTED_CF_TOKEN="temp"
-  local_copy="$PROMPTED_CF_TOKEN"
-  unset PROMPTED_CF_TOKEN 2>/dev/null || true
-  [[ -z "${PROMPTED_CF_TOKEN:-}" && -n "$local_copy" ]] && echo "OK" || echo "BAD"
-) > /tmp/t63.out 2>&1
-grep -q 'OK' /tmp/t63.out && ok "6.3 PROMPTED_CF_TOKEN 清除且局部副本保留" || bad "6.3 PROMPTED_CF_TOKEN 处理异常"
+# 6.3 PROMPTED_CF_TOKEN 全局回传机制完整（prompt_cf_token 的设置/读取路径未被破坏）
+grep -q 'PROMPTED_CF_TOKEN="\$token"' "$TARGET" && grep -q 'cf_token="\$PROMPTED_CF_TOKEN"' "$TARGET" \
+    && ok "6.3 PROMPTED_CF_TOKEN 设置与读取路径完整" \
+    || bad "6.3 PROMPTED_CF_TOKEN 回传机制被破坏"
 
 # ---------- 7. 全量回归：核心工具函数 ----------
 group "7. 全量回归：校验函数"

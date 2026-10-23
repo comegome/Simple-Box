@@ -614,7 +614,6 @@ issue_cert_bundle() {
                 --reloadcmd "systemctl reload sing-box 2>/dev/null || true; systemctl reload caddy 2>/dev/null || true" || true
         fi
     fi
-    unset CF_Token 2>/dev/null || true
 
     # 校验：域名证书是否真的落地（含有效期 + 公私钥配对，避免 acme 写半截）
     local ok=false
@@ -1443,7 +1442,6 @@ install_node() {
         if [[ -z "$cf_token" && "$reuse_local_cert" != "true" ]]; then
             if prompt_cf_token; then
                 cf_token="$PROMPTED_CF_TOKEN"
-                unset PROMPTED_CF_TOKEN 2>/dev/null || true
             else
                 cf_token=""
                 target_host="$server_ip"
@@ -1960,7 +1958,6 @@ ${GRAY}=================== Hysteria 2 模块配置 ===================${PLAIN}"
                     if [[ "$reuse_menu_cert" != "true" ]]; then
                         if prompt_cf_token; then
                             cf_token="$PROMPTED_CF_TOKEN"
-                            unset PROMPTED_CF_TOKEN 2>/dev/null || true
                         else
                             hy_domain=""
                             cf_token=""

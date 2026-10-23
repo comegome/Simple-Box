@@ -1142,7 +1142,9 @@ write_singbox_config() {
     local hy_password="${7:-}"
 
     # 先写临时文件再原子替换，避免 sing-box 文件监视器读到半截 JSON
-    local tmp_conf="${CONF_FILE}.tmp.$$"
+    # mktemp 天然 0600：配置含 Reality 私钥与 Hy2 密码，权限来自创建方式而非事后补救
+    local tmp_conf
+    tmp_conf=$(mktemp "${CONF_FILE}.tmp.XXXXXX")
     cat > "$tmp_conf" <<EOF
 {
   "log": {
@@ -1210,7 +1212,6 @@ EOF
   ]
 }
 EOF
-    chmod 600 "$tmp_conf" 2>/dev/null || true
     mv -f "$tmp_conf" "$CONF_FILE"
 }
 

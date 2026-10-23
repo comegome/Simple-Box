@@ -56,9 +56,20 @@ set +e   # 后续测试自行判定，不因单条失败中断
 # ---------- 3. 本次提交的 5 项修复 ----------
 group "3. 本次提交修复项验证"
 
-# M-3: config.json 权限 600
-if grep -q 'chmod 600 "\$tmp_conf"' "$TARGET"; then ok "M-3: config.json 使用 chmod 600"; else bad "M-3: config.json 权限未收紧"; fi
+# M-3: config.json 权限 600（由 mktemp 保证，不再依赖事后 chmod）
+if grep -q 'tmp_conf=$(mktemp "${CONF_FILE}.tmp.XXXXXX")' "$TARGET"; then
+    ok "M-3: config.json 临时文件由 mktemp 创建（天然 0600）"
+else
+    bad "M-3: 未使用 mktemp 创建 config 临时文件"
+fi
 if grep -q 'chmod 644 "\$tmp_conf"' "$TARGET"; then bad "M-3: 仍残留 chmod 644 \$tmp_conf"; else ok "M-3: 无残留 644"; fi
+if grep -q 'chmod 600 "\$tmp_conf"' "$TARGET"; then
+    bad "M-3: chmod 600 兜底未删除（mktemp 已保证权限，属冗余）"
+else
+    ok "M-3: 冗余 chmod 600 已移除"
+fi
+# config 临时文件与目标同目录（保证 mv 原子性）
+grep -q 'mktemp "${CONF_FILE}.tmp.XXXXXX"' "$TARGET" && ok "M-3: 临时文件与目标同目录（mv 原子）" || bad "M-3: 临时文件跨目录（mv 非原子）"
 
 # M-4: 证书目录先 640 后单独 644 公钥
 M4_COUNT=$(grep -c 'chmod 640 "\${CERT_DIR}"/\* 2>/dev/null || true; chmod 644 "\${CERT_DIR}/fullchain.cer"' "$TARGET")

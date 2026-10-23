@@ -582,7 +582,7 @@ issue_cert_bundle() {
         if cert_covers_domain "$domain"; then
             echo -e "${GREEN}本地已有覆盖 ${domain} 的有效证书，直接复用（无需重新申请）。${PLAIN}"
             chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
-            chmod 644 "${CERT_DIR}"/* 2>/dev/null || true
+            chmod 640 "${CERT_DIR}"/* 2>/dev/null; chmod 644 "${CERT_DIR}/fullchain.cer" 2>/dev/null || true
             harden_private_key
             CERT_MODE="domain"
             echo -e "${GREEN}TLS 证书已就绪: ${CERT_DIR} (模式: ${CERT_MODE})${PLAIN}"
@@ -614,6 +614,7 @@ issue_cert_bundle() {
                 --reloadcmd "systemctl reload sing-box 2>/dev/null || true; systemctl reload caddy 2>/dev/null || true" || true
         fi
     fi
+    unset CF_Token 2>/dev/null || true
 
     # 校验：域名证书是否真的落地（含有效期 + 公私钥配对，避免 acme 写半截）
     local ok=false
@@ -655,7 +656,7 @@ issue_cert_bundle() {
     fi
 
     chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
-    chmod 644 "${CERT_DIR}"/* 2>/dev/null || true
+    chmod 640 "${CERT_DIR}"/* 2>/dev/null; chmod 644 "${CERT_DIR}/fullchain.cer" 2>/dev/null || true
     harden_private_key
 
     if [[ ! -s "${CERT_DIR}/fullchain.cer" || ! -s "${CERT_DIR}/private.key" ]]; then
@@ -698,7 +699,7 @@ issue_self_signed_cert() {
     mv -f "$tmp_key" "${CERT_DIR}/private.key"
     mv -f "$tmp_crt" "${CERT_DIR}/fullchain.cer"
     chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
-    chmod 644 "${CERT_DIR}"/* 2>/dev/null || true
+    chmod 640 "${CERT_DIR}"/* 2>/dev/null; chmod 644 "${CERT_DIR}/fullchain.cer" 2>/dev/null || true
     harden_private_key
     echo -e "${GREEN}IP 自签证书已就绪 (10 年有效期，公私钥已配对校验)。${PLAIN}"
     return 0
@@ -1095,7 +1096,7 @@ fetch_latest_script() {
 reinstall_with_latest() {
     local share_dir="/usr/local/share/simple-box"
     local target="${share_dir}/simple-box.sh"
-    local latest="/tmp/simple-box.latest.$$"
+    local latest; latest=$(mktemp /tmp/simple-box.latest.XXXXXX)
 
     echo -e "正在检查仓库最新脚本..."
     if ! fetch_latest_script "$latest"; then
@@ -1210,7 +1211,7 @@ EOF
   ]
 }
 EOF
-    chmod 644 "$tmp_conf" 2>/dev/null || true
+    chmod 600 "$tmp_conf" 2>/dev/null || true
     mv -f "$tmp_conf" "$CONF_FILE"
 }
 
@@ -1442,6 +1443,7 @@ install_node() {
         if [[ -z "$cf_token" && "$reuse_local_cert" != "true" ]]; then
             if prompt_cf_token; then
                 cf_token="$PROMPTED_CF_TOKEN"
+                unset PROMPTED_CF_TOKEN 2>/dev/null || true
             else
                 cf_token=""
                 target_host="$server_ip"
@@ -1958,6 +1960,7 @@ ${GRAY}=================== Hysteria 2 模块配置 ===================${PLAIN}"
                     if [[ "$reuse_menu_cert" != "true" ]]; then
                         if prompt_cf_token; then
                             cf_token="$PROMPTED_CF_TOKEN"
+                            unset PROMPTED_CF_TOKEN 2>/dev/null || true
                         else
                             hy_domain=""
                             cf_token=""

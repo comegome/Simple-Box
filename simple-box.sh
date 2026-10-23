@@ -1381,14 +1381,14 @@ install_node() {
 
     local vl_sni
     while true; do
-        read -r -p "请输入 Reality 借壳伪装域名 [默认: ${CYAN}${old_vl_sni:-gateway.icloud.com}${PLAIN}]: " vl_sni || vl_sni=""
+        read -r -p "请输入 Reality 借壳伪装域名 [默认: ${CYAN}${old_vl_sni:-www.icloud.com}${PLAIN}]: " vl_sni || vl_sni=""
         vl_sni=$(trim_string "$vl_sni")
-        vl_sni=${vl_sni:-${old_vl_sni:-gateway.icloud.com}}
+        vl_sni=${vl_sni:-${old_vl_sni:-www.icloud.com}}
         if [[ "$vl_sni" == "$server_ip" ]]; then
             echo -e "${RED}Reality 伪装域名不能是本机 IP，请重新输入！${PLAIN}"; continue
         fi
         if ! validate_domain "$vl_sni"; then
-            echo -e "${RED}域名格式非法（示例: gateway.icloud.com），请重新输入！${PLAIN}"; continue
+            echo -e "${RED}域名格式非法（示例: www.icloud.com），请重新输入！${PLAIN}"; continue
         fi
         break
     done
@@ -1853,7 +1853,7 @@ ${GRAY}================= VLESS-Reality 模块配置 =================${PLAIN}"
                     read -r -p "请输入 Reality 伪装域名 (SNI) [默认: ${CYAN}${VL_SNI}${PLAIN}]: " vl_sni || vl_sni=""
                     vl_sni=$(trim_string "${vl_sni:-${VL_SNI}}")
                     if ! validate_domain "$vl_sni"; then
-                        echo -e "${RED}伪装域名格式非法（示例: gateway.icloud.com），请重新输入。${PLAIN}"; continue
+                        echo -e "${RED}伪装域名格式非法（示例: www.icloud.com），请重新输入。${PLAIN}"; continue
                     fi
                     if [[ "$vl_sni" == "$SERVER_IP" ]]; then
                         echo -e "${RED}伪装域名不能是本机 IP，必须为可正常 TLS1.3 握手的站点。${PLAIN}"; continue
@@ -2376,7 +2376,7 @@ menu() {
             local hy_sni="${HY_DOMAIN:-$SERVER_IP}"
             local hy_ports="${HY_RANGE:-无}"
             echo -e "${GRAY}----------------------------------------------------${PLAIN}"
-            echo -e " VLESS-Reality | TCP: ${CYAN}${VL_PORT:-443}${PLAIN}  | ServerName: ${CYAN}${VL_SNI:-gateway.icloud.com}${PLAIN}"
+            echo -e " VLESS-Reality | TCP: ${CYAN}${VL_PORT:-443}${PLAIN}  | ServerName: ${CYAN}${VL_SNI:-www.icloud.com}${PLAIN}"
             echo -e " Hysteria 2    | UDP: ${CYAN}${HY_PORT:-8443}${PLAIN} | SNI: ${CYAN}${hy_sni}${PLAIN} | Ports: ${CYAN}${hy_ports}${PLAIN}"
             
             local proto=${SUB_PROTO:-http}

@@ -93,7 +93,7 @@ simbo
  证书管理: 运行中 (Caddy v2.6.2)
  代理服务: 运行中 (sing-box v1.14.3)
 ----------------------------------------------------
- VLESS-Reality | TCP: 443  | ServerName: gateway.icloud.com
+ VLESS-Reality | TCP: 443  | ServerName: www.icloud.com
  Hysteria 2    | UDP: 8443 | SNI: 203.0.113.10 | Ports: 20000:40000
 ----------------------------------------------------
  Clash 订阅配置: http://203.0.113.10:8444/2dac50852729bf55bb61833d/config.yaml
@@ -116,7 +116,7 @@ simbo
 | 配置项 | 默认值 | 行为说明 |
 | :--- | :--- | :--- |
 | Reality 监听端口 | `443` | 1-65535，被外部占用会提示更换；与 Nginx 共存时可改为其他端口 |
-| Reality 伪装域名 | `gateway.icloud.com` | 需支持 TLS 1.3 的大厂 SNI 站点，禁止填本机 IP |
+| Reality 伪装域名 | `www.icloud.com` | 需支持 TLS 1.3 的大厂 SNI 站点，禁止填本机 IP |
 | Hysteria 2 域名 | 自动检测旧域名 | 检测到旧域名可一键回车沿用；没有域名直接回车 = IP 自签（自动直连） |
 | Cloudflare Token | — | 仅配置域名且无本地有效证书时需要，留空自动降级为自签 |
 | Hy2 主监听端口 | `8443` | UDP 端口，与 Reality 端口互斥 |

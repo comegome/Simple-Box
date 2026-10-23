@@ -825,12 +825,35 @@ setup_caddy_subscription() {
     mkdir -p "/etc/caddy/sites"
     
     # 若 Caddy 为本脚本安装，或 Caddyfile 尚不存在：写入纯净配置，绝不监听 80 端口（杜绝与 Nginx/Apache 冲突）
+    # 必须显式写 auto_https disable_redirects：只写 import 时 Caddy 仍会为 HTTPS 站点自动
+    # 监听 80 做 HTTP->HTTPS 重定向，凭空多出一个公网入口。
     if [ ! -f /etc/caddy/Caddyfile ] || [[ -f "${CONF_DIR}/.caddy_installed_by_script" ]]; then
-        echo -e "import sites/*.caddy\n" > /etc/caddy/Caddyfile
+        cat > /etc/caddy/Caddyfile <<'CADDYEOF'
+{
+	# 本机只有订阅站点，不需要 HTTP->HTTPS 重定向，避免额外监听 80
+	auto_https disable_redirects
+}
+import sites/*.caddy
+CADDYEOF
         : > "${CONF_DIR}/.caddyfile_created_by_script" 2>/dev/null || true
     elif ! grep -q "import sites/\*\.caddy" /etc/caddy/Caddyfile; then
         echo -e "\nimport sites/*.caddy" >> /etc/caddy/Caddyfile
         : > "${CONF_DIR}/.caddyfile_appended_by_script" 2>/dev/null || true
+    fi
+
+    # 旧版脚本写出的 Caddyfile 只有 import 行，会意外监听 80。已归属本脚本的配置补上
+    # disable_redirects；用户自己的 Caddyfile 不动（其 80 端口可能承载真实服务）。
+    if [[ -f "${CONF_DIR}/.caddyfile_created_by_script" ]] \
+        && ! grep -q "auto_https disable_redirects" /etc/caddy/Caddyfile; then
+        local tmp_caddyfile
+        tmp_caddyfile=$(mktemp /etc/caddy/.Caddyfile.XXXXXX)
+        {
+            printf '{\n\t# 本机只有订阅站点，不需要 HTTP->HTTPS 重定向，避免额外监听 80\n\tauto_https disable_redirects\n}\n'
+            grep -v '^import sites/\*\.caddy$' /etc/caddy/Caddyfile | sed '/^$/d'
+            printf 'import sites/*.caddy\n'
+        } > "$tmp_caddyfile"
+        mv -f "$tmp_caddyfile" /etc/caddy/Caddyfile
+        echo -e "${GREEN}已为旧版 Caddyfile 补上 auto_https disable_redirects（停止监听 80）${PLAIN}"
     fi
 
     # 清理所有旧版 simple-box caddy 配置文件

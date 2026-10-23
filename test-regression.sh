@@ -326,8 +326,56 @@ LEFT2=$(find "$E2E" -name '*.tmp.*' 2>/dev/null | wc -l)
 [[ "$LEFT2" -eq 0 ]] && ok "11.13 重复调用后无残留" || bad "11.13 重复调用残留 $LEFT2 个"
 rm -rf "$E2E"
 
-# ---------- 12. 清理 ----------
-group "12. 清理"
+# ---------- 12. Caddyfile 不监听 80 端口 ----------
+group "12. Caddyfile auto_https disable_redirects"
+if grep -q 'auto_https disable_redirects' "$TARGET"; then
+    ok "12.1 脚本写入的 Caddyfile 含 disable_redirects"
+else
+    bad "12.1 脚本未写 disable_redirects（会意外监听 80）"
+fi
+if grep -q "cat > /etc/caddy/Caddyfile <<'CADDYEOF'" "$TARGET"; then
+    ok "12.2 使用 heredoc 写入完整全局块"
+else
+    bad "12.2 未用 heredoc 写全局块"
+fi
+if grep -q 'caddyfile_created_by_script' "$TARGET" &&    grep -q 'auto_https disable_redirects.*Caddyfile\|grep -q "auto_https disable_redirects" /etc/caddy/Caddyfile' "$TARGET"; then
+    ok "12.3 存在旧版 Caddyfile 升级修复逻辑"
+else
+    bad "12.3 缺少旧版升级修复"
+fi
+
+# 功能验证：模拟老版本 Caddyfile 升级
+CD=$(mktemp -d); mkdir -p "$CD/etc/caddy" "$CD/conf"
+printf 'import sites/*.caddy\n' > "$CD/etc/caddy/Caddyfile"
+: > "$CD/conf/.caddyfile_created_by_script"
+(
+  CONF_DIR="$CD/conf"; CF="$CD/etc/caddy/Caddyfile"
+  if [[ -f "${CONF_DIR}/.caddyfile_created_by_script" ]] && ! grep -q "auto_https disable_redirects" "$CF"; then
+    t=$(mktemp "$CD/etc/caddy/.Caddyfile.XXXXXX")
+    { printf '{\n\tauto_https disable_redirects\n}\n'
+      grep -v '^import sites/\*\.caddy$' "$CF" | sed '/^$/d'
+      printf 'import sites/*.caddy\n'; } > "$t"
+    mv -f "$t" "$CF"
+  fi
+)
+grep -q 'auto_https disable_redirects' "$CD/etc/caddy/Caddyfile" && ok "12.4 老版 Caddyfile 升级后含 disable_redirects" || bad "12.4 升级未生效"
+[[ $(grep -c '^import sites/\*\.caddy$' "$CD/etc/caddy/Caddyfile") -eq 1 ]] && ok "12.5 import 行未重复" || bad "12.5 import 行重复"
+
+# 用户自有 Caddyfile 不得被改
+CD2=$(mktemp -d); mkdir -p "$CD2/etc/caddy" "$CD2/conf"
+printf 'example.com {\n  reverse_proxy localhost:3000\n}\n' > "$CD2/etc/caddy/Caddyfile"
+cp "$CD2/etc/caddy/Caddyfile" "$CD2/orig"
+(
+  CONF_DIR="$CD2/conf"; CF="$CD2/etc/caddy/Caddyfile"
+  if [[ -f "${CONF_DIR}/.caddyfile_created_by_script" ]] && ! grep -q "auto_https disable_redirects" "$CF"; then
+    echo "SHOULD_NOT_RUN" > "$CF"
+  fi
+)
+diff -q "$CD2/orig" "$CD2/etc/caddy/Caddyfile" >/dev/null && ok "12.6 用户自有 Caddyfile 未被改动" || bad "12.6 用户 Caddyfile 被误改"
+rm -rf "$CD" "$CD2"
+
+# ---------- 13. 清理 ----------
+group "13. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
 ok "临时文件已清理"
 

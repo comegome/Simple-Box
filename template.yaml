@@ -38,7 +38,8 @@ tun:
   strict-route: true
   auto-detect-interface: true
   udp-timeout: 300
-  endpoint-independent-nat: true  # 建议开启：改善 WebRTC / STUN / P2P
+  endpoint-independent-nat: false  # 固定出口端口号，若需要改善 WebRTC / STUN / P2P 开启
+  dns-mode: native
   dns-hijack:
     - "any:53"
     - "tcp://any:53"
@@ -99,15 +100,11 @@ dns:
     "geosite:category-ads-all": "rcode://name_error"
     "geosite:private": "system"
 
-    # 最高优先级：Google、GFW 及国内大厂海外业务优先使用海外 DoH，防止因数据库集合重叠被下方 cn 规则截获
-    "geosite:google,gfw,geolocation-cn@!cn":
+    # 最高优先级：Google、GFW 优先使用海外 DoH，防止因数据库集合重叠被下方 cn 规则截获
+    "geosite:google,gfw":
       - "https://1.1.1.1/dns-query#disable-ipv6=true&disable-qtype-65=true"
       - "https://1.0.0.1/dns-query#disable-ipv6=true&disable-qtype-65=true"
-    # 次优先级：已排除 Google/GFW 的海外大厂（微软/苹果/Steam等）国内 CDN 节点使用国内 DoH
-    "geosite:geolocation-!cn@cn":
-      - "https://223.5.5.5/dns-query#disable-ipv6=true"
-      - "https://1.12.12.12/dns-query#disable-ipv6=true"
-    # 第三优先级：其余已知国外域名使用海外 DoH
+    # 次优先级：其余已知国外域名使用海外 DoH
     "geosite:geolocation-!cn":
       - "https://1.1.1.1/dns-query#disable-ipv6=true&disable-qtype-65=true"
       - "https://1.0.0.1/dns-query#disable-ipv6=true&disable-qtype-65=true"
@@ -164,6 +161,7 @@ sniffer:
 # 核心原则：“先国外、后国内、未知兜底归国外”，且所有 IP 规则均附带 no-resolve，确保数据库遗漏的海外域名 0ms 直达代理节点
 rules:
   # 0. Tailscale 直连（必须在所有 GEOSITE 之前）
+  - DOMAIN-SUFFIX,ducto.net,DIRECT
   - DOMAIN-REGEX,^derp\d+[a-z]?\.tailscale\.com$,DIRECT
   
   # 1. 局域网与私有网络直连
@@ -177,15 +175,13 @@ rules:
   - AND,((DST-PORT,123),(NETWORK,UDP)),DIRECT
 
   # 4. 海外 QUIC (UDP 443/8443) 快速回退 TCP
-  # 先无条件拦截 Google/GFW/国内大厂海外业务 的 QUIC（防止 google@cn 漏过），再拦截其余非国内 QUIC，全程零 DNS 解析开销
-  - AND,((NETWORK,UDP),(OR,((DST-PORT,443),(DST-PORT,8443))),(OR,((GEOSITE,google),(GEOSITE,gfw),(GEOSITE,geolocation-cn@!cn)))),REJECT
-  - AND,((NETWORK,UDP),(OR,((DST-PORT,443),(DST-PORT,8443))),(NOT,((GEOSITE,cn))),(NOT,((GEOSITE,geolocation-!cn@cn))),(NOT,((GEOIP,CN,no-resolve)))),REJECT
+  # 先无条件拦截 Google/GFW 的 QUIC，再拦截其余非国内 QUIC，全程零 DNS 解析开销
+  - AND,((NETWORK,UDP),(OR,((DST-PORT,443),(DST-PORT,8443))),(OR,((GEOSITE,google),(GEOSITE,gfw)))),REJECT
+  - AND,((NETWORK,UDP),(OR,((DST-PORT,443),(DST-PORT,8443))),(NOT,((GEOSITE,cn))),(NOT,((GEOIP,CN,no-resolve)))),REJECT
 
   # 5. 核心域名精准分流（严格遵循“先国外 -> 再国内 -> 兜底国外”，与上方 nameserver-policy 顺序 1:1 对应）
   - GEOSITE,google,📌节点选择
   - GEOSITE,gfw,📌节点选择
-  - GEOSITE,geolocation-cn@!cn,📌节点选择     # 优先将国内大厂纯海外业务（TikTok、京东国际等）送入代理，防止被下方 cn 误匹配
-  - GEOSITE,geolocation-!cn@cn,DIRECT         # 已排除 Google/GFW 的海外大厂（微软/苹果/Steam等）国内 CDN 节点直连
   - GEOSITE,geolocation-!cn,📌节点选择        # 其余已知海外站点走代理
   - GEOSITE,cn,DIRECT                         # 纯国内域名置于所有海外域名规则之后
 
@@ -195,3 +191,4 @@ rules:
 
   # 7. 兜底规则：数据库遗漏的任何未知域名 100% 匹配此处，直接发往代理节点由 VPS 远端解析
   - MATCH,📌节点选择
+

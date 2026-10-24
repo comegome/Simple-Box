@@ -300,9 +300,7 @@ check_port_conflict() {
         fi
     fi
 
-    if check_port_occupied "$port" "$proto"; then
-        return 0
-    fi
+    check_port_occupied "$port" "$proto" && return 0
     echo -e "${YELLOW}请更换其他未占用的 ${label} 端口！${PLAIN}"
     return 1
 }
@@ -493,9 +491,7 @@ update_singbox_core() {
     fi
     local latest_ver=${tag#v}
     local arch
-    if ! arch=$(require_arch); then
-        return 1
-    fi
+    arch=$(require_arch) || return 1
 
     echo -e "本地当前版本: ${CYAN}v${cur_ver}${PLAIN} | 官方最新版本: ${GREEN}${tag}${PLAIN} (${arch})"
 
@@ -777,9 +773,7 @@ reload_caddy_safe() {
         systemctl reset-failed caddy 2>/dev/null || true
     fi
 
-    if systemctl restart caddy 2>/dev/null; then
-        return 0
-    fi
+    systemctl restart caddy 2>/dev/null && return 0
     echo -e "${RED}Caddy 启动失败，请查看: journalctl -u caddy -n 30${PLAIN}"
     return 1
 }
@@ -789,9 +783,7 @@ verify_caddy_listening() {
     local port="${1:-}"
     local i
     for i in 1 2 3 4 5; do
-        if ss -tln 2>/dev/null | grep -qE "[:.]${port} "; then
-            return 0
-        fi
+        ss -tln 2>/dev/null | grep -qE "[:.]${port} " && return 0
         sleep 1
     done
     echo -e "${RED}警告: Caddy 未在端口 ${port} 上监听，订阅链接当前不可用。${PLAIN}"
@@ -1311,12 +1303,8 @@ render_and_reload() {
 }
 
 install_node() {
-    if ! require_os >/dev/null; then
-        return 1
-    fi
-    if ! require_arch >/dev/null; then
-        return 1
-    fi
+    require_os >/dev/null || return 1
+    require_arch >/dev/null || return 1
 
     if ! install_deps; then
         echo -e "${RED}基础依赖检查未通过，安装中止。${PLAIN}"

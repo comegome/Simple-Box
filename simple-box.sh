@@ -461,18 +461,12 @@ EOF
     fi
 }
 
-# 恢复系统默认（卸载时调用）
-# 只处理带本脚本标记的文件；用户自己的 sysctl 配置一律不碰
+# 卸载时调用：只删除本脚本创建的 BBR 配置文件
+# 不改运行中的拥塞控制算法——卸载代理软件不该动系统网络栈，而且多数机器的
+# bbr 也写在 /etc/sysctl.conf 里，这里改成 cubic 会在下次 sysctl --system 时
+# 被覆盖回去，"恢复系统默认"本就做不到。用户自己的配置一律不碰。
 disable_bbr() {
-    [[ -f "$BBR_CONF" ]] || return 0
-    if ! grep -q "^${BBR_MARK}" "$BBR_CONF"; then
-        echo -e "${YELLOW}${BBR_CONF} 非本脚本创建，保留不动。${PLAIN}"
-        return 0
-    fi
-    rm -f "$BBR_CONF"
-    sysctl -w net.ipv4.tcp_congestion_control=cubic >/dev/null 2>&1 || true
-    sysctl -w net.core.default_qdisc=fq_codel >/dev/null 2>&1 || true
-    echo -e "已恢复系统默认拥塞控制算法"
+    [[ -f "$BBR_CONF" ]] && grep -q "^${BBR_MARK}" "$BBR_CONF" && rm -f "$BBR_CONF" || true
 }
 
 # 获取并升级官方 sing-box 内核（带精准版本校验）

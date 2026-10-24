@@ -289,6 +289,19 @@ grep -q 'BASH_SOURCE\[0\]' "$TARGET" && ok "存在管道执行检测" || bad "�
 # BBR 幂等：已开启则跳过
 grep -qE '\[\[ "\$cur" == "bbr" \]\]' "$TARGET" && ok "BBR 已开启时跳过（幂等）" || bad "BBR 缺少幂等判断"
 
+# BBR 卸载只删文件，不改运行中的拥塞控制（卸载代理不该动系统网络栈）
+if grep -q 'sysctl -w net.ipv4.tcp_congestion_control=cubic' "$TARGET"; then
+    bad "disable_bbr 仍在改运行中的拥塞控制算法"
+else
+    ok "disable_bbr 不改运行中的拥塞控制"
+fi
+_dbb=$(awk '/^disable_bbr\(\)/,/^}/' "$TARGET")
+if grep -q 'rm -f "\$BBR_CONF"' <<<"$_dbb" && grep -q 'BBR_MARK' <<<"$_dbb"; then
+    ok "disable_bbr 仍清理本脚本创建的配置文件"
+else
+    bad "disable_bbr 丢失了配置文件清理（卸载不再彻底）"
+fi
+
 # Caddy 归属标记
 grep -q 'simple-box' "$TARGET" && ok "Caddy 配置带归属标记" || bad "Caddy 缺少归属标记"
 

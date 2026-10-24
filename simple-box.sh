@@ -1335,15 +1335,12 @@ install_node() {
     mkdir -p "$CONF_DIR" "$WEB_DIR"
 
     # 读取既有配置，作为重置时的默认值（直接回车即沿用）
-    local old_vl_port="" old_vl_sni="" old_hy_port="" old_hy_range="" old_sub_port="" old_prefix="" old_domain="" old_token=""
+    local old_vl_port="" old_vl_sni="" old_hy_port="" old_hy_range="" old_sub_port="" old_prefix="" old_domain=""
     if [[ -f "$ENV_FILE" ]]; then
         set +e; source "$ENV_FILE"; set -e
         old_vl_port="$VL_PORT"; old_vl_sni="$VL_SNI"; old_hy_port="$HY_PORT"
         old_hy_range="$HY_RANGE"; old_sub_port="$SUB_PORT"; old_prefix="$NODE_PREFIX"
         old_domain="${HY_DOMAIN:-}"
-        # 重装沿用旧订阅 Token：Token 是路径不是凭证，换掉只会让所有客户端
-        # 的订阅地址失效。凭证（UUID / Reality 私钥 / Hy2 密码）照常重新生成。
-        old_token="${SUB_TOKEN:-}"
         # 若 env.conf 中无域名记录，探测 acme.sh 目录中是否曾签发过历史域名证书
         if [[ -z "$old_domain" ]] && [[ -d "$HOME/.acme.sh" ]]; then
             local acme_d
@@ -1556,8 +1553,6 @@ install_node() {
     user_uuid=$(/usr/local/bin/sing-box generate uuid) || user_uuid=""
     hy_password=$(/usr/local/bin/sing-box generate rand 16 --base64 | tr -dc 'a-zA-Z0-9' | head -c 16) || hy_password=""
     sub_token=$(openssl rand -hex 12) || sub_token=""
-    # 重装沿用旧 Token（Token 是路径不是凭证，换掉等于让所有客户端订阅失效）
-    [[ -n "${old_token:-}" ]] && sub_token="$old_token"
     if [[ -z "$vl_privkey" || -z "$vl_pubkey" || -z "$vl_shortid" || -z "$user_uuid" || -z "$sub_token" ]]; then
         echo -e "${RED}关键凭证生成不完整（privkey/uuid/shortid/token 有空值），已中止安装。${PLAIN}"
         return 1
@@ -1623,6 +1618,11 @@ EOF
     fi
 
     install_simbo_command
+
+    # 每次重装换新 Token（顺手换锁），并把旧 Token 目录与历史残留一次清干净。
+    # 用 find 而不是只删 env.conf 里记录的旧 token：旧版本反复重装留下的孤儿目录
+    # 早已不在 env.conf 里，只删「上一个 token」清不掉它们。
+    find "$WEB_DIR" -mindepth 1 -maxdepth 1 -type d ! -name "$sub_token" -exec rm -rf {} + 2>/dev/null || true
 
     # 部署 Caddy 订阅并组装完整客户端配置
     local hy_ports_display="$hy_port"

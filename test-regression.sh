@@ -167,14 +167,17 @@ grep -q 'PROMPTED_CF_TOKEN="\$token"' "$TARGET" && grep -q 'cf_token="\$PROMPTED
     && ok "6.3 PROMPTED_CF_TOKEN 设置与读取路径完整" \
     || bad "6.3 PROMPTED_CF_TOKEN 回传机制被破坏"
 
-# 6.4 重装沿用旧订阅 Token（Token 是路径不是凭证，换了所有客户端订阅都会失效）
-grep -q 'old_token="${SUB_TOKEN:-}"' "$TARGET" \
-    && ok "6.4 重装读取旧 Token 作为沿用值" \
-    || bad "6.4 install_node 未读取旧 Token（重装会换订阅地址）"
-grep -q '\[\[ -n "${old_token:-}" \]\] && sub_token="$old_token"' "$TARGET" \
-    && ok "6.5 旧 Token 覆盖随机生成的 Token" \
-    || bad "6.5 旧 Token 未覆盖随机 Token（沿用逻辑无效）"
-# 6.6 凭证仍然每次重装都重新生成（Token 沿用不等于凭证沿用）
+# 6.4 重装必须换新 Token（顺手换锁），且不能沿用旧值
+if grep -q 'old_token="\${SUB_TOKEN:-}"' "$TARGET" || grep -q 'sub_token="\$old_token"' "$TARGET"; then
+    bad "6.4 仍存在沿用旧 Token 的代码（重装不再换锁）"
+else
+    ok "6.4 无沿用旧 Token 的残留代码"
+fi
+# 6.5 重装后清理所有非当前 token 的订阅目录（含历史孤儿目录）
+grep -q 'find "\$WEB_DIR" -mindepth 1 -maxdepth 1 -type d ! -name "\$sub_token" -exec rm -rf {} +' "$TARGET" \
+    && ok "6.5 重装清理非当前 Token 的订阅目录" \
+    || bad "6.5 缺少旧订阅目录清理（重装会堆积）"
+# 6.6 凭证仍然每次重装都重新生成
 _inst_start=$(grep -n '^install_node()' "$TARGET" | cut -d: -f1)
 _next_fn=$(awk -v s="$_inst_start" 'NR>s && /^[a-z_]+\(\) \{/ {print NR; exit}' "$TARGET")
 _inst_body=$(sed -n "${_inst_start},${_next_fn}p" "$TARGET")
@@ -182,6 +185,16 @@ if grep -q 'generate reality-keypair' <<<"$_inst_body" && grep -q 'generate uuid
     ok "6.6 重装仍重新生成 Reality 密钥与 UUID"
 else
     bad "6.6 凭证生成逻辑被破坏" "install_node 范围 ${_inst_start}-${_next_fn}"
+fi
+# 6.7 清理逻辑必须在生成订阅文件之前（否则删掉刚建的新目录）
+if [[ -n "$_inst_body" ]]; then
+    _rm_line=$(grep -n 'find "\$WEB_DIR"' <<<"$_inst_body" | head -1 | cut -d: -f1)
+    _gen_line=$(grep -n 'generate_full_client_config' <<<"$_inst_body" | head -1 | cut -d: -f1)
+    if [[ -n "$_rm_line" && -n "$_gen_line" && "$_rm_line" -lt "$_gen_line" ]]; then
+        ok "6.7 清理顺序正确（先删旧目录再生成新订阅）"
+    else
+        bad "6.7 清理顺序错误" "find 在第 ${_rm_line:-?} 行，generate 在第 ${_gen_line:-?} 行"
+    fi
 fi
 
 # ---------- 7. 全量回归：核心工具函数 ----------

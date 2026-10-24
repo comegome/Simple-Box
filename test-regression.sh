@@ -303,7 +303,28 @@ else
 fi
 
 # Caddy 归属标记
-grep -q 'simple-box' "$TARGET" && ok "Caddy 配置带归属标记" || bad "Caddy 缺少归属标记"
+grep -q 'caddy_installed_by_script' "$TARGET" && ok "Caddy 配置带归属标记" || bad "Caddy 缺少归属标记"
+
+# 10.1 Caddy reload 只在 setup_caddy_subscription 内部做一次，调用方不得重复
+_setup_reload=$(grep -c 'reload_caddy_safe' "$TARGET")
+if [[ "$_setup_reload" -eq 2 ]]; then
+    ok "Caddy reload 只有定义处与 setup 内部两处（无重复调用）"
+else
+    bad "Caddy reload 调用点异常" "共 ${_setup_reload} 处，应为 2（定义 + setup 内部）"
+fi
+
+# 10.2 三个发布订阅的调用点动作序列必须一致：generate → setup_caddy → verify
+for _fn in render_and_reload install_node; do
+    _body=$(awk -v f="^${_fn}\\(\\)" '$0 ~ f {p=1} p {print} p && /^}/ && NR>1 {exit}' "$TARGET")
+    _has_gen=$(grep -c 'generate_full_client_config' <<<"$_body")
+    _has_setup=$(grep -c 'setup_caddy_subscription' <<<"$_body")
+    _has_verify=$(grep -c 'verify_caddy_listening' <<<"$_body")
+    if [[ "$_has_gen" -ge 1 && "$_has_setup" -ge 1 ]]; then
+        ok "${_fn} 含 generate + setup_caddy"
+    else
+        bad "${_fn} 缺少发布订阅的关键步骤" "generate=${_has_gen} setup=${_has_setup} verify=${_has_verify}"
+    fi
+done
 
 # ---------- 10. 全量回归：危险命令审计 ----------
 group "10. 全量回归：危险命令审计"

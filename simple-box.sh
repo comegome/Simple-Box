@@ -1304,8 +1304,9 @@ render_and_reload() {
     [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"
     generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
 
+    # setup_caddy_subscription 末尾已经 reload 过一次 Caddy，这里不再重复调用，
+    # 只补一次监听校验（热重载后端口偶尔要几百毫秒才起来）。
     setup_caddy_subscription "$target_host" "$sub_token" "$sub_port" "$CERT_MODE"
-    reload_caddy_safe || true
     verify_caddy_listening "$sub_port" || true
 }
 
@@ -2195,7 +2196,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 generate_full_client_config "$target_host" "$new_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
 
                 setup_caddy_subscription "$target_host" "$new_token" "$SUB_PORT" "$CERT_MODE"
-                reload_caddy_safe || true
+                # setup_caddy_subscription 末尾已 reload，此处只补监听校验
                 verify_caddy_listening "$SUB_PORT" || true
 
                 echo -e "\n${GREEN}✓ 在线订阅地址已成功更新！${PLAIN}"

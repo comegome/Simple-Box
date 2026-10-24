@@ -174,21 +174,14 @@ grep -q 'old_token="${SUB_TOKEN:-}"' "$TARGET" \
 grep -q '\[\[ -n "${old_token:-}" \]\] && sub_token="$old_token"' "$TARGET" \
     && ok "6.5 旧 Token 覆盖随机生成的 Token" \
     || bad "6.5 旧 Token 未覆盖随机 Token（沿用逻辑无效）"
-grep -q 'WEB_DIR}/\${sub_token}.bak.' "$TARGET" \
-    && ok "6.6 沿用 Token 时先备份旧订阅目录" \
-    || bad "6.6 缺少沿用 Token 时的备份（旧文件会被直接覆盖）"
-grep -q 'tail -n +4' "$TARGET" \
-    && ok "6.7 订阅备份只保留最近 3 份" \
-    || bad "6.7 缺少备份数量上限（反复重装会堆积）"
-
-# 6.8 凭证仍然每次重装都重新生成（Token 沿用不等于凭证沿用）
+# 6.6 凭证仍然每次重装都重新生成（Token 沿用不等于凭证沿用）
 _inst_start=$(grep -n '^install_node()' "$TARGET" | cut -d: -f1)
 _next_fn=$(awk -v s="$_inst_start" 'NR>s && /^[a-z_]+\(\) \{/ {print NR; exit}' "$TARGET")
 _inst_body=$(sed -n "${_inst_start},${_next_fn}p" "$TARGET")
 if grep -q 'generate reality-keypair' <<<"$_inst_body" && grep -q 'generate uuid' <<<"$_inst_body"; then
-    ok "6.8 重装仍重新生成 Reality 密钥与 UUID"
+    ok "6.6 重装仍重新生成 Reality 密钥与 UUID"
 else
-    bad "6.8 凭证生成逻辑被破坏" "install_node 范围 ${_inst_start}-${_next_fn}"
+    bad "6.6 凭证生成逻辑被破坏" "install_node 范围 ${_inst_start}-${_next_fn}"
 fi
 
 # ---------- 7. 全量回归：核心工具函数 ----------

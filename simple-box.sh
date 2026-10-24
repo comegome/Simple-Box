@@ -1624,17 +1624,6 @@ EOF
 
     install_simbo_command
 
-    # 重装沿用旧 Token 时，先把旧目录移走做一份备份，再重建。
-    # 否则新文件会覆盖旧的，出问题时连回滚的原始文件都没有。
-    if [[ -n "${old_token:-}" && "$old_token" == "$sub_token" && -d "${WEB_DIR}/${sub_token}" ]]; then
-        local _bak="${WEB_DIR}/${sub_token}.bak.$(date +%Y%m%d_%H%M%S)"
-        mv "${WEB_DIR}/${sub_token}" "$_bak" 2>/dev/null && echo -e "${GRAY}旧订阅文件已备份: ${_bak}${PLAIN}"
-        # 只保留最近 3 份，避免反复重装堆积
-        ls -1dt "${WEB_DIR}/${sub_token}".bak.* 2>/dev/null | tail -n +4 | while read -r _old; do
-            rm -rf "$_old"
-        done
-    fi
-
     # 部署 Caddy 订阅并组装完整客户端配置
     local hy_ports_display="$hy_port"
     [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"

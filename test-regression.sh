@@ -326,6 +326,20 @@ for _fn in render_and_reload install_node; do
     fi
 done
 
+# 10.2 端口跳跃展示串必须由 fmt_hy_ports 统一生成（禁止各处手拼）
+_manual_ports=$(grep -c 'hy_ports_display="\${[A-Za-z_]*},\${' "$TARGET" || true)
+if [[ "${_manual_ports:-0}" -eq 0 ]]; then
+    ok "端口跳跃串无手拼残留（统一走 fmt_hy_ports）"
+else
+    bad "仍有 ${_manual_ports} 处手拼 hy_ports_display" "格式变更时会漏改"
+fi
+_fmt_calls=$(grep -c 'fmt_hy_ports "' "$TARGET" || true)
+if [[ "${_fmt_calls:-0}" -ge 5 ]]; then
+    ok "fmt_hy_ports 覆盖全部调用点（${_fmt_calls} 处）"
+else
+    bad "fmt_hy_ports 调用点不足" "仅 ${_fmt_calls} 处，应为 5"
+fi
+
 # ---------- 10. 全量回归：危险命令审计 ----------
 group "10. 全量回归：危险命令审计"
 # 允许删除脚本自有的安装目录 /usr/local/share/simple-box

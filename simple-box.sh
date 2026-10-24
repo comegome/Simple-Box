@@ -898,6 +898,18 @@ EOF
     reload_caddy_safe || echo -e "${YELLOW}订阅地址配置已写入，但 Caddy 未能生效，可稍后手动 systemctl restart caddy。${PLAIN}"
 }
 
+# 组装端口跳跃展示串：主端口，有跳跃范围时追加 "起始-结束"
+# 例：8443 + 20000:40000 → "8443,20000-40000"；无跳跃 → "8443"
+# 客户端靠这个串判断要不要启用 mport（含逗号即启用），格式改这里一处即可。
+fmt_hy_ports() {
+    local port="${1:-}" range="${2:-}"
+    if [[ -n "$range" ]]; then
+        printf '%s,%s' "$port" "${range/:/-}"
+    else
+        printf '%s' "$port"
+    fi
+}
+
 # 组装客户端订阅与独立链接
 generate_full_client_config() {
     local domain_or_ip="${1:-}"
@@ -1292,8 +1304,8 @@ render_and_reload() {
         return 1
     fi
 
-    local hy_ports_display="$hy_port"
-    [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"
+    local hy_ports_display
+    hy_ports_display=$(fmt_hy_ports "$hy_port" "$hy_range")
     generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
 
     # setup_caddy_subscription 末尾已经 reload 过一次 Caddy，这里不再重复调用，
@@ -1608,8 +1620,8 @@ EOF
     find "$WEB_DIR" -mindepth 1 -maxdepth 1 -type d ! -name "$sub_token" -exec rm -rf {} + 2>/dev/null || true
 
     # 部署 Caddy 订阅并组装完整客户端配置
-    local hy_ports_display="$hy_port"
-    [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"
+    local hy_ports_display
+    hy_ports_display=$(fmt_hy_ports "$hy_port" "$hy_range")
     generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
     setup_caddy_subscription "$target_host" "$sub_token" "$sub_port" "$CERT_MODE"
 
@@ -1634,8 +1646,8 @@ show_links() {
         return 1
     fi
     set +e; source "$ENV_FILE"; set -e
-    local hy_ports_display="${HY_PORT}"
-    [[ -n "${HY_RANGE:-}" ]] && hy_ports_display="${HY_PORT},${HY_RANGE/:/-}"
+    local hy_ports_display
+    hy_ports_display=$(fmt_hy_ports "${HY_PORT}" "${HY_RANGE:-}")
     local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
     local vless_link="vless://${VL_UUID}@${SERVER_IP}:${VL_PORT}?security=reality&encryption=none&pbk=${VL_PUBKEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${VL_SNI}&sid=${VL_SHORTID}#${NODE_PREFIX}-VLESS-Reality"
     local insecure_flag="0"
@@ -2179,8 +2191,8 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                     continue
                 fi
 
-                local hy_ports_display="$hy_port"
-                [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"
+                local hy_ports_display
+                hy_ports_display=$(fmt_hy_ports "$hy_port" "$hy_range")
                 generate_full_client_config "$target_host" "$new_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
 
                 setup_caddy_subscription "$target_host" "$new_token" "$SUB_PORT" "$CERT_MODE"
@@ -2234,8 +2246,8 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                     continue
                 fi
 
-                local hy_ports_display="$hy_port"
-                [[ -n "$hy_range" ]] && hy_ports_display="${hy_port},${hy_range/:/-}"
+                local hy_ports_display
+                hy_ports_display=$(fmt_hy_ports "$hy_port" "$hy_range")
                 generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
 
                 echo -e "\n${GREEN}✓ 节点名称前缀已更新为: ${new_prefix}${PLAIN}"

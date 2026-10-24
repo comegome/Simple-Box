@@ -189,7 +189,7 @@ fi
 # 6.7 清理逻辑必须在生成订阅文件之前（否则删掉刚建的新目录）
 if [[ -n "$_inst_body" ]]; then
     _rm_line=$(grep -n 'find "\$WEB_DIR"' <<<"$_inst_body" | head -1 | cut -d: -f1)
-    _gen_line=$(grep -n 'generate_full_client_config' <<<"$_inst_body" | head -1 | cut -d: -f1)
+    _gen_line=$(grep -nE 'regen_subscription|generate_full_client_config' <<<"$_inst_body" | head -1 | cut -d: -f1)
     if [[ -n "$_rm_line" && -n "$_gen_line" && "$_rm_line" -lt "$_gen_line" ]]; then
         ok "6.7 清理顺序正确（先删旧目录再生成新订阅）"
     else
@@ -316,7 +316,7 @@ fi
 # 10.2 三个发布订阅的调用点动作序列必须一致：generate → setup_caddy → verify
 for _fn in render_and_reload install_node; do
     _body=$(awk -v f="^${_fn}\\(\\)" '$0 ~ f {p=1} p {print} p && /^}/ && NR>1 {exit}' "$TARGET")
-    _has_gen=$(grep -c 'generate_full_client_config' <<<"$_body")
+    _has_gen=$(grep -cE 'regen_subscription|generate_full_client_config' <<<"$_body")
     _has_setup=$(grep -c 'setup_caddy_subscription' <<<"$_body")
     _has_verify=$(grep -c 'verify_caddy_listening' <<<"$_body")
     if [[ "$_has_gen" -ge 1 && "$_has_setup" -ge 1 ]]; then
@@ -333,11 +333,19 @@ if [[ "${_manual_ports:-0}" -eq 0 ]]; then
 else
     bad "仍有 ${_manual_ports} 处手拼 hy_ports_display" "格式变更时会漏改"
 fi
+# 端口串只允许两处生成：regen_subscription 内（订阅）与 show_links 内（原生链接）
 _fmt_calls=$(grep -c 'fmt_hy_ports "' "$TARGET" || true)
-if [[ "${_fmt_calls:-0}" -ge 5 ]]; then
-    ok "fmt_hy_ports 覆盖全部调用点（${_fmt_calls} 处）"
+if [[ "${_fmt_calls:-0}" -eq 2 ]]; then
+    ok "fmt_hy_ports 调用点恰为 2 处（订阅 + 原生链接）"
 else
-    bad "fmt_hy_ports 调用点不足" "仅 ${_fmt_calls} 处，应为 5"
+    bad "fmt_hy_ports 调用点数量异常" "共 ${_fmt_calls} 处，应为 2"
+fi
+# regen_subscription 必须是唯一的订阅生成入口
+_regen_calls=$(grep -cE '^\s+regen_subscription' "$TARGET" || true)
+if [[ "${_regen_calls:-0}" -eq 4 ]]; then
+    ok "regen_subscription 覆盖 4 个调用点"
+else
+    bad "regen_subscription 调用点数量异常" "共 ${_regen_calls} 处，应为 4"
 fi
 
 # ---------- 10. 全量回归：危险命令审计 ----------

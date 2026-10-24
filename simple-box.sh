@@ -910,6 +910,20 @@ fmt_hy_ports() {
     fi
 }
 
+# 从当前作用域的变量重建订阅（render_and_reload / install_node / 子菜单共用）
+# 依赖 bash 动态作用域：调用方的 local 变量在函数内可见，无需显式传 13 个参数。
+# 参数错位只可能发生在这里一处，调用点全部是单行。
+#   $1 可选：指定 token（token 轮换时传新值），缺省用调用方的 $sub_token
+regen_subscription() {
+    local _token="${1:-${sub_token:-}}"
+    local _ports
+    _ports=$(fmt_hy_ports "${hy_port:-}" "${hy_range:-}")
+    generate_full_client_config \
+        "${target_host:-}" "$_token" "${node_prefix:-}" "${server_ip:-}" \
+        "${vl_port:-}" "${user_uuid:-}" "${vl_sni:-}" "${vl_pubkey:-}" "${vl_shortid:-}" \
+        "${hy_port:-}" "$_ports" "${hy_password:-}" "${hy_skip_cert:-}"
+}
+
 # 组装客户端订阅与独立链接
 generate_full_client_config() {
     local domain_or_ip="${1:-}"
@@ -925,6 +939,20 @@ generate_full_client_config() {
     local hy_ports_display="${11}"
     local hy_password="${12}"
     local hy_skip_cert="${13}"
+
+    # 入参校验：这些字段任一为空都会生成一份「看起来正常但连不上」的订阅，
+    # 且 mihomo -t 照样通过（空 server / 空 uuid 都是合法 YAML）。必须显式拦截。
+    local _missing=""
+    [[ -z "$token" ]] && _missing+=" token"
+    [[ -z "$server_ip" ]] && _missing+=" server_ip"
+    [[ -z "$user_uuid" ]] && _missing+=" user_uuid"
+    [[ -z "$vl_pubkey" ]] && _missing+=" vl_pubkey"
+    [[ -z "$vl_shortid" ]] && _missing+=" vl_shortid"
+    [[ -z "$hy_password" ]] && _missing+=" hy_password"
+    if [[ -n "$_missing" ]]; then
+        echo -e "${RED}内部错误: 订阅生成参数缺失 (${_missing# })，已中止（未写入任何文件）。${PLAIN}" >&2
+        return 1
+    fi
 
     mkdir -p "${WEB_DIR}/${token}"
 
@@ -1304,9 +1332,7 @@ render_and_reload() {
         return 1
     fi
 
-    local hy_ports_display
-    hy_ports_display=$(fmt_hy_ports "$hy_port" "$hy_range")
-    generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
+    regen_subscription
 
     # setup_caddy_subscription 末尾已经 reload 过一次 Caddy，这里不再重复调用，
     # 只补一次监听校验（热重载后端口偶尔要几百毫秒才起来）。
@@ -1620,9 +1646,7 @@ EOF
     find "$WEB_DIR" -mindepth 1 -maxdepth 1 -type d ! -name "$sub_token" -exec rm -rf {} + 2>/dev/null || true
 
     # 部署 Caddy 订阅并组装完整客户端配置
-    local hy_ports_display
-    hy_ports_display=$(fmt_hy_ports "$hy_port" "$hy_range")
-    generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
+    regen_subscription
     setup_caddy_subscription "$target_host" "$sub_token" "$sub_port" "$CERT_MODE"
 
     if [[ "${cert_fell_back:-}" == "true" ]]; then
@@ -2191,9 +2215,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                     continue
                 fi
 
-                local hy_ports_display
-                hy_ports_display=$(fmt_hy_ports "$hy_port" "$hy_range")
-                generate_full_client_config "$target_host" "$new_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
+                regen_subscription "$new_token"
 
                 setup_caddy_subscription "$target_host" "$new_token" "$SUB_PORT" "$CERT_MODE"
                 # setup_caddy_subscription 末尾已 reload，此处只补监听校验
@@ -2246,9 +2268,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                     continue
                 fi
 
-                local hy_ports_display
-                hy_ports_display=$(fmt_hy_ports "$hy_port" "$hy_range")
-                generate_full_client_config "$target_host" "$sub_token" "$node_prefix" "$server_ip" "$vl_port" "$user_uuid" "$vl_sni" "$vl_pubkey" "$vl_shortid" "$hy_port" "$hy_ports_display" "$hy_password" "$hy_skip_cert"
+                regen_subscription
 
                 echo -e "\n${GREEN}✓ 节点名称前缀已更新为: ${new_prefix}${PLAIN}"
                 echo -e "提示: 订阅链接保持不变，客户端点击「更新订阅」即可同步新节点名。"

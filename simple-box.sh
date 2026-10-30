@@ -992,6 +992,13 @@ generate_full_client_config() {
     else
         direct_rule="  - DOMAIN,${server_ip},DIRECT"
     fi
+    # 自有域名直连：由 env.conf 的 DIRECT_SUFFIXES 注入（空格分隔的后缀列表，
+    # 例如 DIRECT_SUFFIXES="example.com mycorp.net"）。脚本与模板不内置任何
+    # 私有域名，默认留空 —— 部署方按需填写，分享时无需删改代码。
+    local suffix
+    for suffix in ${DIRECT_SUFFIXES:-}; do
+        direct_rule+=$'\n'"  - DOMAIN-SUFFIX,${suffix},DIRECT"
+    done
     if grep -q '^rules:' "$full_config_file"; then
         awk -v rule="$direct_rule" '
             { print }
@@ -1282,6 +1289,12 @@ write_env_config() {
     fi
 
     # 600：env.conf 含 Reality 私钥、Hy2 密码、订阅 Token，不能给其它本地用户读
+    # DIRECT_SUFFIXES 是部署方的私有配置（自有域名直连），重写时必须保留：
+    # 优先用内存中的值，否则从旧文件里捞回来，避免菜单改配置时被清空。
+    local direct_suffixes="${DIRECT_SUFFIXES:-}"
+    if [[ -z "$direct_suffixes" && -f "$ENV_FILE" ]]; then
+        direct_suffixes=$(grep -oP '^DIRECT_SUFFIXES="\K[^"]*' "$ENV_FILE" 2>/dev/null || true)
+    fi
     ( umask 077; cat > "$ENV_FILE" <<EOF
 NODE_PREFIX="${node_prefix}"
 SERVER_IP="${server_ip}"
@@ -1301,6 +1314,7 @@ SUB_PORT="${sub_port}"
 SUB_PROTO="${sub_proto}"
 SUB_TOKEN="${sub_token}"
 CERT_MODE="${CERT_MODE:-selfsigned}"
+DIRECT_SUFFIXES="${direct_suffixes}"
 EOF
     )
     chmod 600 "$ENV_FILE" 2>/dev/null || true

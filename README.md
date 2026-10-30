@@ -172,6 +172,22 @@ iptables -t nat -L PREROUTING -n --line-numbers   # 检查端口跳跃 REDIRECT 
 ```
 </details>
 
+<details>
+<summary>🌐 可选：让自有域名走直连（点击展开）</summary>
+
+如果这台机器同时托管着你自己的服务（自建 DERP 中继、管理面板、订阅分发、SSH 等），这些流量应当直连而不是绕代理——DERP 尤其如此，走代理等于隧道套隧道，节点故障时 Tailscale 会一起失联。
+
+在 `/etc/sing-box/env.conf` 里加一行，然后重新生成订阅即可：
+
+```bash
+DIRECT_SUFFIXES="example.com"          # 多个后缀用空格分隔
+```
+
+生成的 `config.yaml` 会在 `rules:` 段最前面插入对应的 `DOMAIN-SUFFIX,<后缀>,DIRECT`。留空（默认）则不插入任何规则。
+
+模板与脚本本身不含任何私有域名，分享给别人时无需删改。
+</details>
+
 ---
 
 ### 📄 开源许可证

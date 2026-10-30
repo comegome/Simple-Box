@@ -160,10 +160,9 @@ sniffer:
 # 参考文档: https://wiki.metacubex.one/config/rules/
 # 核心原则：“先国外、后国内、未知兜底归国外”，且所有 IP 规则均附带 no-resolve，确保数据库遗漏的海外域名 0ms 直达代理节点
 rules:
-  # 0. 自有域名直连：DERP 中继(derp.ducto.net) / Magpie 网关 / 订阅分发 / SSH
-  #    这些是运维通道，走代理会绕路；DERP 走代理等于隧道套隧道，节点故障时 Tailscale 一起失联。
-  #    换自有域名时改这一行即可（只写后缀，不要写具体节点或 IP）。
-  - DOMAIN-SUFFIX,ducto.net,DIRECT
+  # 自有域名直连（DERP 中继 / 管理面板 / 订阅分发 / SSH）由 env.conf 的
+  # DIRECT_SUFFIXES 注入到本段最前面，模板本身不内置任何私有域名。
+  # 需要时在该文件里写：DIRECT_SUFFIXES="example.com"
   - DOMAIN-REGEX,^derp\d+[a-z]?\.tailscale\.com$,DIRECT
   
   # 1. 局域网与私有网络直连

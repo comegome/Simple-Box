@@ -1613,6 +1613,34 @@ install_node() {
     local sub_proto="http"
     [[ "$CERT_MODE" == "domain" ]] && sub_proto="https"
 
+    # 自有域名直连（可选）：填了就让客户端配置把这些后缀的流量直连，不绕代理。
+    # 典型用途：自建 DERP 中继、管理面板、订阅分发、SSH。留空则不插入任何规则。
+    # 重装时默认沿用 env.conf 里的旧值，输入 "-" 可清空。
+    local old_suffixes="${DIRECT_SUFFIXES:-}" suffixes_input=""
+    echo -e "\n${CYAN}自有域名直连（可选）${PLAIN}"
+    echo -e " ${GRAY}这台机器若还跑着你自己的服务（自建 DERP / 管理面板 / 订阅分发 / SSH），${PLAIN}"
+    echo -e " ${GRAY}填它们的域名后缀可让这些流量在客户端里直连，不绕代理。${PLAIN}"
+    echo -e " ${GRAY}多个后缀用空格分隔，例如: example.com mycorp.net${PLAIN}"
+    if [[ -n "$old_suffixes" ]]; then
+        read -r -p " 直连域名后缀 [回车=${old_suffixes}，输入 - 清空]: " suffixes_input || suffixes_input=""
+        [[ -z "$suffixes_input" ]] && suffixes_input="$old_suffixes"
+    else
+        read -r -p " 直连域名后缀 [回车=跳过]: " suffixes_input || suffixes_input=""
+    fi
+    # 两个分支都要认 "-"：没有旧值时输入它也应静默跳过，不该走到校验里报"无效后缀"
+    [[ "$suffixes_input" == "-" ]] && suffixes_input=""
+    local s s_clean=""
+    for s in $suffixes_input; do
+        if [[ "$s" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+            s_clean+="${s} "
+        else
+            echo -e "${YELLOW} 忽略无效域名后缀: ${s}${PLAIN}"
+        fi
+    done
+    DIRECT_SUFFIXES="${s_clean% }"
+    [[ -n "$DIRECT_SUFFIXES" ]] && echo -e " ${GREEN}✓${PLAIN} 将直连: ${DIRECT_SUFFIXES}" \
+                                || echo -e " ${GRAY}已跳过（不插入任何直连规则）${PLAIN}"
+
     write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "$hy_port" "$hy_password"
     if ! write_env_config; then
         echo -e "${RED}环境配置写入失败，安装中止。${PLAIN}"
@@ -2170,10 +2198,11 @@ menu_sub_module() {
 ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
         echo -e " 1. 重置并更新 Clash 订阅地址参数"
         echo -e " 2. 重置并更新节点名称前缀"
+        echo -e " 3. 自有域名直连设置（可选）"
         echo -e " 0. 返回主菜单"
         echo -e "${GRAY}======================================================${PLAIN}"
         local opt=""
-        read -r -p "请输入选项 [0-2]: " opt || opt=""
+        read -r -p "请输入选项 [0-3]: " opt || opt=""
         case "$opt" in
             1)
                 echo -e "\n${YELLOW}=== Clash 订阅地址参数 ===${PLAIN}"
@@ -2288,6 +2317,68 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
 
                 echo -e "\n${GREEN}✓ 节点名称前缀已更新为: ${new_prefix}${PLAIN}"
                 echo -e "提示: 订阅链接保持不变，客户端点击「更新订阅」即可同步新节点名。"
+                read -r -p "按回车键返回..." dummy || true
+                set +e; source "$ENV_FILE"; set -e
+                ;;
+            3)
+                echo -e "\n${YELLOW}=== 自有域名直连 ===${PLAIN}"
+                echo -e "${CYAN}填了之后，客户端配置会把这些后缀的流量直连，不绕代理。${PLAIN}"
+                echo -e "${CYAN}典型用途：自建 DERP 中继、管理面板、订阅分发、SSH。${PLAIN}"
+                echo -e "${CYAN}留空表示不插入任何直连规则（不影响节点本身）。${PLAIN}"
+                echo -e "当前设置: ${CYAN}${DIRECT_SUFFIXES:-（未设置）}${PLAIN}"
+                local suffixes_input=""
+                read -r -p "请输入域名后缀（空格分隔，输入 - 清空，回车保持不变）: " suffixes_input || suffixes_input=""
+                if [[ -z "$suffixes_input" ]]; then
+                    echo -e "${GRAY}保持不变。${PLAIN}"
+                    read -r -p "按回车键返回..." dummy || true
+                    continue
+                fi
+                [[ "$suffixes_input" == "-" ]] && suffixes_input=""
+                local s s_clean=""
+                for s in $suffixes_input; do
+                    if [[ "$s" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+                        s_clean+="${s} "
+                    else
+                        echo -e "${YELLOW} 忽略无效域名后缀: ${s}${PLAIN}"
+                    fi
+                done
+                DIRECT_SUFFIXES="${s_clean% }"
+
+                local node_prefix="${NODE_PREFIX:-}"
+                local server_ip="$SERVER_IP"
+                local vl_port="$VL_PORT"
+                local vl_sni="$VL_SNI"
+                local user_uuid="$VL_UUID"
+                local vl_pubkey="$VL_PUBKEY"
+                local vl_shortid="$VL_SHORTID"
+                local vl_privkey="${VL_PRIVKEY:-}"
+                local hy_domain="${HY_DOMAIN:-}"
+                local target_host="${TARGET_HOST:-$server_ip}"
+                local hy_port="${HY_PORT:-8443}"
+                local hy_range="${HY_RANGE:-}"
+                local hy_password="${HY_PASS:-}"
+                local hy_skip_cert="${HY_SKIP_CERT:-true}"
+                local sub_port="${SUB_PORT:-8444}"
+                local sub_token="$SUB_TOKEN"
+                local CERT_MODE="${CERT_MODE:-selfsigned}"
+                local sub_proto="http"
+                [[ "$CERT_MODE" == "domain" ]] && sub_proto="https"
+
+                if ! write_env_config; then
+                    echo -e "${RED}写入失败，配置未变更。${PLAIN}"
+                    read -r -p "按回车键返回..." dummy || true
+                    continue
+                fi
+
+                regen_subscription
+
+                echo -e "\n${GREEN}✓ 自有域名直连设置已保存${PLAIN}"
+                if [[ -n "$DIRECT_SUFFIXES" ]]; then
+                    echo -e " 将直连: ${CYAN}${DIRECT_SUFFIXES}${PLAIN}"
+                else
+                    echo -e " 已清空: 订阅配置不插入任何直连规则。"
+                fi
+                echo -e "${YELLOW}提示: 客户端点击「更新订阅」即可同步。${PLAIN}"
                 read -r -p "按回车键返回..." dummy || true
                 set +e; source "$ENV_FILE"; set -e
                 ;;

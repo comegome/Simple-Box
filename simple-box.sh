@@ -985,10 +985,12 @@ generate_full_client_config() {
     # 用 awk 插入而不是 sed a 命令：sed 的 a 会吃掉行首空格，导致 YAML 缩进错乱
     # （- IP-CIDR 顶格 → 解析失败），awk 能原样保留两空格缩进。
     local direct_rule
-    if [[ "$domain_or_ip" == "$server_ip" || -z "$domain_or_ip" ]]; then
+    # server_ip 是 IP 才用 IP-CIDR；是域名（SERVER_IP 改成域名后）必须用 DOMAIN，
+    # 否则会生成 IP-CIDR,example.com/32 这种非法规则，mihomo -t 直接失败。
+    if [[ "$server_ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]]; then
         direct_rule="  - IP-CIDR,${server_ip}/32,DIRECT,no-resolve"
     else
-        direct_rule="  - DOMAIN,${domain_or_ip},DIRECT"
+        direct_rule="  - DOMAIN,${server_ip},DIRECT"
     fi
     if grep -q '^rules:' "$full_config_file"; then
         awk -v rule="$direct_rule" '

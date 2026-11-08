@@ -1703,6 +1703,76 @@ EOF
     echo -e "${GRAY}====================================================${PLAIN}\n"
 }
 
+# ---------------------------------------------------------------------------
+# 输出可直接粘贴进 mihomo / Clash.Meta 的 proxies 片段
+#
+# 字段口径必须与 generate_full_client_config 保持一致（同一份 env.conf 取数），
+# 否则面板打印的片段会和订阅里的 provider.yaml 漂移，用户按哪个都对不上。
+# 故意不套 ANSI 颜色：这段是要整段复制走的，带转义序列粘进编辑器就是废文本。
+# ---------------------------------------------------------------------------
+show_clash_snippet() {
+    if [[ ! -f "$ENV_FILE" ]]; then
+        echo -e "${RED}未找到节点环境配置，请先执行安装！${PLAIN}"
+        return 1
+    fi
+
+    # 子 shell 隔离：source env.conf 的变量不外泄到调用方作用域
+    (
+        set +e; source "$ENV_FILE"; set -e
+
+        local host="${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}"
+        local ports_display ports_line=""
+        ports_display=$(fmt_hy_ports "${HY_PORT}" "${HY_RANGE:-}")
+        if [[ -n "$ports_display" && "$ports_display" == *,* ]]; then
+            ports_line="    ports: \"${ports_display}\""
+        fi
+
+        echo ""
+        echo -e "${GRAY}================ Clash.Meta / Mihomo 片段 ================${PLAIN}"
+        echo " 整段复制，粘到你配置的 proxies: 下面（缩进已对齐）"
+        echo ""
+        cat <<EOF
+proxies:
+  - name: "${NODE_PREFIX}-VLESS-Reality"
+    type: vless
+    server: ${SERVER_IP}
+    port: ${VL_PORT}
+    uuid: ${VL_UUID}
+    network: tcp
+    tls: true
+    udp: true
+    flow: xtls-rprx-vision
+    servername: ${VL_SNI}
+    reality-opts:
+      public-key: ${VL_PUBKEY}
+      short-id: ${VL_SHORTID}
+    client-fingerprint: chrome
+  - name: "${NODE_PREFIX}-Hysteria2"
+    type: hysteria2
+    server: ${host}
+    port: ${HY_PORT}
+${ports_line}
+    password: "${HY_PASS}"
+    sni: ${host}
+    skip-cert-verify: ${HY_SKIP_CERT:-false}
+EOF
+        echo ""
+        echo -e "${GRAY}---------- 可选：把这两个节点挂进策略组 ----------${PLAIN}"
+        echo ""
+        cat <<EOF
+proxy-groups:
+  - name: "节点选择"
+    type: select
+    proxies:
+      - "${NODE_PREFIX}-VLESS-Reality"
+      - "${NODE_PREFIX}-Hysteria2"
+      - "DIRECT"
+EOF
+        echo -e "${GRAY}==========================================================${PLAIN}"
+        echo ""
+    )
+}
+
 # 展示单独节点链接与二维码
 show_links() {
     # 每次都按 env.conf 现算一遍，不缓存：
@@ -1755,6 +1825,7 @@ show_links() {
         fi
     fi
     echo -e "${GRAY}==============================================================${PLAIN}\n"
+    show_clash_snippet || true
     read -r -p "按回车键返回主菜单..." dummy || true
 }
 
@@ -2520,7 +2591,7 @@ menu() {
         fi
 
         echo -e "${GRAY}----------------------------------------------------${PLAIN}"
-        echo -e " 1. vless / hy2 原生链接查看"
+        echo -e " 1. vless / hy2 原生链接 + Mihomo 片段查看"
         echo -e " 2. VLESS-Reality 模块配置"
         echo -e " 3. Hysteria 2 模块配置"
         echo -e " 4. Clash 订阅地址配置"

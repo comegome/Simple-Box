@@ -100,7 +100,7 @@ simbo
  Clash 节点列表: http://203.0.113.10:8444/2dac50852729bf55bb61833d/provider.yaml
  ⚠️  (无域名证书加密，建议在可信网络下更新)
 ----------------------------------------------------
- 1. vless / hy2 原生链接查看
+ 1. vless / hy2 原生链接 + Mihomo 片段查看
  2. VLESS-Reality 模块配置
  3. Hysteria 2 模块配置
  4. Clash 订阅地址配置

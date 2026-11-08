@@ -333,12 +333,13 @@ if [[ "${_manual_ports:-0}" -eq 0 ]]; then
 else
     bad "仍有 ${_manual_ports} 处手拼 hy_ports_display" "格式变更时会漏改"
 fi
-# 端口串只允许两处生成：regen_subscription 内（订阅）与 show_links 内（原生链接）
+# 端口串只允许三处生成：regen_subscription 内（订阅）、show_links 内（原生链接）、
+# show_clash_snippet 内（Mihomo 片段）。新增消费者必须走同一函数，不得手拼。
 _fmt_calls=$(grep -c 'fmt_hy_ports "' "$TARGET" || true)
-if [[ "${_fmt_calls:-0}" -eq 2 ]]; then
-    ok "fmt_hy_ports 调用点恰为 2 处（订阅 + 原生链接）"
+if [[ "${_fmt_calls:-0}" -eq 3 ]]; then
+    ok "fmt_hy_ports 调用点恰为 3 处（订阅 + 原生链接 + Mihomo 片段）"
 else
-    bad "fmt_hy_ports 调用点数量异常" "共 ${_fmt_calls} 处，应为 2"
+    bad "fmt_hy_ports 调用点数量异常" "共 ${_fmt_calls} 处，应为 3"
 fi
 # regen_subscription 必须是唯一的订阅生成入口
 _regen_calls=$(grep -cE '^\s+regen_subscription' "$TARGET" || true)

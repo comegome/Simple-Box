@@ -341,12 +341,22 @@ if [[ "${_fmt_calls:-0}" -eq 3 ]]; then
 else
     bad "fmt_hy_ports 调用点数量异常" "共 ${_fmt_calls} 处，应为 3"
 fi
-# regen_subscription 必须是唯一的订阅生成入口
-_regen_calls=$(grep -cE '^\s+regen_subscription' "$TARGET" || true)
-if [[ "${_regen_calls:-0}" -eq 4 ]]; then
-    ok "regen_subscription 覆盖 4 个调用点"
+# 订阅只有一个生产者：generate_full_client_config 只能被 regen_subscription 调用。
+# 这是真正的不变式；下面那条计数只是「已知触发点没被悄悄删掉」的旁证。
+_producer_calls=$(grep -cE '^[[:space:]]+generate_full_client_config' "$TARGET" || true)
+_producer_in_regen=$(awk '/^regen_subscription\(\)/,/^}/' "$TARGET" | grep -c 'generate_full_client_config' || true)
+if [[ "${_producer_calls:-0}" -eq 1 && "${_producer_in_regen:-0}" -eq 1 ]]; then
+    ok "订阅生成器仅由 regen_subscription 调用（唯一生产者）"
 else
-    bad "regen_subscription 调用点数量异常" "共 ${_regen_calls} 处，应为 4"
+    bad "订阅生成器存在多处调用" "共 ${_producer_calls} 处，其中在 regen_subscription 内 ${_producer_in_regen} 处"
+fi
+# 会改变节点参数、必须重生成订阅的 5 个触发点：
+#   重载后 / 安装时 / token 轮换 / 节点前缀变更 / 直连后缀变更
+_regen_calls=$(grep -cE '^\s+regen_subscription' "$TARGET" || true)
+if [[ "${_regen_calls:-0}" -eq 5 ]]; then
+    ok "regen_subscription 覆盖 5 个触发点"
+else
+    bad "regen_subscription 调用点数量异常" "共 ${_regen_calls} 处，应为 5"
 fi
 
 # ---------- 10. 全量回归：危险命令审计 ----------

@@ -368,8 +368,8 @@ install_deps() {
         export DEBIAN_FRONTEND=noninteractive
         echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections 2>/dev/null || true
         echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections 2>/dev/null || true
-        apt-get update -qq || echo -e "${YELLOW}apt-get update 失败，尝试直接安装。${PLAIN}"
-        apt-get install -y -qq "${missing[@]}" \
+        apt-get -o DPkg::Lock::Timeout=180 update -qq || echo -e "${YELLOW}apt-get update 失败，尝试直接安装。${PLAIN}"
+        apt-get -o DPkg::Lock::Timeout=180 install -y -qq "${missing[@]}" \
             || echo -e "${YELLOW}部分依赖安装失败，将尝试继续（缺少 qrencode 仅影响二维码显示）。${PLAIN}"
     fi
 
@@ -402,8 +402,11 @@ install_caddy() {
 
     echo -e "正在安装 Caddy 用于证书管理..."
     export DEBIAN_FRONTEND=noninteractive
-    apt-get update -qq >/dev/null 2>&1 || true
-    if ! apt-get install -y -qq caddy; then
+    # 全新系统首次开机时 unattended-upgrades 常驻占用 apt 锁，直接 install 会以
+    # 「Could not get lock」失败——节点照样装好，但订阅端点起不来，用户只看到一个
+    # 打不开的订阅地址。这里让 apt 排队等锁，而不是立即放弃。
+    apt-get -o DPkg::Lock::Timeout=180 update -qq >/dev/null 2>&1 || true
+    if ! apt-get -o DPkg::Lock::Timeout=180 install -y -qq caddy; then
         echo -e "${RED}Caddy 安装失败。${PLAIN}"
         echo -e "${YELLOW}请先执行 apt-get update 后重试，或手动安装: apt-get install -y caddy${PLAIN}"
         return 1
@@ -821,7 +824,10 @@ setup_caddy_subscription() {
     local cert_mode="${4:-selfsigned}"
 
     if ! install_caddy; then
-        echo -e "${RED}Caddy 不可用，无法部署证书管理服务。${PLAIN}"
+        echo -e "${RED}Caddy 不可用，订阅地址无法访问。${PLAIN}"
+        echo -e "${YELLOW}节点本身是好的：Reality / Hy2 照常可用，原生链接也不受影响，${PLAIN}"
+        echo -e "${YELLOW}只有 http://<地址>:${sub_port}/ 这个订阅端点不会响应。${PLAIN}"
+        echo -e "${YELLOW}装好 Caddy 后重跑菜单 4「Clash 订阅地址配置」即可补上，不用重装节点。${PLAIN}"
         return 1
     fi
 
@@ -918,6 +924,21 @@ EOF
         return 0
     fi
     reload_caddy_safe || echo -e "${YELLOW}订阅地址配置已写入，但 Caddy 未能生效，可稍后手动 systemctl restart caddy。${PLAIN}"
+
+    # 自检：订阅端点真的取到文件才算部署成功。只看 caddy 是 active 不够——
+    # 站点配置写错、端口被占、bind 失败都会表现成「服务在跑，订阅 404/超时」，
+    # 而用户是在客户端里才发现的。
+    local _scheme="http" _code="000"
+    [[ "$cert_mode" == "domain" ]] && _scheme="https"
+    sleep 1
+    _code=$(curl -s -o /dev/null -m 8 -k -w '%{http_code}' \
+        "${_scheme}://127.0.0.1:${sub_port}/${token}/provider.yaml" 2>/dev/null || echo 000)
+    if [[ "$_code" == "200" ]]; then
+        echo -e "${GREEN}✓ 订阅端点自检通过 (${_scheme}://<本机>:${sub_port}/${token}/provider.yaml)${PLAIN}"
+    else
+        echo -e "${YELLOW}订阅端点自检未通过 (HTTP ${_code})${PLAIN}"
+        echo -e "${YELLOW}节点本身可用，但客户端拉订阅会失败。排查: systemctl status caddy; ss -ltn | grep :${sub_port}${PLAIN}"
+    fi
 }
 
 # 组装端口跳跃展示串：主端口，有跳跃范围时追加 "起始-结束"
@@ -1713,7 +1734,9 @@ EOF
 
     # 部署 Caddy 订阅并组装完整客户端配置
     regen_subscription
-    setup_caddy_subscription "$target_host" "$sub_token" "$sub_port" "$CERT_MODE"
+    # 订阅端点失败不应该让整台节点安装中断：节点配置已经写好，Reality/Hy2 可用，
+    # 缺的只是订阅地址。函数内部已打印明确警告与补救路径，这里继续走完收尾。
+    setup_caddy_subscription "$target_host" "$sub_token" "$sub_port" "$CERT_MODE" || true
 
     if [[ "${cert_fell_back:-}" == "true" ]]; then
         echo -e "${YELLOW}注意: 本次因域名证书申请失败已回退为 IP 自签证书，客户端已自动设为 skip-cert-verify。${PLAIN}"
@@ -1945,9 +1968,9 @@ uninstall_all() {
         # /etc/caddy/Caddyfile 被本脚本改过，purge 时 dpkg 会弹 conffile 询问；
         # 无人应答（脚本里 stdin 是管道）就会报 "end of file on stdin at conffile
         # prompt"，把包卡在 iU 半安装状态，之后任何 apt 操作都失败。
-        DEBIAN_FRONTEND=noninteractive apt-get purge -y -qq \
+        DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 purge -y -qq \
             -o Dpkg::Options::="--force-confold" caddy >/dev/null 2>&1 || true
-        DEBIAN_FRONTEND=noninteractive apt-get autoremove -y -qq >/dev/null 2>&1 || true
+        DEBIAN_FRONTEND=noninteractive apt-get -o DPkg::Lock::Timeout=180 autoremove -y -qq >/dev/null 2>&1 || true
         # apt remove 不删配置目录：只清理本脚本创建的站点文件，
         # 目录为空才 rmdir —— 用户后来自己加的站点配置必须保留。
         rm -f /etc/caddy/sites/simple-box*.caddy /etc/caddy/sites/*-"${SUB_PORT:-8444}".caddy 2>/dev/null || true

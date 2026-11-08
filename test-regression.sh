@@ -281,7 +281,7 @@ fi
 # ---------- 9. 全量回归：幂等性静态断言 ----------
 group "9. 全量回归：幂等性静态断言"
 grep -q 'iptables -t nat -F PREROUTING' "$TARGET" && bad "存在 iptables 全表清空炸弹" || ok "无 iptables 全表清空"
-grep -qE 'apt-get purge|apt purge' "$TARGET" && ok "卸载使用 apt purge（避免 mask 残留）" || bad "卸载未使用 apt purge"
+grep -qE 'apt-get[^|]*[[:space:]]purge|apt purge' "$TARGET" && ok "卸载使用 apt purge（避免 mask 残留）" || bad "卸载未使用 apt purge"
 grep -q 'DEBIAN_FRONTEND=noninteractive' "$TARGET" && ok "apt 操作设置 noninteractive" || bad "缺少 DEBIAN_FRONTEND=noninteractive"
 grep -q 'sing-box check' "$TARGET" && ok "启动前执行 sing-box check" || bad "缺少配置校验"
 grep -q 'BASH_SOURCE\[0\]' "$TARGET" && ok "存在管道执行检测" || bad "缺少管道执行检测"

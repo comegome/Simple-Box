@@ -1747,6 +1747,7 @@ proxies:
       public-key: ${VL_PUBKEY}
       short-id: ${VL_SHORTID}
     client-fingerprint: chrome
+
   - name: "${NODE_PREFIX}-Hysteria2"
     type: hysteria2
     server: ${host}

@@ -511,9 +511,31 @@ update_singbox_core() {
 
     echo -e "正在下载并更新内核..."
     if ! curl -fsSL "$url" -o "$tmp_tar"; then
-        echo -e "${RED}内核下载失败（网络不通或该版本无 ${arch} 构建），已保留现有版本。${PLAIN}"
-        rm -rf "$tmp_dir"
-        return 1
+        # 部分机房到 GitHub 的 releases/download 路径会稳定回 504：实测台北某线路对
+        # 任意仓库、任意版本的资产都 504，而 api.github.com 与 objects.githubusercontent.com
+        # 均正常。改走官方 API 的资产端点，拿到的是同一个文件，不引入第三方镜像。
+        echo -e "${YELLOW}直连 releases 失败，改用 GitHub API 资产端点重试...${PLAIN}"
+        local asset_id=""
+        # 资产 JSON 里 "id" 在 "name" 之前，用 awk 记住最近一个合法 id，命中目标名时吐出。
+        # 不要用 grep -o 在 name 那行找 id——两者不在同一行。
+        asset_id=$(curl -sSL --max-time 20 "https://api.github.com/repos/SagerNet/sing-box/releases/tags/${tag}" 2>/dev/null \
+            | awk -v want="sing-box-${latest_ver}-linux-${arch}.tar.gz" '
+                /"id":/ {
+                    v = $0
+                    sub(/.*"id":[[:space:]]*/, "", v)
+                    sub(/,.*/, "", v)
+                    if (v ~ /^[0-9]+$/) id = v
+                }
+                index($0, want) && /"name"/ { print id; exit }
+            ')
+        if [[ -z "$asset_id" ]] || ! curl -fsSL --max-time 600 \
+                -H "Accept: application/octet-stream" \
+                -o "$tmp_tar" \
+                "https://api.github.com/repos/SagerNet/sing-box/releases/assets/${asset_id}"; then
+            echo -e "${RED}内核下载失败（网络不通或该版本无 ${arch} 构建），已保留现有版本。${PLAIN}"
+            rm -rf "$tmp_dir"
+            return 1
+        fi
     fi
     if ! tar -xzf "$tmp_tar" -C "$tmp_dir" --strip-components=1 2>/dev/null; then
         echo -e "${RED}内核压缩包解压失败，已保留现有版本。${PLAIN}"

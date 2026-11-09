@@ -1274,10 +1274,15 @@ reinstall_with_latest() {
 
     echo -e "正在检查仓库最新脚本..."
     if ! fetch_latest_script "$latest"; then
-        echo -e "${YELLOW}获取最新脚本失败（网络不通或被限流），将用当前版本继续重装。${PLAIN}"
         rm -f "$latest"
-        install_node || true
-        return 0
+        echo -e "${RED}获取最新脚本失败，已中止，没有动任何配置。${PLAIN}"
+        echo -e "${YELLOW}注意: 这里不能回退到 install_node —— 重装会轮换 UUID / 密钥 / short-id，"
+        echo -e "      所有客户端配置都会静默失效。${PLAIN}"
+        echo -e "${GRAY}排查方向：${PLAIN}"
+        echo -e "${GRAY}  1. 仓库是否被设为私有（私有仓库的 raw 地址返回 404）${PLAIN}"
+        echo -e "${GRAY}  2. 本机能否访问 raw.githubusercontent.com${PLAIN}"
+        echo -e "${GRAY}  3. 手动下载后覆盖 ${target} 再重跑本菜单${PLAIN}"
+        return 1
     fi
 
     if [[ -f "$target" ]] && cmp -s "$latest" "$target"; then

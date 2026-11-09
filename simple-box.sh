@@ -1303,16 +1303,24 @@ reinstall_with_latest() {
     echo -e "${GREEN}检测到仓库有新版本，正在更新脚本...${PLAIN}"
     mkdir -p "$share_dir"
     if ! install -m 755 "$latest" "$target" 2>/dev/null && ! cp -f "$latest" "$target"; then
-        echo -e "${RED}脚本更新失败（磁盘只读？），将用当前版本继续重装。${PLAIN}"
         rm -f "$latest"
-        install_node || true
-        return 0
+        echo -e "${RED}脚本更新失败（磁盘只读？），已中止，没有动任何配置。${PLAIN}"
+        return 1
     fi
     chmod 755 "$target" 2>/dev/null || true
     rm -f "$latest"
     ln -sf "$target" /usr/local/bin/simbo
 
-    echo -e "${GREEN}脚本已更新，正在用新版本继续安装...${PLAIN}"
+    echo -e "${GREEN}脚本已更新到最新版本。${PLAIN}"
+    echo -e "${YELLOW}重装会轮换 UUID / 密钥 / short-id 并更换订阅 token，所有客户端都会失效。${PLAIN}"
+    local do_reinstall=""
+    read -r -p "是否现在重装？(y/N): " do_reinstall || do_reinstall=""
+    if [[ "$do_reinstall" != "y" && "$do_reinstall" != "Y" ]]; then
+        echo -e "${GRAY}已跳过重装，节点配置未改动。输入 simbo 打开面板即可使用新脚本。${PLAIN}"
+        return 0
+    fi
+
+    echo -e "${YELLOW}正在用新版本重装...${PLAIN}"
     # 用新脚本接管当前进程：确保后续交互逻辑与提示都来自新版本，
     # 而不是内存里这份旧代码（否则装完菜单仍是旧的）
     exec bash "$target" install

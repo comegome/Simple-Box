@@ -471,8 +471,23 @@ cp "$CD2/etc/caddy/Caddyfile" "$CD2/orig"
 diff -q "$CD2/orig" "$CD2/etc/caddy/Caddyfile" >/dev/null && ok "12.6 用户自有 Caddyfile 未被改动" || bad "12.6 用户 Caddyfile 被误改"
 rm -rf "$CD" "$CD2"
 
-# ---------- 13. 清理 ----------
-group "13. 清理"
+# ---------- 13. 端口占用判定：Caddy 只在订阅端口上算可复用 ----------
+group "13. 端口占用判定"
+# Caddy 占着 443（Reality 伪装站）时，Reality 不能也用 443，否则装完 bind 失败无限重启
+_cpo=$(sed -n '/^check_port_occupied()/,/^}/p' "$TARGET")
+if grep -q 'SUB_PORT' <<<"$_cpo" && grep -q '"\$port" == "\$SUB_PORT"' <<<"$_cpo"; then
+    ok "13.1 caddy 分支按 SUB_PORT 判定是否可复用"
+else
+    bad "13.1 caddy 分支未校验 SUB_PORT，会把伪装站占用的 443 当可复用"
+fi
+if grep -q '伪装站占用 443' <<<"$_cpo"; then
+    ok "13.2 冲突时给出可操作的提示"
+else
+    bad "13.2 冲突提示缺失"
+fi
+
+# ---------- 14. 清理 ----------
+group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
 ok "临时文件已清理"
 

@@ -341,8 +341,17 @@ check_port_occupied() {
             echo -e "提示: 端口 ${port} 当前由已有 sing-box 进程使用，重置安装将自动平滑接管。"
             return 0
         elif echo "$in_use" | grep -q "caddy"; then
-            echo -e "提示: 端口 ${port} 当前由已有 caddy 订阅服务使用，重置安装将自动复用。"
-            return 0
+            # 只有「订阅端口」才谈得上复用。Caddy 的其它站点（例如 Reality 伪装站
+            # 占着 443）与 sing-box 抢同一端口，必须当冲突拒绝，否则装完起不来：
+            # sing-box 报 "bind: address already in use" 然后无限重启。
+            if [[ -n "${SUB_PORT:-}" && "$port" == "$SUB_PORT" ]]; then
+                echo -e "提示: 端口 ${port} 当前由已有 caddy 订阅服务使用，重置安装将自动复用。"
+                return 0
+            fi
+            echo -e "${RED}警告: ${proto^^} 端口 ${port} 被 Caddy 的其它站点占用（订阅端口是 ${SUB_PORT:-未设置}）！${PLAIN}"
+            echo -e "${YELLOW}占用详情: ${in_use}${PLAIN}"
+            echo -e "${YELLOW}提示: 伪装站占用 443 时 Reality 不能也用 443，请换端口或先把伪装站移走。${PLAIN}"
+            return 1
         else
             echo -e "${RED}警告: ${proto^^} 端口 ${port} 已被外部服务占用！${PLAIN}"
             echo -e "${YELLOW}占用详情: ${in_use}${PLAIN}"

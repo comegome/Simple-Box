@@ -1286,8 +1286,16 @@ reinstall_with_latest() {
     fi
 
     if [[ -f "$target" ]] && cmp -s "$latest" "$target"; then
-        echo -e "${GREEN}当前已是最新脚本，直接重装。${PLAIN}"
         rm -f "$latest"
+        echo -e "${GREEN}当前已是最新脚本，无需升级。${PLAIN}"
+        echo -e "${YELLOW}重装会轮换 UUID / 密钥 / short-id，所有客户端配置都会失效。${PLAIN}"
+        local again=""
+        read -r -p "仍要重装吗？(y/N): " again || again=""
+        if [[ "$again" != "y" && "$again" != "Y" ]]; then
+            echo -e "${GRAY}已取消，节点保持原样。${PLAIN}"
+            return 0
+        fi
+        echo -e "${YELLOW}正在重装...${PLAIN}"
         install_node || true
         return 0
     fi

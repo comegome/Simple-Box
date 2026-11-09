@@ -395,6 +395,56 @@ install_deps() {
     return 0
 }
 
+# IPv6 连通性检查（安装时执行一次）
+# 背景：VPS 常见「有全局 IPv6 地址、有默认路由，但实际不通」。此时 curl 和
+# sing-box 用的 Go dialer 都会先试 IPv6，等 200-300ms 无响应才回退 IPv4，
+# 每个双栈目标都白等一次（实测某节点 TCP 握手 203ms，禁用后 2ms）。
+# 只在「有地址但连不通」时禁用；IPv6 正常的主机不受影响。
+check_ipv6() {
+    if [[ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" == "1" ]]; then
+        IPV6_STATUS="已禁用"
+        return 0
+    fi
+    if ! ip -6 addr show scope global 2>/dev/null | grep -q "inet6"; then
+        IPV6_STATUS="未启用"
+        return 0
+    fi
+    # 有地址：实测能不能出去。cloudflare 的 trace 端点回包小、不跳转。
+    if curl -6 -s -o /dev/null --max-time 4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null; then
+        IPV6_STATUS="正常"
+        return 0
+    fi
+    # 已有他人配置就不覆盖（与 BBR 同一套归属约定）
+    if [[ -f "$IPV6_CONF" ]] && ! grep -q "^${BBR_MARK}" "$IPV6_CONF"; then
+        IPV6_STATUS="未处理（${IPV6_CONF} 非本脚本创建）"
+        echo -e "${YELLOW}检测到 ${IPV6_CONF} 已存在且非本脚本创建，保留不覆盖。${PLAIN}"
+        return 0
+    fi
+    mkdir -p /etc/sysctl.d
+    cat > "$IPV6_CONF" <<EOF
+${BBR_MARK}
+net.ipv6.conf.all.disable_ipv6 = 1
+net.ipv6.conf.default.disable_ipv6 = 1
+net.ipv6.conf.lo.disable_ipv6 = 1
+EOF
+    sysctl --system >/dev/null 2>&1 || true
+    IPV6_STATUS="已禁用（有地址但不通）"
+    echo -e "${YELLOW}检测到 IPv6 地址但实际不通，已禁用 IPv6。${PLAIN}"
+    echo -e "${GRAY}原因: 不通的 IPv6 会让每个双栈连接先等 200-300ms 再回退 IPv4。${PLAIN}"
+    return 0
+}
+
+# 菜单显示用：只读本地状态，不发网络请求（面板每次刷新都会调用）
+ipv6_summary() {
+    if [[ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" == "1" ]]; then
+        echo "已禁用"
+    elif ip -6 addr show scope global 2>/dev/null | grep -q "inet6"; then
+        echo "已启用"
+    else
+        echo "未启用"
+    fi
+}
+
 # 检查并自动安装 Caddy（证书管理）
 # 支持范围内（Ubuntu 24.04+ / Debian 12+）的发行版仓库自带 caddy，无需第三方源。
 # 已有 caddy 则原样使用：不升级、不重启，避免打断用户自己托管在它上面的站点。
@@ -436,6 +486,7 @@ install_caddy() {
 # 卸载时只删带标记的，绝不覆盖或误删别人的 sysctl 配置。
 BBR_CONF="/etc/sysctl.d/99-bbr.conf"
 BBR_MARK="# managed-by: simple-box"
+IPV6_CONF="/etc/sysctl.d/99-disable-ipv6.conf"
 
 # 开启 BBR（安装时调用，无交互）
 # 三种情况分别处理：已开启则跳过；已有他人配置则不动；否则写入并打标记
@@ -477,6 +528,20 @@ EOF
 # 被覆盖回去，"恢复系统默认"本就做不到。用户自己的配置一律不碰。
 disable_bbr() {
     [[ -f "$BBR_CONF" ]] && grep -q "^${BBR_MARK}" "$BBR_CONF" && rm -f "$BBR_CONF" || true
+}
+
+# 卸载时调用：只删除本脚本创建的 IPv6 禁用文件
+# 与 BBR 不同，这里连运行时状态一起切回启用：IPv6 只有开/关两种状态，
+# 「装之前是什么」是确定的（启用），不像拥塞算法那样可能被用户改过。
+# 地址由 DHCP/RA 下发，切回后不会立刻恢复，重启或重新获取即可。
+disable_ipv6_managed() {
+    if [[ -f "$IPV6_CONF" ]] && grep -q "^${BBR_MARK}" "$IPV6_CONF"; then
+        rm -f "$IPV6_CONF"
+        sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null 2>&1 || true
+        sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null 2>&1 || true
+        echo -e "${GRAY}已移除本脚本创建的 IPv6 禁用配置。${PLAIN}"
+    fi
+    return 0
 }
 
 # 获取并升级官方 sing-box 内核（带精准版本校验）
@@ -1417,6 +1482,10 @@ install_node() {
         return 1
     fi
 
+    # 在装内核之前处理：坏 IPv6 会让后续所有出站拨号（含 Reality 握手取证书）
+    # 每个连接多等 200-300ms，装完再修就白测一轮。
+    check_ipv6
+
     if [[ ! -f /usr/local/bin/sing-box ]]; then
         update_singbox_core "force" || { echo -e "${RED}内核安装失败，无法继续。${PLAIN}"; return 1; }
     fi
@@ -1754,6 +1823,7 @@ EOF
     echo -e "\n${GRAY}====================================================${PLAIN}"
     echo -e " ${GREEN}✓${PLAIN} ${BOLD}Simple-Box 安装就绪！${PLAIN}"
     echo -e " 随时在终端输入 ${CYAN}simbo${PLAIN} 即可打开控制台。"
+    echo -e " IPv6 状态: ${IPV6_STATUS:-$(ipv6_summary)}"
     echo -e "${GRAY}====================================================${PLAIN}\n"
 }
 
@@ -2001,6 +2071,7 @@ uninstall_all() {
     echo -e "${YELLOW}本脚本自身的入口 (simbo) 也已删除，控制台即将退出。${PLAIN}"
     echo -e "${YELLOW}如需重装，请重新执行一键安装命令。${PLAIN}"
     disable_bbr
+    disable_ipv6_managed
     # 卸载后目录与入口都已不存在，继续停留在菜单毫无意义（面板还会读到已删除的配置）
     UNINSTALL_DONE=true
 }
@@ -2622,6 +2693,14 @@ menu() {
         echo -e " 公网地址: ${cur_ip}"
         echo -e " TLS 证书: ${cert_display}"
         echo -e " TCP 加速: ${bbr_status}"
+        local ipv6_st ipv6_display
+        ipv6_st=$(ipv6_summary)
+        case "$ipv6_st" in
+            已禁用) ipv6_display="${YELLOW}${ipv6_st}${PLAIN}" ;;
+            未启用) ipv6_display="${GRAY}${ipv6_st}${PLAIN}" ;;
+            *)      ipv6_display="${GREEN}${ipv6_st}${PLAIN}" ;;
+        esac
+        echo -e " IPv6 状态: ${ipv6_display}"
         echo -e " 证书管理: ${caddy_status}"
         echo -e " 代理服务: ${sb_status}"
         

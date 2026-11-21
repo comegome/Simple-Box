@@ -30,7 +30,7 @@ ENV_LOADED=""
 load_env() {
     [[ -n "$ENV_LOADED" ]] && return 0
     [[ -f "$ENV_FILE" ]] || return 1
-    load_env
+    . "$ENV_FILE"
     ENV_LOADED=1
 }
 TEMPLATE_FILE="${CONF_DIR}/template.yaml"

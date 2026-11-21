@@ -1814,7 +1814,6 @@ install_node() {
     [[ -n "$DIRECT_SUFFIXES" ]] && echo -e " ${GREEN}✓${PLAIN} 将直连: ${DIRECT_SUFFIXES}" \
                                 || echo -e " ${GRAY}已跳过（不插入任何直连规则）${PLAIN}"
 
-    write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "$hy_port" "$hy_password"
     if ! write_env_config; then
         echo -e "${RED}环境配置写入失败，安装中止。${PLAIN}"
         return 1
@@ -1841,32 +1840,26 @@ LimitNOFILE=infinity
 WantedBy=multi-user.target
 EOF
 
-    # 启动前先做配置校验，避免带病重启导致服务起不来
-    if ! /usr/local/bin/sing-box check -c "$CONF_FILE" >/dev/null 2>&1; then
-        echo -e "${RED}生成的配置未通过 sing-box check 校验，已中止启动。${PLAIN}"
-        /usr/local/bin/sing-box check -c "$CONF_FILE" || true
-        return 1
-    fi
-
     systemctl daemon-reload
     systemctl enable sing-box >/dev/null 2>&1 || true
-    if ! systemctl restart sing-box; then
-        echo -e "${RED}sing-box 启动失败，请查看: journalctl -u sing-box -n 50${PLAIN}"
-        return 1
-    fi
 
     install_simbo_command
 
     # 每次重装换新 Token（顺手换锁），并把旧 Token 目录与历史残留一次清干净。
-    # 用 find 而不是只删 env.conf 里记录的旧 token：旧版本反复重装留下的孤儿目录
-    # 早已不在 env.conf 里，只删「上一个 token」清不掉它们。
     find "$WEB_DIR" -mindepth 1 -maxdepth 1 -type d ! -name "$sub_token" -exec rm -rf {} + 2>/dev/null || true
 
-    # 部署 Caddy 订阅并组装完整客户端配置
-    regen_subscription
-    # 订阅端点失败不应该让整台节点安装中断：节点配置已经写好，Reality/Hy2 可用，
-    # 缺的只是订阅地址。函数内部已打印明确警告与补救路径，这里继续走完收尾。
+    # 订阅站先就位：协议模块触发的 render_and_reload 会用到它
     setup_caddy_subscription "$target_host" "$sub_token" "$sub_port" "$CERT_MODE" || true
+
+    # 两个协议走同一套模块（非交互入口），安装里不再另写一份配置
+    if ! proto_enable_reality "$vl_port" "$vl_sni"; then
+        echo -e "${RED}Reality 启用失败，安装中止（Hysteria2 未启用）。${PLAIN}"
+        return 1
+    fi
+    if ! proto_enable_hy2 "$hy_port" "$hy_domain" "$hy_range"; then
+        echo -e "${YELLOW}Hysteria2 启用失败，Reality 已可用。${PLAIN}"
+        echo -e "${YELLOW}修复后执行: simbo → 协议管理 → 启用 Hysteria2${PLAIN}"
+    fi
 
     if [[ "${cert_fell_back:-}" == "true" ]]; then
         echo -e "${YELLOW}注意: 本次因域名证书申请失败已回退为 IP 自签证书，客户端已自动设为 skip-cert-verify。${PLAIN}"
@@ -2216,13 +2209,18 @@ render_set() {
 }
 
 proto_enable_reality() {
+    # 传参 = 非交互（安装向导用）；不传参 = 交互（协议菜单用）
+    local port="${1:-}" sni="${2:-}" interactive=1
+    if [[ $# -gt 0 ]]; then interactive=0; fi
     load_env || { echo -e "${RED}未检测到已安装的配置${PLAIN}"; return 1; }
     ensure_reality_creds || return 1
 
-    local port sni
-    ask_trim "请输入 Reality 监听端口 [默认: ${CYAN}${VL_PORT:-443}${PLAIN}]: " "${VL_PORT:-443}" port
+    if [[ "$interactive" == 1 ]]; then
+        ask_trim "请输入 Reality 监听端口 [默认: ${CYAN}${VL_PORT:-443}${PLAIN}]: " "${VL_PORT:-443}" port
+        ask_trim "请输入 Reality 伪装域名 [默认: ${CYAN}${VL_SNI:-www.icloud.com}${PLAIN}]: " "${VL_SNI:-www.icloud.com}" sni
+    fi
+    port="${port:-${VL_PORT:-443}}"; sni="${sni:-${VL_SNI:-www.icloud.com}}"
     validate_port "$port" || return 1
-    ask_trim "请输入 Reality 伪装域名 [默认: ${CYAN}${VL_SNI:-www.icloud.com}${PLAIN}]: " "${VL_SNI:-www.icloud.com}" sni
     validate_domain "$sni" || return 1
 
     # 检查点 B：这个域名在本机有没有站点
@@ -2261,24 +2259,34 @@ proto_enable_reality() {
     sync_env_locals; write_env_config || return 1
 
     [[ -n "$site" ]] && { flip_site_toggle on || return 1; }
+    sync_env_locals   # render_and_reload 里的 regen_subscription 读小写变量
     render_and_reload || return 1
     echo -e "${GREEN}✓ Reality 已启用${PLAIN}"
 }
 
 proto_enable_hy2() {
+    # 传参 = 非交互（安装向导用）；不传参 = 交互（协议菜单用）
+    local port="" domain="" range="" interactive=1
+    if [[ $# -gt 0 ]]; then
+        interactive=0; port="${1:-}"; domain="${2:-}"; range="${3:-}"
+    fi
     load_env || { echo -e "${RED}未检测到已安装的配置${PLAIN}"; return 1; }
 
-    local domain port range
-    ask_trim "请输入 Hysteria2 域名 [默认: ${CYAN}${HY_DOMAIN:-留空=IP自签}${PLAIN}]: " "${HY_DOMAIN:-}" domain
-    ask_trim "请输入 Hysteria2 端口 [默认: ${CYAN}${HY_PORT:-10443}${PLAIN}]: " "${HY_PORT:-10443}" port
-    validate_port "$port" || return 1
-    ask_trim "请输入端口跳跃范围 [默认: ${CYAN}${HY_RANGE:-none}${PLAIN}] (none=不启用): " "${HY_RANGE:-none}" range
-    [[ "$range" == "none" ]] && range=""
-
-    check_port_conflict "$port" "udp" "hy2" "$range" || return 1
-    if [[ -n "$range" ]]; then
-        check_range_conflict "$range" || return 1
+    if [[ "$interactive" == 1 ]]; then
+        ask_trim "请输入 Hysteria2 域名 [默认: ${CYAN}${HY_DOMAIN:-留空=IP自签}${PLAIN}]: " "${HY_DOMAIN:-}" domain
+        ask_trim "请输入 Hysteria2 端口 [默认: ${CYAN}${HY_PORT:-10443}${PLAIN}]: " "${HY_PORT:-10443}" port
+        ask_trim "请输入端口跳跃范围 [默认: ${CYAN}${HY_RANGE:-none}${PLAIN}] (none=不启用): " "${HY_RANGE:-none}" range
     fi
+    port="${port:-${HY_PORT:-10443}}"; range="${range:-${HY_RANGE:-}}"
+    [[ "$range" == "none" ]] && range=""
+    validate_port "$port" || return 1
+
+    # 端口已被本机 sing-box 占用 = 就是这条协议自己在跑，跳过"被占用"判定（幂等重启）
+    local holder; holder=$(port_holder "$port" udp)
+    if [[ -z "$holder" || "$holder" != *sing-box* ]]; then
+        check_port_conflict "$port" "udp" "hy2" "$range" || return 1
+    fi
+    [[ -n "$range" ]] && { check_range_conflict "$range" || return 1; }
 
     HY_DOMAIN="$domain"; HY_PORT="$port"; HY_RANGE="$range"
     [[ -z "${HY_PASS:-}" ]] && HY_PASS=$(/usr/local/bin/sing-box generate rand --base64 16)
@@ -2293,6 +2301,7 @@ proto_enable_hy2() {
     local set="hy2"; set_has "vless-reality-in" && set="reality hy2"
     render_set "$set" || return 1
     sync_env_locals; write_env_config || return 1
+    sync_env_locals
     render_and_reload || return 1
     echo -e "${GREEN}✓ Hysteria2 已启用${PLAIN}"
 }

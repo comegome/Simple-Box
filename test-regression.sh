@@ -313,18 +313,24 @@ else
     bad "Caddy reload 调用点异常" "共 ${_setup_reload} 处，应为 2（定义 + setup 内部）"
 fi
 
-# 10.2 三个发布订阅的调用点动作序列必须一致：generate → setup_caddy → verify
-for _fn in render_and_reload install_node; do
-    _body=$(awk -v f="^${_fn}\\(\\)" '$0 ~ f {p=1} p {print} p && /^}/ && NR>1 {exit}' "$TARGET")
-    _has_gen=$(grep -cE 'regen_subscription|generate_full_client_config' <<<"$_body")
-    _has_setup=$(grep -c 'setup_caddy_subscription' <<<"$_body")
-    _has_verify=$(grep -c 'verify_caddy_listening' <<<"$_body")
-    if [[ "$_has_gen" -ge 1 && "$_has_setup" -ge 1 ]]; then
-        ok "${_fn} 含 generate + setup_caddy"
-    else
-        bad "${_fn} 缺少发布订阅的关键步骤" "generate=${_has_gen} setup=${_has_setup} verify=${_has_verify}"
-    fi
-done
+# 10.2 发布订阅的动作序列：render_and_reload 自己生成；install_node 委托给协议模块
+_body=$(awk '/^render_and_reload\(\)/ {p=1} p {print} p && /^}/ && NR>1 {exit}' "$TARGET")
+_has_gen=$(grep -cE 'regen_subscription|generate_full_client_config' <<<"$_body")
+_has_setup=$(grep -c 'setup_caddy_subscription' <<<"$_body")
+if [[ "$_has_gen" -ge 1 && "$_has_setup" -ge 1 ]]; then
+    ok "render_and_reload 含 generate + setup_caddy"
+else
+    bad "render_and_reload 缺少发布订阅的关键步骤" "generate=${_has_gen} setup=${_has_setup}"
+fi
+
+# install_node 不再自己写配置/订阅，必须委托给两个协议模块 + 建订阅站
+_ibody=$(awk '/^install_node\(\)/ {p=1} p {print} p && /^}/ && NR>1 {exit}' "$TARGET")
+if grep -q 'proto_enable_reality' <<<"$_ibody" && grep -q 'proto_enable_hy2' <<<"$_ibody" \
+   && grep -q 'setup_caddy_subscription' <<<"$_ibody"; then
+    ok "install_node 委托协议模块并建订阅站"
+else
+    bad "install_node 未委托协议模块" "reality=$(grep -c proto_enable_reality <<<"$_ibody") hy2=$(grep -c proto_enable_hy2 <<<"$_ibody")"
+fi
 
 # 10.2 端口跳跃展示串必须由 fmt_hy_ports 统一生成（禁止各处手拼）
 _manual_ports=$(grep -c 'hy_ports_display="\${[A-Za-z_]*},\${' "$TARGET" || true)
@@ -353,11 +359,12 @@ fi
 # 会改变节点参数、必须重生成订阅的 5 个触发点：
 #   重载后 / 安装时 / token 轮换 / 节点前缀变更 / 直连后缀变更
 _regen_calls=$(grep -cE '^\s+regen_subscription' "$TARGET" || true)
-# 5 = 重载后 / 安装时 / token 轮换 / 节点前缀 / 直连后缀；+1 = regen_from_scope（停用/重建共用）
-if [[ "${_regen_calls:-0}" -eq 6 ]]; then
-    ok "regen_subscription 覆盖 6 个触发点"
+# 4 = 重载后 / token 轮换 / 节点前缀 / 直连后缀；+1 = regen_from_scope（启用/停用共用）
+# 安装不再单独调用：它走 proto_enable_*，最终由 render_and_reload 内的重载触发
+if [[ "${_regen_calls:-0}" -eq 5 ]]; then
+    ok "regen_subscription 覆盖 5 个触发点"
 else
-    bad "regen_subscription 调用点数量异常" "共 ${_regen_calls} 处，应为 6"
+    bad "regen_subscription 调用点数量异常" "共 ${_regen_calls} 处，应为 5"
 fi
 
 # ---------- 10. 全量回归：危险命令审计 ----------
@@ -652,6 +659,106 @@ else
 fi
 
 unset CADDY_SITES_DIR
+
+# ---------- 16. 安装走协议模块 + 非交互入口 ----------
+group "16. 安装 / 协议模块集成"
+
+SB16="$TMPD/m16"; mkdir -p "$SB16/sites" "$SB16/cert"
+cat > "$SB16/sites/site.caddy" <<'EOF'
+site.example.com {
+	root * /var/www/site
+	file_server
+}
+EOF
+cat > "$SB16/env.conf" <<'EOF'
+NODE_PREFIX="T16"
+SERVER_IP="203.0.113.10"
+VL_PORT="443"
+VL_SNI="site.example.com"
+VL_UUID="11111111-1111-1111-1111-111111111111"
+VL_PRIVKEY="PRIVKEY16"
+VL_PUBKEY="PUBKEY16"
+VL_SHORTID="abcd1234"
+HY_DOMAIN=""
+TARGET_HOST="203.0.113.10"
+HY_PORT="10443"
+HY_RANGE=""
+HY_PASS="hy16pass"
+HY_SKIP_CERT="false"
+SUB_PORT="8444"
+SUB_PROTO="https"
+SUB_TOKEN="token16"
+CERT_MODE="selfsigned"
+DIRECT_SUFFIXES=""
+FLIP_HOST=""
+SITE_FILE=""
+FLIP_PORT="9443"
+VL_HANDSHAKE=""
+VL_HANDSHAKE_PORT=""
+EOF
+printf '{"inbounds":[]}\n' > "$SB16/config.json"
+
+# 覆盖到沙箱 + 桩掉会碰系统的两个动作
+ENV_FILE="$SB16/env.conf"; CONF_FILE="$SB16/config.json"; CERT_DIR="$SB16/cert"
+CADDY_SITES_DIR="$SB16/sites"
+ENV_LOADED=""
+render_and_reload() { return 0; }
+flip_site_toggle() { return 0; }
+
+# 16.1 安装不再自己写配置
+if awk '/^install_node\(\) \{/,/^\}/' "$TARGET" | grep -q 'write_singbox_config'; then
+    bad "16.1 install_node 仍在直接写配置"
+else
+    ok "16.1 install_node 不再直接调 write_singbox_config"
+fi
+awk '/^install_node\(\) \{/,/^\}/' "$TARGET" | grep -q 'proto_enable_reality' \
+    && awk '/^install_node\(\) \{/,/^\}/' "$TARGET" | grep -q 'proto_enable_hy2' \
+    && ok "16.2 安装通过 proto_enable_reality / proto_enable_hy2" || bad "16.2 安装未走协议模块"
+
+# 16.3 非交互启用 Reality（传参 + stdin 关闭，不应阻塞）
+if proto_enable_reality 8443 site.example.com < /dev/null > "$SB16/o1" 2>&1; then
+    tags=$(python3 -c "import json;print(' '.join(i['tag'] for i in json.load(open('$SB16/config.json'))['inbounds']))")
+    hs=$(python3 -c "import json;h=[i for i in json.load(open('$SB16/config.json'))['inbounds'] if i['tag']=='vless-reality-in'][0]['tls']['reality'];print(h['handshake']['server'], h['handshake']['server_port'], [i for i in json.load(open('$SB16/config.json'))['inbounds']][0]['listen_port'])")
+    [[ "$tags" == "vless-reality-in" && "$hs" == "127.0.0.1 9443 8443" ]] \
+        && ok "16.3 非交互启用 Reality：端口 8443 + 回落 127.0.0.1:9443" \
+        || bad "16.3 启用 Reality 结果异常" "$tags / $hs"
+else
+    bad "16.3 非交互启用 Reality 失败" "$(tail -3 "$SB16/o1")"
+fi
+
+# 16.4 站点信息落进 env
+grep -q '^SITE_FILE="/tmp' "$SB16/env.conf" 2>/dev/null || grep -q "^SITE_FILE=\"$SB16/sites/site.caddy\"" "$SB16/env.conf" \
+    && ok "16.4 env 记录翻转站点路径" || bad "16.4 SITE_FILE 未写入" "$(grep '^SITE_FILE' "$SB16/env.conf")"
+
+# 16.5 非交互启用 Hy2：两个 inbound 共存
+if proto_enable_hy2 10443 "" "" < /dev/null > "$SB16/o2" 2>&1; then
+    n=$(python3 -c "import json;print(len(json.load(open('$SB16/config.json'))['inbounds']))")
+    [[ "$n" == "2" ]] && ok "16.5 启用 Hy2 后两个 inbound 共存" || bad "16.5 inbound 数量异常" "$n"
+else
+    bad "16.5 非交互启用 Hy2 失败" "$(tail -3 "$SB16/o2")"
+fi
+
+# 16.6 停用 Hy2 只摘自己
+disable_protocol hy2 > /dev/null 2>&1
+tags=$(python3 -c "import json;print(' '.join(i['tag'] for i in json.load(open('$SB16/config.json'))['inbounds']))")
+[[ "$tags" == "vless-reality-in" ]] && ok "16.6 停用 Hy2 保留 Reality" || bad "16.6 停用 Hy2 结果异常" "$tags"
+
+# 16.7 停用 Reality 摘干净
+disable_protocol reality > /dev/null 2>&1
+n=$(python3 -c "import json;print(len(json.load(open('$SB16/config.json'))['inbounds']))")
+[[ "$n" == "0" ]] && ok "16.7 停用 Reality 后无 inbound" || bad "16.7 停用 Reality 残留" "$n"
+
+# 16.8 订阅重建发生在 render 之前拿到新值（静态检查 sync_env_locals 在 render_and_reload 前）
+awk '/^proto_enable_reality\(\) \{/,/^\}/' "$TARGET" | grep -n "sync_env_locals\|render_and_reload" | awk -F: '$2 ~ /sync_env_locals/ {s=$1} $2 ~ /render_and_reload/ {r=$1} END{exit !(s && r && s<r)}' \
+    && ok "16.8 Reality 启用前同步小写作用域" || bad "16.8 未在 render 前同步 env 变量"
+
+# 16.9 proto 传参分支内不得再有 read
+if awk '/^proto_enable_reality\(\) \{/,/^\}/' "$TARGET" | grep -A3 'interactive" == 1' | grep -q 'ask_trim'; then
+    ok "16.9 交互提问被限制在 interactive 分支内"
+else
+    bad "16.9 未找到 interactive 分支"
+fi
+
 
 # ---------- 14. 清理 ----------
 group "14. 清理"

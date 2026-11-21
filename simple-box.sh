@@ -24,7 +24,15 @@ CONF_FILE="${CONF_DIR}/config.json"
 CERT_DIR="${CONF_DIR}/cert"
 WEB_DIR="${CONF_DIR}/web"
 ENV_FILE="${CONF_DIR}/env.conf"
-LINKS_FILE="${CONF_DIR}/links.txt"
+
+# 读取 env.conf：同一进程内只读一次；write_env_config 会清空缓存强制重读
+ENV_LOADED=""
+load_env() {
+    [[ -n "$ENV_LOADED" ]] && return 0
+    [[ -f "$ENV_FILE" ]] || return 1
+    load_env
+    ENV_LOADED=1
+}
 TEMPLATE_FILE="${CONF_DIR}/template.yaml"
 
 SCRIPT_URL="https://raw.githubusercontent.com/comegome/Simple-Box/main/simple-box.sh"
@@ -156,7 +164,7 @@ check_domain_ip_binding() {
     fi
 
     local confirm=""
-    read -r -p "是否仍要继续使用该域名？y/N (回车放弃，重新输入域名或使用 IP): " confirm || confirm=""
+    ask "是否仍要继续使用该域名？y/N (回车放弃，重新输入域名或使用 IP): " confirm
     if [[ "${confirm,,}" == "y" || "${confirm,,}" == "yes" ]]; then
         echo -e "${YELLOW}已确认继续使用未匹配的域名: ${domain}${PLAIN}"
         return 0
@@ -169,6 +177,12 @@ trim_string() {
     local val="${1:-}"
     echo "$val" | tr -d '\r\n' | sed -E ':loop; s/^[[:space:]]+|[[:space:]]+$//g; s/^["'"'"']+|["'"'"']+$//g; t loop'
 }
+
+# 统一输入：ask 纯输入 / ask_trim 去空格+默认值 / confirm_yes 确认
+ask() { local _in=""; read -r -p "$1" _in || _in=""; printf -v "$2" '%s' "$_in"; }
+ask_trim() { local _in=""; read -r -p "$1" _in || _in=""; printf -v "$3" '%s' "$(trim_string "${_in:-$2}")"; }
+confirm_yes() { local _in=""; read -r -p "$1" _in || _in=""; [[ "${_in,,}" == y* ]]; }
+
 
 # 判断 CERT_DIR 中的证书是否确实签给指定域名（含有效期与公私钥配对校验）
 # 用途：复用旧域名时可免输 Token，但必须确认证书真的覆盖该域名，
@@ -250,7 +264,7 @@ prompt_cf_token() {
     echo -e "${GRAY}-----------------------------------------------------------------${PLAIN}"
     local token=""
     while true; do
-        read -r -p "请输入 Cloudflare API Token: " token || token=""
+        ask "请输入 Cloudflare API Token: " token
         token=$(trim_string "$token")
         if [[ -z "$token" ]]; then
             echo -e "${YELLOW}未输入 Token，将自动使用 IP 自签证书。${PLAIN}"
@@ -261,7 +275,7 @@ prompt_cf_token() {
             return 0
         fi
         local retry=""
-        read -r -p "是否重新输入 Token？Y/n (回车重试，输入 n 使用 IP 自签): " retry || retry=""
+        ask "是否重新输入 Token？Y/n (回车重试，输入 n 使用 IP 自签): " retry
         if [[ "${retry,,}" == "n" ]]; then
             echo -e "${YELLOW}已放弃域名证书，将自动使用 IP 自签证书。${PLAIN}"
             return 1
@@ -1231,7 +1245,6 @@ EOF
         local hy2_link="hy2://${hy_password}@${domain_or_ip}:${hy_port}/?sni=${domain_or_ip}&insecure=${insecure_flag}${mport_param}#${node_prefix}-Hysteria2"
         echo "$hy2_link" >> "$links_out"
     fi
-    cp -f "$links_out" "$LINKS_FILE"
 }
 
 # 注册全局 simbo 指令（兼容 bash <(curl ...) 管道执行）
@@ -1307,7 +1320,7 @@ reinstall_with_latest() {
         echo -e "${GREEN}当前已是最新脚本，无需升级。${PLAIN}"
         echo -e "${YELLOW}重装会轮换 UUID / 密钥 / short-id，所有客户端配置都会失效。${PLAIN}"
         local again=""
-        read -r -p "仍要重装吗？(y/N): " again || again=""
+        ask "仍要重装吗？(y/N): " again
         if [[ "$again" != "y" && "$again" != "Y" ]]; then
             echo -e "${GRAY}已取消，节点保持原样。${PLAIN}"
             return 0
@@ -1331,7 +1344,7 @@ reinstall_with_latest() {
     echo -e "${GREEN}脚本已更新到最新版本。${PLAIN}"
     echo -e "${YELLOW}重装会轮换 UUID / 密钥 / short-id 并更换订阅 token，所有客户端都会失效。${PLAIN}"
     local do_reinstall=""
-    read -r -p "是否现在重装？(y/N): " do_reinstall || do_reinstall=""
+    ask "是否现在重装？(y/N): " do_reinstall
     if [[ "$do_reinstall" != "y" && "$do_reinstall" != "Y" ]]; then
         echo -e "${GRAY}已跳过重装，节点配置未改动。输入 simbo 打开面板即可使用新脚本。${PLAIN}"
         return 0
@@ -1464,6 +1477,8 @@ VL_HANDSHAKE_PORT="${VL_HANDSHAKE_PORT:-}"
 EOF
     )
     chmod 600 "$ENV_FILE" 2>/dev/null || true
+    ENV_LOADED=""
+
 }
 
 # 校验 sing-box 配置、重启并全量刷新客户端文件与 Caddy 订阅
@@ -1524,7 +1539,7 @@ install_node() {
     # 读取既有配置，作为重置时的默认值（直接回车即沿用）
     local old_vl_port="" old_vl_sni="" old_hy_port="" old_hy_range="" old_sub_port="" old_prefix="" old_domain=""
     if [[ -f "$ENV_FILE" ]]; then
-        set +e; source "$ENV_FILE"; set -e
+        set +e; load_env; set -e
         old_vl_port="$VL_PORT"; old_vl_sni="$VL_SNI"; old_hy_port="$HY_PORT"
         old_hy_range="$HY_RANGE"; old_sub_port="$SUB_PORT"; old_prefix="$NODE_PREFIX"
         old_domain="${HY_DOMAIN:-}"
@@ -1556,8 +1571,7 @@ install_node() {
     echo -e "${GRAY}----------------------------------------------------${PLAIN}"
     local vl_port
     while true; do
-        read -r -p "请输入 Reality 监听端口 [默认: ${CYAN}${old_vl_port:-443}${PLAIN}]: " vl_port || vl_port=""
-        vl_port=$(trim_string "${vl_port:-${old_vl_port:-443}}")
+        ask_trim "请输入 Reality 监听端口 [默认: ${CYAN}${old_vl_port:-443}${PLAIN}]: " "${old_vl_port:-443}" vl_port
         if ! validate_port "$vl_port"; then
             echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
         fi
@@ -1568,7 +1582,7 @@ install_node() {
 
     local vl_sni
     while true; do
-        read -r -p "请输入 Reality 借壳伪装域名 [默认: ${CYAN}${old_vl_sni:-www.icloud.com}${PLAIN}]: " vl_sni || vl_sni=""
+        ask "请输入 Reality 借壳伪装域名 [默认: ${CYAN}${old_vl_sni:-www.icloud.com}${PLAIN}]: " vl_sni
         vl_sni=$(trim_string "$vl_sni")
         vl_sni=${vl_sni:-${old_vl_sni:-www.icloud.com}}
         if [[ "$vl_sni" == "$server_ip" ]]; then
@@ -1592,7 +1606,7 @@ install_node() {
     if [[ -n "$old_domain" ]]; then
         echo -e "检测到当前已配置域名: ${CYAN}${old_domain}${PLAIN}"
         local reuse_domain=""
-        read -r -p "是否继续使用此域名？Y/n (回车沿用，输入 n 更换域名或使用 IP): " reuse_domain || reuse_domain=""
+        ask "是否继续使用此域名？Y/n (回车沿用，输入 n 更换域名或使用 IP): " reuse_domain
         if [[ -z "$reuse_domain" || "${reuse_domain,,}" == "y" || "${reuse_domain,,}" == "yes" ]]; then
             hy_domain="$old_domain"
             echo -e "已选择沿用当前域名: ${hy_domain}"
@@ -1610,7 +1624,7 @@ install_node() {
         echo -e "  • 直接回车 = 使用 IP 自签证书（10 年 ECC，客户端自动开启跳过证书校验）"
 
         while true; do
-            read -r -p "请输入域名 [回车=IP自签]: " hy_domain || hy_domain=""
+            ask "请输入域名 [回车=IP自签]: " hy_domain
             hy_domain=$(trim_string "$hy_domain")
 
             case "${hy_domain,,}" in
@@ -1666,8 +1680,7 @@ install_node() {
     local hy_port="8443"
     local hy_range="20000:40000"
     while true; do
-        read -r -p "请输入 Hysteria 2 主监听 UDP 端口 [默认: ${CYAN}${old_hy_port:-8443}${PLAIN}]: " hy_port || hy_port=""
-        hy_port=$(trim_string "${hy_port:-${old_hy_port:-8443}}")
+        ask_trim "请输入 Hysteria 2 主监听 UDP 端口 [默认: ${CYAN}${old_hy_port:-8443}${PLAIN}]: " "${old_hy_port:-8443}" hy_port
         if ! validate_port "$hy_port"; then
             echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
         fi
@@ -1676,8 +1689,7 @@ install_node() {
     HY_PORT="$hy_port"
 
     while true; do
-        read -r -p "请输入端口跳跃范围 [默认: ${CYAN}${old_hy_range:-20000:40000}${PLAIN}] (none=不启用): " hy_range || hy_range=""
-        hy_range=$(trim_string "${hy_range:-${old_hy_range:-20000:40000}}")
+        ask_trim "请输入端口跳跃范围 [默认: ${CYAN}${old_hy_range:-20000:40000}${PLAIN}] (none=不启用): " "${old_hy_range:-20000:40000}" hy_range
         [[ "${hy_range,,}" == "none" ]] && { hy_range=""; break; }
         if ! validate_range "$hy_range"; then
             echo -e "${RED}范围格式非法，应为 起始:结束（如 20000:40000）。${PLAIN}"; continue
@@ -1691,8 +1703,7 @@ install_node() {
     echo -e "${GRAY}----------------------------------------------------${PLAIN}"
     local sub_port
     while true; do
-        read -r -p "请输入 Caddy 订阅监听端口 [默认: ${CYAN}${old_sub_port:-8444}${PLAIN}]: " sub_port || sub_port=""
-        sub_port=$(trim_string "${sub_port:-${old_sub_port:-8444}}")
+        ask_trim "请输入 Caddy 订阅监听端口 [默认: ${CYAN}${old_sub_port:-8444}${PLAIN}]: " "${old_sub_port:-8444}" sub_port
         if ! validate_port "$sub_port"; then
             echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
         fi
@@ -1700,8 +1711,7 @@ install_node() {
     done
 
     local node_prefix
-    read -r -p "请输入节点名称前缀 (如 HK / US / JP) [默认: ${CYAN}${old_prefix:-Node}${PLAIN}]: " node_prefix || node_prefix=""
-    node_prefix=$(trim_string "${node_prefix:-${old_prefix:-Node}}")
+    ask_trim "请输入节点名称前缀 (如 HK / US / JP) [默认: ${CYAN}${old_prefix:-Node}${PLAIN}]: " "${old_prefix:-Node}" node_prefix
     # 去掉会破坏 YAML/URI 的字符（引号、逗号、井号、冒号、反斜杠）
     node_prefix=$(printf '%s' "$node_prefix" | tr -d '\"'"'"',#:\\')
     [[ -z "$node_prefix" ]] && node_prefix="Node"
@@ -1772,10 +1782,10 @@ install_node() {
     echo -e " ${GRAY}填它们的域名后缀可让这些流量在客户端里直连，不绕代理。${PLAIN}"
     echo -e " ${GRAY}多个后缀用空格分隔，例如: example.com mycorp.net${PLAIN}"
     if [[ -n "$old_suffixes" ]]; then
-        read -r -p " 直连域名后缀 [回车=${old_suffixes}，输入 - 清空]: " suffixes_input || suffixes_input=""
+        ask " 直连域名后缀 [回车=${old_suffixes}，输入 - 清空]: " suffixes_input
         [[ -z "$suffixes_input" ]] && suffixes_input="$old_suffixes"
     else
-        read -r -p " 直连域名后缀 [回车=跳过]: " suffixes_input || suffixes_input=""
+        ask " 直连域名后缀 [回车=跳过]: " suffixes_input
     fi
     # 两个分支都要认 "-"：没有旧值时输入它也应静默跳过，不该走到校验里报"无效后缀"
     [[ "$suffixes_input" == "-" ]] && suffixes_input=""
@@ -1871,7 +1881,7 @@ show_clash_snippet() {
 
     # 子 shell 隔离：source env.conf 的变量不外泄到调用方作用域
     (
-        set +e; source "$ENV_FILE"; set -e
+        set +e; load_env; set -e
 
         local host="${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}"
         local ports_display ports_line=""
@@ -1937,7 +1947,7 @@ show_links() {
         echo -e "${RED}未找到节点环境配置，请先执行安装！${PLAIN}"
         return 1
     fi
-    set +e; source "$ENV_FILE"; set -e
+    set +e; load_env; set -e
     local hy_ports_display
     hy_ports_display=$(fmt_hy_ports "${HY_PORT}" "${HY_RANGE:-}")
     local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
@@ -1948,10 +1958,7 @@ show_links() {
     [[ -n "$hy_ports_display" && "$hy_ports_display" == *,* ]] && mport_param="&mport=${hy_ports_display}"
     local hy2_link="hy2://${HY_PASS}@${host}:${HY_PORT}/?sni=${host}&insecure=${insecure_flag}${mport_param}#${NODE_PREFIX}-Hysteria2"
 
-    # 两处都要写：$LINKS_FILE 是本地工作副本，WEB_DIR/$SUB_TOKEN/links.txt 才是
-    # 订阅对外提供的文件（客户端可能拉它）。只写前者会导致面板显示新格式、
-    # 订阅端仍是旧格式，两边不一致。
-    printf '%s\n%s\n' "$vless_link" "$hy2_link" > "$LINKS_FILE"
+    # 只写订阅对外提供的文件；本地不再维护副本（没有任何读取点）
     local web_links="${WEB_DIR}/${SUB_TOKEN}/links.txt"
     if [[ -d "${WEB_DIR}/${SUB_TOKEN}" ]]; then
         printf '%s\n%s\n' "$vless_link" "$hy2_link" > "$web_links" 2>/dev/null || true
@@ -1988,7 +1995,7 @@ uninstall_all() {
     echo -e "${YELLOW}警告: 即将彻底卸载 sing-box 并清除所有节点、订阅与证书配置！${PLAIN}"
     echo -e "${YELLOW}      同时会删除 ${CONF_DIR}、/usr/local/share/simple-box 以及 simbo 入口本身。${PLAIN}"
     local confirm=""
-    read -r -p "确认卸载吗？(y/N): " confirm || confirm=""
+    ask "确认卸载吗？(y/N): " confirm
     [[ "$confirm" != "y" && "$confirm" != "Y" ]] && echo "已取消。" && return 0
 
     echo -e "正在停止并移除服务..."
@@ -1998,7 +2005,7 @@ uninstall_all() {
     systemctl daemon-reload
 
     if [[ -f "$ENV_FILE" ]]; then
-        set +e; source "$ENV_FILE"; set -e
+        set +e; load_env; set -e
         if [[ -n "${HY_RANGE:-}" && -n "${HY_PORT:-}" ]]; then
             echo -e "精准清理端口跳跃规则..."
             iptables -t nat -D PREROUTING -p udp --dport "$HY_RANGE" -j REDIRECT --to-ports "$HY_PORT" 2>/dev/null || true
@@ -2116,7 +2123,7 @@ menu_reality_module() {
         read -r -p "按回车键返回..." dummy || true
         return 0
     fi
-    set +e; source "$ENV_FILE"; set -e
+    set +e; load_env; set -e
 
     while true; do
         [ -t 1 ] && clear
@@ -2126,14 +2133,13 @@ ${GRAY}================= VLESS-Reality 模块配置 =================${PLAIN}"
         echo -e " 0. 返回主菜单"
         echo -e "${GRAY}==========================================================${PLAIN}"
         local opt=""
-        read -r -p "请输入选项 [0-1]: " opt || opt=""
+        ask "请输入选项 [0-1]: " opt
         case "$opt" in
             1)
                 echo -e "\n${YELLOW}=== 重置 VLESS-Reality 参数 ===${PLAIN}"
                 local vl_port
                 while true; do
-                    read -r -p "请输入 Reality 监听端口 [默认: ${CYAN}${VL_PORT}${PLAIN}]: " vl_port || vl_port=""
-                    vl_port=$(trim_string "${vl_port:-${VL_PORT}}")
+                    ask_trim "请输入 Reality 监听端口 [默认: ${CYAN}${VL_PORT}${PLAIN}]: " "${VL_PORT}" vl_port
                     if ! validate_port "$vl_port"; then
                         echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
                     fi
@@ -2144,8 +2150,7 @@ ${GRAY}================= VLESS-Reality 模块配置 =================${PLAIN}"
 
                 local vl_sni
                 while true; do
-                    read -r -p "请输入 Reality 伪装域名 (SNI) [默认: ${CYAN}${VL_SNI}${PLAIN}]: " vl_sni || vl_sni=""
-                    vl_sni=$(trim_string "${vl_sni:-${VL_SNI}}")
+                    ask_trim "请输入 Reality 伪装域名 (SNI) [默认: ${CYAN}${VL_SNI}${PLAIN}]: " "${VL_SNI}" vl_sni
                     if ! validate_domain "$vl_sni"; then
                         echo -e "${RED}伪装域名格式非法（示例: www.icloud.com），请重新输入。${PLAIN}"; continue
                     fi
@@ -2192,7 +2197,7 @@ ${GRAY}================= VLESS-Reality 模块配置 =================${PLAIN}"
                 echo -e "\n${GREEN}✓ VLESS-Reality 模块已成功更新！${PLAIN}"
                 echo -e "提示: 订阅链接保持不变，客户端仅需点击「更新订阅」即可自动同步新节点。"
                 read -r -p "按回车键返回..." dummy || true
-                set +e; source "$ENV_FILE"; set -e
+                set +e; load_env; set -e
                 ;;
             0) break ;;
             *) echo -e "${RED}无效选项${PLAIN}"; sleep 1 ;;
@@ -2207,7 +2212,7 @@ menu_hy2_module() {
         read -r -p "按回车键返回..." dummy || true
         return 0
     fi
-    set +e; source "$ENV_FILE"; set -e
+    set +e; load_env; set -e
 
     while true; do
         [ -t 1 ] && clear
@@ -2217,7 +2222,7 @@ ${GRAY}=================== Hysteria 2 模块配置 ===================${PLAIN}"
         echo -e " 0. 返回主菜单"
         echo -e "${GRAY}==========================================================${PLAIN}"
         local opt=""
-        read -r -p "请输入选项 [0-1]: " opt || opt=""
+        ask "请输入选项 [0-1]: " opt
         case "$opt" in
             1)
                 echo -e "\n${YELLOW}=== 重置 Hysteria 2 参数 ===${PLAIN}"
@@ -2235,7 +2240,7 @@ ${GRAY}=================== Hysteria 2 模块配置 ===================${PLAIN}"
                 if [[ -n "$old_hy_domain" ]]; then
                     echo -e "检测到当前已配置域名: ${CYAN}${old_hy_domain}${PLAIN}"
                     local reuse_d=""
-                    read -r -p "是否继续使用该域名？Y/n (回车沿用，输入 n 更换域名或使用 IP): " reuse_d || reuse_d=""
+                    ask "是否继续使用该域名？Y/n (回车沿用，输入 n 更换域名或使用 IP): " reuse_d
                     if [[ -z "$reuse_d" || "${reuse_d,,}" == "y" || "${reuse_d,,}" == "yes" ]]; then
                         hy_domain="$old_hy_domain"
                         echo -e "已选择沿用当前域名: ${hy_domain}"
@@ -2249,7 +2254,7 @@ ${GRAY}=================== Hysteria 2 模块配置 ===================${PLAIN}"
                 if [[ -z "$hy_domain" ]]; then
                     while true; do
                         echo -e "\n请输入自有域名 (直接回车使用 IP 自签证书):"
-                        read -r -p "域名 [回车=IP自签]: " hy_domain || hy_domain=""
+                        ask "域名 [回车=IP自签]: " hy_domain
                         hy_domain=$(trim_string "$hy_domain")
                         if [[ -z "$hy_domain" ]]; then
                             echo -e "${GREEN}选择使用 IP 自签证书。${PLAIN}"
@@ -2285,8 +2290,7 @@ ${GRAY}=================== Hysteria 2 模块配置 ===================${PLAIN}"
 
                 local hy_port
                 while true; do
-                    read -r -p "请输入 Hysteria 2 主监听 UDP 端口 [默认: ${CYAN}${HY_PORT:-8443}${PLAIN}]: " hy_port || hy_port=""
-                    hy_port=$(trim_string "${hy_port:-${HY_PORT:-8443}}")
+                    ask_trim "请输入 Hysteria 2 主监听 UDP 端口 [默认: ${CYAN}${HY_PORT:-8443}${PLAIN}]: " "${HY_PORT:-8443}" hy_port
                     if ! validate_port "$hy_port"; then
                         echo -e "${RED}端口非法，请重新输入。${PLAIN}"; continue
                     fi
@@ -2296,8 +2300,7 @@ ${GRAY}=================== Hysteria 2 模块配置 ===================${PLAIN}"
 
                 local hy_range
                 while true; do
-                    read -r -p "请输入端口跳跃范围 [默认: ${CYAN}${HY_RANGE:-20000:40000}${PLAIN}] (none=不启用): " hy_range || hy_range=""
-                    hy_range=$(trim_string "${hy_range:-${HY_RANGE:-20000:40000}}")
+                    ask_trim "请输入端口跳跃范围 [默认: ${CYAN}${HY_RANGE:-20000:40000}${PLAIN}] (none=不启用): " "${HY_RANGE:-20000:40000}" hy_range
                     [[ "${hy_range,,}" == "none" ]] && { hy_range=""; break; }
                     if ! validate_range "$hy_range"; then
                         echo -e "${RED}范围格式非法，应为 起始:结束（如 20000:40000）。${PLAIN}"; continue
@@ -2401,7 +2404,7 @@ ${GRAY}=================== Hysteria 2 模块配置 ===================${PLAIN}"
                     echo -e "${YELLOW}   请在客户端 (如 Clash / Mihomo) 中替换为新的订阅地址。${PLAIN}"
                 fi
                 read -r -p "按回车键返回..." dummy || true
-                set +e; source "$ENV_FILE"; set -e
+                set +e; load_env; set -e
                 ;;
             0) break ;;
             *) echo -e "${RED}无效选项${PLAIN}"; sleep 1 ;;
@@ -2416,7 +2419,7 @@ menu_sub_module() {
         read -r -p "按回车键返回..." dummy || true
         return 0
     fi
-    set +e; source "$ENV_FILE"; set -e
+    set +e; load_env; set -e
 
     while true; do
         [ -t 1 ] && clear
@@ -2428,14 +2431,13 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
         echo -e " 0. 返回主菜单"
         echo -e "${GRAY}======================================================${PLAIN}"
         local opt=""
-        read -r -p "请输入选项 [0-3]: " opt || opt=""
+        ask "请输入选项 [0-3]: " opt
         case "$opt" in
             1)
                 echo -e "\n${YELLOW}=== Clash 订阅地址参数 ===${PLAIN}"
                 local sub_port
                 while true; do
-                    read -r -p "请输入新的订阅监听端口 [默认: ${CYAN}${SUB_PORT}${PLAIN}]: " sub_port || sub_port=""
-                    sub_port=$(trim_string "${sub_port:-${SUB_PORT}}")
+                    ask_trim "请输入新的订阅监听端口 [默认: ${CYAN}${SUB_PORT}${PLAIN}]: " "${SUB_PORT}" sub_port
                     if ! validate_port "$sub_port"; then
                         echo -e "${RED}端口非法，请重新输入。${PLAIN}"; continue
                     fi
@@ -2444,7 +2446,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 done
 
                 local rotate_token=""
-                read -r -p "是否同时刷新订阅 Token (旧链接将立即 404 作废)？[y/N]: " rotate_token || rotate_token=""
+                ask "是否同时刷新订阅 Token (旧链接将立即 404 作废)？[y/N]: " rotate_token
                 rotate_token=$(trim_string "$rotate_token")
 
                 local old_token="$SUB_TOKEN"
@@ -2496,7 +2498,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 echo -e "当前在线订阅: ${CYAN}${sub_proto}://${target_host}:${SUB_PORT}/${new_token}/config.yaml${PLAIN}"
                 echo -e "${YELLOW}提示: 订阅参数已更新，请在客户端 (如 ClashX.Meta) 中修改端口或更新订阅 URL。${PLAIN}"
                 read -r -p "按回车键返回..." dummy || true
-                set +e; source "$ENV_FILE"; set -e
+                set +e; load_env; set -e
                 ;;
             2)
                 echo -e "\n${YELLOW}=== 重置节点名称前缀 ===${PLAIN}"
@@ -2504,8 +2506,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 echo -e "${CYAN}会过滤引号、逗号、井号、冒号与反斜杠，避免破坏 YAML 与分享链接。${PLAIN}"
                 local new_prefix=""
                 while true; do
-                    read -r -p "请输入节点名称前缀 [当前: ${CYAN}${NODE_PREFIX:-Node}${PLAIN}]: " new_prefix || new_prefix=""
-                    new_prefix=$(trim_string "${new_prefix:-${NODE_PREFIX:-Node}}")
+                    ask_trim "请输入节点名称前缀 [当前: ${CYAN}${NODE_PREFIX:-Node}${PLAIN}]: " "${NODE_PREFIX:-Node}" new_prefix
                     new_prefix=$(printf '%s' "$new_prefix" | tr -d '\"'"'"',#:\\')
                     if [[ -z "$new_prefix" ]]; then
                         echo -e "${RED}前缀不能为空（过滤特殊字符后为空），请重新输入。${PLAIN}"; continue
@@ -2544,7 +2545,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 echo -e "\n${GREEN}✓ 节点名称前缀已更新为: ${new_prefix}${PLAIN}"
                 echo -e "提示: 订阅链接保持不变，客户端点击「更新订阅」即可同步新节点名。"
                 read -r -p "按回车键返回..." dummy || true
-                set +e; source "$ENV_FILE"; set -e
+                set +e; load_env; set -e
                 ;;
             3)
                 echo -e "\n${YELLOW}=== 自有域名直连 ===${PLAIN}"
@@ -2553,7 +2554,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 echo -e "${CYAN}留空表示不插入任何直连规则（不影响节点本身）。${PLAIN}"
                 echo -e "当前设置: ${CYAN}${DIRECT_SUFFIXES:-（未设置）}${PLAIN}"
                 local suffixes_input=""
-                read -r -p "请输入域名后缀（空格分隔，输入 - 清空，回车保持不变）: " suffixes_input || suffixes_input=""
+                ask "请输入域名后缀（空格分隔，输入 - 清空，回车保持不变）: " suffixes_input
                 if [[ -z "$suffixes_input" ]]; then
                     echo -e "${GRAY}保持不变。${PLAIN}"
                     read -r -p "按回车键返回..." dummy || true
@@ -2606,7 +2607,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 fi
                 echo -e "${YELLOW}提示: 客户端点击「更新订阅」即可同步。${PLAIN}"
                 read -r -p "按回车键返回..." dummy || true
-                set +e; source "$ENV_FILE"; set -e
+                set +e; load_env; set -e
                 ;;
             0) break ;;
             *) echo -e "${RED}无效选项${PLAIN}"; sleep 1 ;;
@@ -2625,7 +2626,7 @@ menu_singbox_manage() {
         echo -e " 0. 返回主菜单"
         echo -e "${GRAY}==========================================================${PLAIN}"
         local opt=""
-        read -r -p "请输入选项 [0-3]: " opt || opt=""
+        ask "请输入选项 [0-3]: " opt
         case "$opt" in
             1)
                 if systemctl is-active --quiet sing-box 2>/dev/null; then
@@ -2651,6 +2652,17 @@ menu_singbox_manage() {
         esac
     done
 }
+
+# 用当前 env 变量重建订阅；端口传空表示该协议未启用，SNI 可选覆盖
+regen_from_scope() {
+    local vl_p="${1:-$VL_PORT}" hy_p="${2:-$HY_PORT}" vl_s="${3:-$VL_SNI}"
+    local server_ip="$SERVER_IP" target_host="${TARGET_HOST:-$HY_DOMAIN}" sub_token="$SUB_TOKEN"
+    local node_prefix="$NODE_PREFIX" vl_port="$vl_p" user_uuid="$VL_UUID" vl_sni="$vl_s"
+    local vl_pubkey="$VL_PUBKEY" vl_shortid="$VL_SHORTID" hy_port="$hy_p" hy_range="${HY_RANGE:-}"
+    local hy_password="$HY_PASS" hy_skip_cert="$HY_SKIP_CERT" direct_suffixes="${DIRECT_SUFFIXES:-}"
+    regen_subscription "$sub_token" >/dev/null 2>&1 || true
+}
+
 
 # ---------------------------------------------------------------- 协议停用 / 重建
 # 翻转：把伪装站搬到 127.0.0.1:9443（on）或搬回公网 443（off）
@@ -2684,7 +2696,7 @@ PYEOF
 # 停用某个协议：从 config 移除 inbound，重建订阅；Reality 还要退出翻转
 disable_protocol() {
     local which="$1"
-    source "$ENV_FILE"
+    load_env
     local vl_p="$VL_PORT" hy_p="$HY_PORT"
     [[ "$which" == "reality" ]] && vl_p=""
     [[ "$which" == "hy2" ]] && hy_p=""
@@ -2699,11 +2711,7 @@ disable_protocol() {
     fi
 
     # 重建订阅：只输出仍启用的协议（不动 env.conf 里的凭证）
-    server_ip="$SERVER_IP"; target_host="${TARGET_HOST:-$HY_DOMAIN}"; sub_token="$SUB_TOKEN"
-    node_prefix="$NODE_PREFIX"; vl_port="$vl_p"; user_uuid="$VL_UUID"; vl_sni="$VL_SNI"
-    vl_pubkey="$VL_PUBKEY"; vl_shortid="$VL_SHORTID"; hy_port="$hy_p"; hy_range="${HY_RANGE:-}"
-    hy_password="$HY_PASS"; hy_skip_cert="$HY_SKIP_CERT"; direct_suffixes="${DIRECT_SUFFIXES:-}"
-    regen_subscription "$sub_token" >/dev/null 2>&1 || true
+    regen_from_scope "$vl_p" "$hy_p"
     local label="Hysteria2"; [[ "$which" == "reality" ]] && label="Reality"
     echo -e "${GREEN}✓ 已停用 ${label}${PLAIN}"
     echo -e "  恢复：simbo → 协议管理 → 重建 ${label}"
@@ -2711,33 +2719,27 @@ disable_protocol() {
 
 rebuild_protocol() {
     local which="$1"
-    source "$ENV_FILE"
+    load_env
     local vl_p="$VL_PORT" hy_p="$HY_PORT" vl_sni="$VL_SNI"
     if [[ "$which" == "reality" ]]; then
-        read -r -p "Reality 端口 [${VL_PORT}]: " vl_p || vl_p=""
+        ask "Reality 端口 [${VL_PORT}]: " vl_p
         vl_p="${vl_p:-$VL_PORT}"
-        read -r -p "伪装域名 [${VL_SNI}]: " vl_sni || vl_sni=""
+        ask "伪装域名 [${VL_SNI}]: " vl_sni
         vl_sni="${vl_sni:-$VL_SNI}"
         echo -e "${YELLOW}将重做 443 翻转，站点中断约 5 秒${PLAIN}"
-        read -r -p "继续？[y/N]: " ok || ok=""
+        ask "继续？[y/N]: " ok
         [[ "$ok" == [yY]* ]] || return 0
         write_singbox_config "$vl_p" "$vl_sni" "$VL_UUID" "$VL_PRIVKEY" "$VL_SHORTID" "$hy_p" "$HY_PASS" "127.0.0.1" "${FLIP_PORT:-9443}" || return 1
         # 顺序不能反：Caddy 还占着 443 时重启 sing-box 会 bind 失败（进程活着但不监听）
         flip_site_toggle on || return 1
         systemctl restart sing-box || return 1
     else
-        read -r -p "Hysteria2 端口 [${HY_PORT}]: " hy_p || hy_p=""
+        ask "Hysteria2 端口 [${HY_PORT}]: " hy_p
         hy_p="${hy_p:-$HY_PORT}"
         write_singbox_config "$vl_p" "$VL_SNI" "$VL_UUID" "$VL_PRIVKEY" "$VL_SHORTID" "$hy_p" "$HY_PASS" "${VL_HANDSHAKE:-}" "${VL_HANDSHAKE_PORT:-}" || return 1
         systemctl restart sing-box || return 1
     fi
-    local vl_p2="$vl_p" hy_p2="$hy_p"
-    [[ "$which" == "reality" ]] && vl_p2="$vl_p"
-    server_ip="$SERVER_IP"; target_host="${TARGET_HOST:-$HY_DOMAIN}"; sub_token="$SUB_TOKEN"
-    node_prefix="$NODE_PREFIX"; vl_port="$vl_p2"; user_uuid="$VL_UUID"; vl_sni="$vl_sni"
-    vl_pubkey="$VL_PUBKEY"; vl_shortid="$VL_SHORTID"; hy_port="$hy_p2"; hy_range="${HY_RANGE:-}"
-    hy_password="$HY_PASS"; hy_skip_cert="$HY_SKIP_CERT"; direct_suffixes="${DIRECT_SUFFIXES:-}"
-    regen_subscription "$sub_token" >/dev/null 2>&1 || true
+    regen_from_scope "$vl_p" "$hy_p" "$vl_sni"
     local label="Hysteria2"; [[ "$which" == "reality" ]] && label="Reality"
     echo -e "${GREEN}✓ 已重建 ${label}${PLAIN}"
 }
@@ -2753,7 +2755,7 @@ menu_protocol() {
         echo " 0. 返回主菜单"
         echo -e "${GRAY}================================================${PLAIN}"
         local opt="" ok=""
-        read -r -p "请输入选项 [0-4]: " opt || opt=""
+        ask "请输入选项 [0-4]: " opt
         case "$opt" in
             1) rebuild_protocol reality; read -r -p "按回车返回..." _ || true ;;
             2) read -r -p "确认停用 Reality？[y/N]: " ok || ok=""
@@ -2826,7 +2828,7 @@ menu() {
 
         local cert_display="未配置"
         if [[ -f "$ENV_FILE" ]]; then
-            set +e; source "$ENV_FILE"; set -e
+            set +e; load_env; set -e
             if [[ "${CERT_MODE:-selfsigned}" == "domain" && -n "${HY_DOMAIN:-}" ]]; then
                 cert_display="${HY_DOMAIN} (CA 证书)"
             else

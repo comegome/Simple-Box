@@ -1848,8 +1848,8 @@ EOF
     # 每次重装换新 Token（顺手换锁），并把旧 Token 目录与历史残留一次清干净。
     find "$WEB_DIR" -mindepth 1 -maxdepth 1 -type d ! -name "$sub_token" -exec rm -rf {} + 2>/dev/null || true
 
-    # 订阅站先就位：协议模块触发的 render_and_reload 会用到它
-    setup_caddy_subscription "$target_host" "$sub_token" "$sub_port" "$CERT_MODE" || true
+    # 订阅站不在安装层单独建：render_and_reload 内部按「先写文件、再写站点、再自检」的顺序做，
+    # 安装层提前建一次会拿旧 token 去自检，导致一次无意义的 404 告警。
 
     # 两个协议走同一套模块（非交互入口），安装里不再另写一份配置
     if ! proto_enable_reality "$vl_port" "$vl_sni"; then

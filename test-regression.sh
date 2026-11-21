@@ -325,9 +325,8 @@ fi
 
 # install_node 不再自己写配置/订阅，必须委托给两个协议模块 + 建订阅站
 _ibody=$(awk '/^install_node\(\)/ {p=1} p {print} p && /^}/ && NR>1 {exit}' "$TARGET")
-if grep -q 'proto_enable_reality' <<<"$_ibody" && grep -q 'proto_enable_hy2' <<<"$_ibody" \
-   && grep -q 'setup_caddy_subscription' <<<"$_ibody"; then
-    ok "install_node 委托协议模块并建订阅站"
+if grep -q 'proto_enable_reality' <<<"$_ibody" && grep -q 'proto_enable_hy2' <<<"$_ibody"; then
+    ok "install_node 委托协议模块（订阅站由 render_and_reload 内部建）"
 else
     bad "install_node 未委托协议模块" "reality=$(grep -c proto_enable_reality <<<"$_ibody") hy2=$(grep -c proto_enable_hy2 <<<"$_ibody")"
 fi

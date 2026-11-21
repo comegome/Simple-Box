@@ -1132,6 +1132,10 @@ generate_full_client_config() {
 
 # ==================== Simple-Box 动态生成节点 ====================
 proxies:
+EOF
+
+    if [[ -n "$vl_port" ]]; then
+        cat >> "$full_config_file" <<EOF
   - name: "${node_prefix}-VLESS-Reality"
     type: vless
     server: ${server_ip}
@@ -1147,8 +1151,10 @@ proxies:
       short-id: ${vl_shortid}
     client-fingerprint: chrome
 EOF
+    fi
 
-    cat >> "$full_config_file" <<EOF
+    if [[ -n "$hy_port" ]]; then
+        cat >> "$full_config_file" <<EOF
   - name: "${node_prefix}-Hysteria2"
     type: hysteria2
     server: ${domain_or_ip}
@@ -1158,6 +1164,7 @@ ${ports_line}
     sni: ${domain_or_ip}
     skip-cert-verify: ${hy_skip_cert}
 EOF
+    fi
 
     cat >> "$full_config_file" <<EOF
 
@@ -1165,16 +1172,18 @@ proxy-groups:
   - name: "📌节点选择"
     type: select
     proxies:
-      - "${node_prefix}-VLESS-Reality"
 EOF
 
-    printf '      - "%s-Hysteria2"\n' "$node_prefix" >> "$full_config_file"
+    [[ -n "$vl_port" ]] && printf '      - "%s-VLESS-Reality"\n' "$node_prefix" >> "$full_config_file"
+    [[ -n "$hy_port" ]] && printf '      - "%s-Hysteria2"\n' "$node_prefix" >> "$full_config_file"
     printf '      - "DIRECT"\n' >> "$full_config_file"
 
     # 2. 组装纯 Provider 片段
     local provider_file="${WEB_DIR}/${token}/provider.yaml"
-    cat > "$provider_file" <<EOF
-proxies:
+    printf 'proxies:\n' > "$provider_file"
+
+    if [[ -n "$vl_port" ]]; then
+        cat >> "$provider_file" <<EOF
   - name: "${node_prefix}-VLESS-Reality"
     type: vless
     server: ${server_ip}
@@ -1190,8 +1199,10 @@ proxies:
       short-id: ${vl_shortid}
     client-fingerprint: chrome
 EOF
+    fi
 
-    cat >> "$provider_file" <<EOF
+    if [[ -n "$hy_port" ]]; then
+        cat >> "$provider_file" <<EOF
   - name: "${node_prefix}-Hysteria2"
     type: hysteria2
     server: ${domain_or_ip}
@@ -1201,19 +1212,25 @@ ${ports_line}
     sni: ${domain_or_ip}
     skip-cert-verify: ${hy_skip_cert}
 EOF
+    fi
 
 
     # 3. 组装原生分享链接
-    local vless_link="vless://${user_uuid}@${server_ip}:${vl_port}?security=reality&encryption=none&pbk=${vl_pubkey}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${vl_sni}&sid=${vl_shortid}#${node_prefix}-VLESS-Reality"
     local links_out="${WEB_DIR}/${token}/links.txt"
-    echo "$vless_link" > "$links_out"
+    : > "$links_out"
+    if [[ -n "$vl_port" ]]; then
+        local vless_link="vless://${user_uuid}@${server_ip}:${vl_port}?security=reality&encryption=none&pbk=${vl_pubkey}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${vl_sni}&sid=${vl_shortid}#${node_prefix}-VLESS-Reality"
+        echo "$vless_link" >> "$links_out"
+    fi
 
     local insecure_flag="0"
     [[ "$hy_skip_cert" == "true" ]] && insecure_flag="1"
     local mport_param=""
     [[ -n "$hy_ports_display" && "$hy_ports_display" == *,* ]] && mport_param="&mport=${hy_ports_display}"
-    local hy2_link="hy2://${hy_password}@${domain_or_ip}:${hy_port}/?sni=${domain_or_ip}&insecure=${insecure_flag}${mport_param}#${node_prefix}-Hysteria2"
-    echo "$hy2_link" >> "$links_out"
+    if [[ -n "$hy_port" ]]; then
+        local hy2_link="hy2://${hy_password}@${domain_or_ip}:${hy_port}/?sni=${domain_or_ip}&insecure=${insecure_flag}${mport_param}#${node_prefix}-Hysteria2"
+        echo "$hy2_link" >> "$links_out"
+    fi
     cp -f "$links_out" "$LINKS_FILE"
 }
 
@@ -1329,66 +1346,48 @@ reinstall_with_latest() {
 # 部署与配置主函数
 # 集中生成 sing-box 服务端配置文件
 write_singbox_config() {
-    local vl_port="${1:-}"
-    local vl_sni="${2:-}"
-    local user_uuid="${3:-}"
-    local vl_privkey="${4:-}"
-    local vl_shortid="${5:-}"
-    local hy_port="${6:-}"
-    local hy_password="${7:-}"
+    local vl_port="${1:-}" vl_sni="${2:-}" user_uuid="${3:-}" vl_privkey="${4:-}" vl_shortid="${5:-}"
+    local hy_port="${6:-}" hy_password="${7:-}"
+    # 第 8/9 个参数给「443 翻转」用：回落目标（默认自身域名 + 443）
+    local vl_hs="${8:-$vl_sni}" vl_hs_port="${9:-443}"
 
-    # 先写临时文件再原子替换，避免 sing-box 文件监视器读到半截 JSON
-    # mktemp 天然 0600：配置含 Reality 私钥与 Hy2 密码，权限来自创建方式而非事后补救
     local tmp_conf
     tmp_conf=$(mktemp "${CONF_FILE}.tmp.XXXXXX")
-    cat > "$tmp_conf" <<EOF
-{
-  "log": {
-    "disabled": false,
-    "level": "warn",
-    "timestamp": true
-  },
-  "inbounds": [
+
+    local parts=() p
+    if [[ -n "$vl_port" ]]; then
+        parts+=("$(cat <<JSON
     {
       "type": "vless",
       "tag": "vless-reality-in",
       "listen": "0.0.0.0",
       "listen_port": ${vl_port},
       "users": [
-        {
-          "uuid": "${user_uuid}",
-          "flow": "xtls-rprx-vision"
-        }
+        { "uuid": "${user_uuid}", "flow": "xtls-rprx-vision" }
       ],
       "tls": {
         "enabled": true,
         "server_name": "${vl_sni}",
         "reality": {
           "enabled": true,
-          "handshake": {
-            "server": "${vl_sni}",
-            "server_port": 443
-          },
+          "handshake": { "server": "${vl_hs}", "server_port": ${vl_hs_port} },
           "private_key": "${vl_privkey}",
-          "short_id": [
-            "${vl_shortid}"
-          ]
+          "short_id": [ "${vl_shortid}" ]
         }
       }
     }
-EOF
-
-    cat >> "$tmp_conf" <<EOF
-    ,
+JSON
+)")
+    fi
+    if [[ -n "$hy_port" ]]; then
+        parts+=("$(cat <<JSON
     {
       "type": "hysteria2",
       "tag": "hy2-in",
       "listen": "0.0.0.0",
       "listen_port": ${hy_port},
       "users": [
-        {
-          "password": "${hy_password}"
-        }
+        { "password": "${hy_password}" }
       ],
       "tls": {
         "enabled": true,
@@ -1396,15 +1395,19 @@ EOF
         "key_path": "${CERT_DIR}/private.key"
       }
     }
-EOF
+JSON
+)")
+    fi
 
-    cat >> "$tmp_conf" <<EOF
+    p=$(IFS=,; printf '%s' "${parts[*]}")
+    cat > "$tmp_conf" <<EOF
+{
+  "log": { "disabled": false, "level": "warn", "timestamp": true },
+  "inbounds": [
+${p}
   ],
   "outbounds": [
-    {
-      "type": "direct",
-      "tag": "direct"
-    }
+    { "type": "direct", "tag": "direct" }
   ]
 }
 EOF
@@ -1453,6 +1456,11 @@ SUB_PROTO="${sub_proto}"
 SUB_TOKEN="${sub_token}"
 CERT_MODE="${CERT_MODE:-selfsigned}"
 DIRECT_SUFFIXES="${direct_suffixes}"
+FLIP_HOST="${FLIP_HOST:-}"
+SITE_FILE="${SITE_FILE:-}"
+FLIP_PORT="${FLIP_PORT:-9443}"
+VL_HANDSHAKE="${VL_HANDSHAKE:-}"
+VL_HANDSHAKE_PORT="${VL_HANDSHAKE_PORT:-}"
 EOF
     )
     chmod 600 "$ENV_FILE" 2>/dev/null || true
@@ -2644,6 +2652,136 @@ menu_singbox_manage() {
     done
 }
 
+# ---------------------------------------------------------------- 协议停用 / 重建
+# 翻转：把伪装站搬到 127.0.0.1:9443（on）或搬回公网 443（off）
+flip_site_toggle() {
+    local mode="$1"
+    local site="${SITE_FILE:-}" domain="${FLIP_HOST:-}" port="${FLIP_PORT:-9443}"
+    [[ -n "$site" && -f "$site" && -n "$domain" ]] || return 0
+    python3 - "$site" "$domain" "$port" "$mode" <<'PYEOF'
+import sys, pathlib, re
+site, domain, port, mode = sys.argv[1:5]
+p = pathlib.Path(site); s = p.read_text()
+flipped = "https://%s:%s {" % (domain, port)
+plain = "%s {" % domain
+if mode == "on":
+    if flipped in s:
+        print("already flipped"); sys.exit(0)
+    s = s.replace(plain, flipped, 1)
+    if "\tbind 127.0.0.1" not in s:
+        s = s.replace(flipped, flipped + "\n\tbind 127.0.0.1", 1)
+else:
+    if flipped not in s:
+        print("already plain"); sys.exit(0)
+    s = s.replace(flipped, plain, 1)
+    s = re.sub(r"^\tbind 127\.0\.0\.1\n", "", s, count=1, flags=re.M)
+p.write_text(s)
+PYEOF
+    caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 || { echo -e "${RED}✗ Caddy 配置校验失败，未重载${PLAIN}"; return 1; }
+    systemctl restart caddy && echo -e "${GREEN}✓ Caddy 已重载${PLAIN}"
+}
+
+# 停用某个协议：从 config 移除 inbound，重建订阅；Reality 还要退出翻转
+disable_protocol() {
+    local which="$1"
+    source "$ENV_FILE"
+    local vl_p="$VL_PORT" hy_p="$HY_PORT"
+    [[ "$which" == "reality" ]] && vl_p=""
+    [[ "$which" == "hy2" ]] && hy_p=""
+
+    if [[ "$which" == "reality" ]]; then
+        write_singbox_config "" "" "$VL_UUID" "$VL_PRIVKEY" "$VL_SHORTID" "$hy_p" "$HY_PASS" || return 1
+        systemctl restart sing-box || return 1
+        flip_site_toggle off || return 1
+    else
+        write_singbox_config "$vl_p" "$VL_SNI" "$VL_UUID" "$VL_PRIVKEY" "$VL_SHORTID" "" "" "${VL_HANDSHAKE:-}" "${VL_HANDSHAKE_PORT:-}" || return 1
+        systemctl restart sing-box || return 1
+    fi
+
+    # 重建订阅：只输出仍启用的协议（不动 env.conf 里的凭证）
+    server_ip="$SERVER_IP"; target_host="${TARGET_HOST:-$HY_DOMAIN}"; sub_token="$SUB_TOKEN"
+    node_prefix="$NODE_PREFIX"; vl_port="$vl_p"; user_uuid="$VL_UUID"; vl_sni="$VL_SNI"
+    vl_pubkey="$VL_PUBKEY"; vl_shortid="$VL_SHORTID"; hy_port="$hy_p"; hy_range="${HY_RANGE:-}"
+    hy_password="$HY_PASS"; hy_skip_cert="$HY_SKIP_CERT"; direct_suffixes="${DIRECT_SUFFIXES:-}"
+    regen_subscription "$sub_token" >/dev/null 2>&1 || true
+    local label="Hysteria2"; [[ "$which" == "reality" ]] && label="Reality"
+    echo -e "${GREEN}✓ 已停用 ${label}${PLAIN}"
+    echo -e "  恢复：simbo → 重建配置 → ${label}"
+}
+
+rebuild_protocol() {
+    local which="$1"
+    source "$ENV_FILE"
+    local vl_p="$VL_PORT" hy_p="$HY_PORT" vl_sni="$VL_SNI"
+    if [[ "$which" == "reality" ]]; then
+        read -r -p "Reality 端口 [${VL_PORT}]: " vl_p || vl_p=""
+        vl_p="${vl_p:-$VL_PORT}"
+        read -r -p "伪装域名 [${VL_SNI}]: " vl_sni || vl_sni=""
+        vl_sni="${vl_sni:-$VL_SNI}"
+        echo -e "${YELLOW}将重做 443 翻转，站点中断约 5 秒${PLAIN}"
+        read -r -p "继续？[y/N]: " ok || ok=""
+        [[ "$ok" == [yY]* ]] || return 0
+        write_singbox_config "$vl_p" "$vl_sni" "$VL_UUID" "$VL_PRIVKEY" "$VL_SHORTID" "$hy_p" "$HY_PASS" "127.0.0.1" "${FLIP_PORT:-9443}" || return 1
+        # 顺序不能反：Caddy 还占着 443 时重启 sing-box 会 bind 失败（进程活着但不监听）
+        flip_site_toggle on || return 1
+        systemctl restart sing-box || return 1
+    else
+        read -r -p "Hysteria2 端口 [${HY_PORT}]: " hy_p || hy_p=""
+        hy_p="${hy_p:-$HY_PORT}"
+        write_singbox_config "$vl_p" "$VL_SNI" "$VL_UUID" "$VL_PRIVKEY" "$VL_SHORTID" "$hy_p" "$HY_PASS" "${VL_HANDSHAKE:-}" "${VL_HANDSHAKE_PORT:-}" || return 1
+        systemctl restart sing-box || return 1
+    fi
+    local vl_p2="$vl_p" hy_p2="$hy_p"
+    [[ "$which" == "reality" ]] && vl_p2="$vl_p"
+    server_ip="$SERVER_IP"; target_host="${TARGET_HOST:-$HY_DOMAIN}"; sub_token="$SUB_TOKEN"
+    node_prefix="$NODE_PREFIX"; vl_port="$vl_p2"; user_uuid="$VL_UUID"; vl_sni="$vl_sni"
+    vl_pubkey="$VL_PUBKEY"; vl_shortid="$VL_SHORTID"; hy_port="$hy_p2"; hy_range="${HY_RANGE:-}"
+    hy_password="$HY_PASS"; hy_skip_cert="$HY_SKIP_CERT"; direct_suffixes="${DIRECT_SUFFIXES:-}"
+    regen_subscription "$sub_token" >/dev/null 2>&1 || true
+    local label="Hysteria2"; [[ "$which" == "reality" ]] && label="Reality"
+    echo -e "${GREEN}✓ 已重建 ${label}${PLAIN}"
+}
+
+menu_rebuild() {
+    while true; do
+        [ -t 1 ] && clear
+        echo -e "${GRAY}=================== 重建配置 ===================${PLAIN}"
+        echo " 1. 重建 Reality"
+        echo " 2. 重建 Hysteria2"
+        echo " 0. 返回主菜单"
+        echo -e "${GRAY}================================================${PLAIN}"
+        local opt=""
+        read -r -p "请输入选项 [0-2]: " opt || opt=""
+        case "$opt" in
+            1) rebuild_protocol reality; read -r -p "按回车返回..." _ || true ;;
+            2) rebuild_protocol hy2; read -r -p "按回车返回..." _ || true ;;
+            0) break ;;
+            *) echo -e "${RED}无效选项${PLAIN}"; sleep 1 ;;
+        esac
+    done
+}
+
+menu_disable() {
+    while true; do
+        [ -t 1 ] && clear
+        echo -e "${GRAY}=================== 停用协议 ===================${PLAIN}"
+        echo " 1. 停用 Reality"
+        echo " 2. 停用 Hysteria2"
+        echo " 0. 返回主菜单"
+        echo -e "${GRAY}================================================${PLAIN}"
+        local opt="" ok=""
+        read -r -p "请输入选项 [0-2]: " opt || opt=""
+        case "$opt" in
+            1) read -r -p "确认停用 Reality？[y/N]: " ok || ok=""
+               [[ "$ok" == [yY]* ]] && disable_protocol reality; read -r -p "按回车返回..." _ || true ;;
+            2) read -r -p "确认停用 Hysteria2？[y/N]: " ok || ok=""
+               [[ "$ok" == [yY]* ]] && disable_protocol hy2; read -r -p "按回车返回..." _ || true ;;
+            0) break ;;
+            *) echo -e "${RED}无效选项${PLAIN}"; sleep 1 ;;
+        esac
+    done
+}
+
 menu() {
     while true; do
         [ -t 1 ] && clear
@@ -2746,10 +2884,10 @@ menu() {
         fi
 
         echo -e "${GRAY}----------------------------------------------------${PLAIN}"
-        echo -e " 1. vless / hy2 原生链接 + Mihomo 片段查看"
-        echo -e " 2. VLESS-Reality 模块配置"
-        echo -e " 3. Hysteria 2 模块配置"
-        echo -e " 4. Clash 订阅地址配置"
+        echo -e " 1. 原生链接查看"
+        echo -e " 2. 重建配置"
+        echo -e " 3. 停用协议"
+        echo -e " 4. 订阅地址配置"
         echo -e " 5. sing-box 内核管理"
         echo -e " 6. Simple-Box 脚本升级"
         echo -e " 7. Simple-Box 脚本卸载"
@@ -2760,8 +2898,8 @@ menu() {
         read -r -p "请输入选项 [0-7]: " opt || opt="0"
         case "$opt" in
             1) show_links || true ;;
-            2) menu_reality_module || true ;;
-            3) menu_hy2_module || true ;;
+            2) menu_rebuild || true ;;
+            3) menu_disable || true ;;
             4) menu_sub_module || true ;;
             5) menu_singbox_manage || true ;;
             6) reinstall_with_latest || true ;;

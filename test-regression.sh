@@ -353,10 +353,11 @@ fi
 # 会改变节点参数、必须重生成订阅的 5 个触发点：
 #   重载后 / 安装时 / token 轮换 / 节点前缀变更 / 直连后缀变更
 _regen_calls=$(grep -cE '^\s+regen_subscription' "$TARGET" || true)
-if [[ "${_regen_calls:-0}" -eq 5 ]]; then
-    ok "regen_subscription 覆盖 5 个触发点"
+# 5 = 重载后 / 安装时 / token 轮换 / 节点前缀 / 直连后缀；+2 = 停用协议 / 重建协议
+if [[ "${_regen_calls:-0}" -eq 7 ]]; then
+    ok "regen_subscription 覆盖 7 个触发点"
 else
-    bad "regen_subscription 调用点数量异常" "共 ${_regen_calls} 处，应为 5"
+    bad "regen_subscription 调用点数量异常" "共 ${_regen_calls} 处，应为 7"
 fi
 
 # ---------- 10. 全量回归：危险命令审计 ----------

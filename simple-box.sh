@@ -1517,6 +1517,19 @@ render_and_reload() {
     verify_caddy_listening "$sub_port" || true
 }
 
+# 公网 IPv4 探测：必须校验格式，别把代理/劫持返回的字符串当 IP 写进配置
+# （曾出现 icanhazip 返回 "public-ip-xxxx" 被当成 IP，导致订阅里 server 不可解析）
+detect_public_ip() {
+    local ip u
+    for u in https://api.ipify.org https://icanhazip.com https://ifconfig.me/ip; do
+        ip=$(curl -s4m5 "$u" 2>/dev/null | tr -d '[:space:]')
+        [[ "$ip" =~ ^[0-9]{1,3}(\.[0-9]{1,3}){3}$ ]] || continue
+        [[ "$ip" =~ ^(10\.|127\.|169\.254\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.) ]] && continue
+        printf '%s\n' "$ip"; return 0
+    done
+    return 1
+}
+
 install_node() {
     require_os >/dev/null || return 1
     require_arch >/dev/null || return 1
@@ -1558,9 +1571,9 @@ install_node() {
     fi
 
     local server_ip
-    server_ip=$(curl -s4m5 https://icanhazip.com || curl -s4m5 https://api.ipify.org || true)
+    server_ip=$(detect_public_ip || true)
     server_ip=${server_ip:-}
-    if ! [[ "$server_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    if [[ -z "$server_ip" ]]; then
         echo -e "${RED}无法探测本机公网 IPv4（curl icanhazip/ipify 均失败）。${PLAIN}"
         echo -e "${YELLOW}自签证书需要真实公网 IP，请检查网络后重试。${PLAIN}"
         return 1
@@ -2117,302 +2130,173 @@ uninstall_all() {
 # ==================== 模块化独立子菜单 ====================
 
 # 1. VLESS-Reality 独立模块配置
-menu_reality_module() {
-    if [[ ! -f "$ENV_FILE" ]]; then
-        echo -e "${RED}未检测到已安装的配置，请先运行选项 6 重新安装Simple-Box！${PLAIN}"
-        read -r -p "按回车键返回..." dummy || true
-        return 0
-    fi
-    set +e; load_env; set -e
-
-    while true; do
-        [ -t 1 ] && clear
-        echo -e "
-${GRAY}================= VLESS-Reality 模块配置 =================${PLAIN}"
-        echo -e " 1. 重置并更新 VLESS-Reality 参数"
-        echo -e " 0. 返回主菜单"
-        echo -e "${GRAY}==========================================================${PLAIN}"
-        local opt=""
-        ask "请输入选项 [0-1]: " opt
-        case "$opt" in
-            1)
-                echo -e "\n${YELLOW}=== 重置 VLESS-Reality 参数 ===${PLAIN}"
-                local vl_port
-                while true; do
-                    ask_trim "请输入 Reality 监听端口 [默认: ${CYAN}${VL_PORT}${PLAIN}]: " "${VL_PORT}" vl_port
-                    if ! validate_port "$vl_port"; then
-                        echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
-                    fi
-                    # 端口未变 = 沿用当前配置，无需重新检测占用
-                    [[ "$vl_port" == "$VL_PORT" ]] && break
-                    check_port_conflict "$vl_port" "tcp" "vless" && break
-                done
-
-                local vl_sni
-                while true; do
-                    ask_trim "请输入 Reality 伪装域名 (SNI) [默认: ${CYAN}${VL_SNI}${PLAIN}]: " "${VL_SNI}" vl_sni
-                    if ! validate_domain "$vl_sni"; then
-                        echo -e "${RED}伪装域名格式非法（示例: www.icloud.com），请重新输入。${PLAIN}"; continue
-                    fi
-                    if [[ "$vl_sni" == "$SERVER_IP" ]]; then
-                        echo -e "${RED}伪装域名不能是本机 IP，必须为可正常 TLS1.3 握手的站点。${PLAIN}"; continue
-                    fi
-                    break
-                done
-
-                echo -e "生成新的 Reality 密钥凭证..."
-                local key_pair
-                key_pair=$(/usr/local/bin/sing-box generate reality-keypair)
-                local vl_privkey vl_pubkey vl_shortid user_uuid
-                vl_privkey=$(echo "$key_pair" | awk '/PrivateKey/{print $2}')
-                vl_pubkey=$(echo "$key_pair" | awk '/PublicKey/{print $2}')
-                vl_shortid=$(/usr/local/bin/sing-box generate rand 8 --hex)
-                user_uuid=$(/usr/local/bin/sing-box generate uuid)
-
-                local node_prefix="$NODE_PREFIX"
-                local server_ip="$SERVER_IP"
-                local hy_domain="${HY_DOMAIN:-}"
-                local target_host="${TARGET_HOST:-$server_ip}"
-                local hy_port="${HY_PORT:-8443}"
-                local hy_range="${HY_RANGE:-}"
-                local hy_password="${HY_PASS:-}"
-                local hy_skip_cert="${HY_SKIP_CERT:-true}"
-                local sub_port="${SUB_PORT:-8444}"
-                local sub_proto="${SUB_PROTO:-http}"
-                local sub_token="${SUB_TOKEN}"
-                local CERT_MODE="${CERT_MODE:-selfsigned}"
-
-                write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "$hy_port" "$hy_password"
-                if ! write_env_config; then
-                    echo -e "${RED}环境配置写入失败，操作已中止。${PLAIN}"
-                    read -r -p "按回车键返回..." dummy || true
-                    continue
-                fi
-                if ! render_and_reload; then
-                    echo -e "${RED}Reality 模块更新失败，请检查上面的错误信息。${PLAIN}"
-                    read -r -p "按回车键返回..." dummy || true
-                    continue
-                fi
-
-                echo -e "\n${GREEN}✓ VLESS-Reality 模块已成功更新！${PLAIN}"
-                echo -e "提示: 订阅链接保持不变，客户端仅需点击「更新订阅」即可自动同步新节点。"
-                read -r -p "按回车键返回..." dummy || true
-                set +e; load_env; set -e
-                ;;
-            0) break ;;
-            *) echo -e "${RED}无效选项${PLAIN}"; sleep 1 ;;
-        esac
-    done
+# ---------------------------------------------------------------- 协议模块
+# enabled 的唯一事实来源：config.json 里的 inbound
+current_inbounds() {
+    [[ -f "$CONF_FILE" ]] || return 0
+    python3 - "$CONF_FILE" <<'PY' 2>/dev/null
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+    print(" ".join(i.get("tag", "") for i in d.get("inbounds", [])))
+except Exception:
+    pass
+PY
 }
 
-# 2. Hysteria 2 独立模块配置
-menu_hy2_module() {
-    if [[ ! -f "$ENV_FILE" ]]; then
-        echo -e "${RED}未检测到已安装的配置，请先运行选项 6 重新安装Simple-Box！${PLAIN}"
-        read -r -p "按回车键返回..." dummy || true
-        return 0
-    fi
-    set +e; load_env; set -e
+set_has() { [[ " $(current_inbounds) " == *" $1 "* ]]; }
 
-    while true; do
-        [ -t 1 ] && clear
-        echo -e "
-${GRAY}=================== Hysteria 2 模块配置 ===================${PLAIN}"
-        echo -e " 1. 重置并更新 Hysteria 2 参数"
-        echo -e " 0. 返回主菜单"
-        echo -e "${GRAY}==========================================================${PLAIN}"
-        local opt=""
-        ask "请输入选项 [0-1]: " opt
-        case "$opt" in
-            1)
-                echo -e "\n${YELLOW}=== 重置 Hysteria 2 参数 ===${PLAIN}"
-                local old_sub_proto="${SUB_PROTO:-http}"
-                local old_target_host="${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}"
-                local old_sub_url="${old_sub_proto}://${old_target_host}:${SUB_PORT:-8444}/${SUB_TOKEN}/config.yaml"
-
-                local hy_domain="" cf_token=""
-                local CERT_MODE="selfsigned"
-                local target_host="$SERVER_IP"
-                local hy_skip_cert="true"
-
-                local old_hy_domain="${HY_DOMAIN:-}"
-                # 1. 优先检测当前已配置域名
-                if [[ -n "$old_hy_domain" ]]; then
-                    echo -e "检测到当前已配置域名: ${CYAN}${old_hy_domain}${PLAIN}"
-                    local reuse_d=""
-                    ask "是否继续使用该域名？Y/n (回车沿用，输入 n 更换域名或使用 IP): " reuse_d
-                    if [[ -z "$reuse_d" || "${reuse_d,,}" == "y" || "${reuse_d,,}" == "yes" ]]; then
-                        hy_domain="$old_hy_domain"
-                        echo -e "已选择沿用当前域名: ${hy_domain}"
-                        if ! check_domain_ip_binding "$hy_domain" "$SERVER_IP"; then
-                            hy_domain=""
-                        fi
-                    fi
-                fi
-
-                # 2. 若未沿用，提示输入
-                if [[ -z "$hy_domain" ]]; then
-                    while true; do
-                        echo -e "\n请输入自有域名 (直接回车使用 IP 自签证书):"
-                        ask "域名 [回车=IP自签]: " hy_domain
-                        hy_domain=$(trim_string "$hy_domain")
-                        if [[ -z "$hy_domain" ]]; then
-                            echo -e "${GREEN}选择使用 IP 自签证书。${PLAIN}"
-                            break
-                        fi
-                        if ! validate_domain "$hy_domain"; then
-                            echo -e "${RED}域名格式不合法（示例: node.example.com），请重新输入。${PLAIN}"; continue
-                        fi
-                        if ! check_domain_ip_binding "$hy_domain" "$SERVER_IP"; then
-                            echo -e "${YELLOW}请重新输入域名，或直接回车使用 IP 自签。${PLAIN}"
-                            continue
-                        fi
-                        break
-                    done
-                fi
-
-                if [[ -n "$hy_domain" ]]; then
-                    # 检查是否可复用本地覆盖该域名的有效证书
-                    local reuse_menu_cert=false
-                    if cert_covers_domain "$hy_domain"; then
-                        reuse_menu_cert=true
-                        echo -e "${GREEN}检测到本地已有 ${hy_domain} 的有效证书，已自动复用（免输 CF Token）。${PLAIN}"
-                    fi
-                    if [[ "$reuse_menu_cert" != "true" ]]; then
-                        if prompt_cf_token; then
-                            cf_token="$PROMPTED_CF_TOKEN"
-                        else
-                            hy_domain=""
-                            cf_token=""
-                        fi
-                    fi
-                fi
-
-                local hy_port
-                while true; do
-                    ask_trim "请输入 Hysteria 2 主监听 UDP 端口 [默认: ${CYAN}${HY_PORT:-8443}${PLAIN}]: " "${HY_PORT:-8443}" hy_port
-                    if ! validate_port "$hy_port"; then
-                        echo -e "${RED}端口非法，请重新输入。${PLAIN}"; continue
-                    fi
-                    [[ "$hy_port" == "$HY_PORT" ]] && break
-                    check_port_conflict "$hy_port" "udp" "hy2" "" && break
-                done
-
-                local hy_range
-                while true; do
-                    ask_trim "请输入端口跳跃范围 [默认: ${CYAN}${HY_RANGE:-20000:40000}${PLAIN}] (none=不启用): " "${HY_RANGE:-20000:40000}" hy_range
-                    [[ "${hy_range,,}" == "none" ]] && { hy_range=""; break; }
-                    if ! validate_range "$hy_range"; then
-                        echo -e "${RED}范围格式非法，应为 起始:结束（如 20000:40000）。${PLAIN}"; continue
-                    fi
-                    # HY_PORT 全局仍是旧值，临时换成本轮新选的 hy_port 参与比较，
-                    # 否则改端口后仍按旧端口判断范围冲突
-                    local saved_hy="${HY_PORT:-}"
-                    HY_PORT="$hy_port"
-                    if check_range_conflict "$hy_range"; then
-                        HY_PORT="$saved_hy"; break
-                    fi
-                    HY_PORT="$saved_hy"
-                done
-
-                # 重签证书前必须先停 sing-box，否则文件监视器会读到「新 cert + 旧 key」
-                if systemctl is-active --quiet sing-box 2>/dev/null; then
-                    systemctl stop sing-box 2>/dev/null || true
-                fi
-
-                # 只要填了域名就交给 issue_cert_bundle：它内部会处理「无 Token 但本地已有
-                # 覆盖该域名的有效证书」的复用场景，不能再按 cf_token 是否为空分流，
-                # 否则复用证书时会被误判成自签模式，把有效域名证书覆盖掉。
-                if [[ -n "$hy_domain" ]]; then
-                    # issue_cert_bundle 内部会设置全局 CERT_MODE，必须以它为准而非返回码
-                    issue_cert_bundle "$hy_domain" "$cf_token" "$SERVER_IP" || true
-                    if [[ "$CERT_MODE" == "domain" ]]; then
-                        target_host="$hy_domain"
-                        hy_skip_cert="false"
-                    else
-                        echo -e "${YELLOW}域名证书未成功，已降级为 IP 自签证书兜底。${PLAIN}"
-                        CERT_MODE="selfsigned"
-                        target_host="$SERVER_IP"
-                        hy_domain=""
-                        hy_skip_cert="true"
-                    fi
-                else
-                    if ! issue_self_signed_cert "$SERVER_IP"; then
-                        echo -e "${RED}证书生成失败，操作中止（原配置与服务保持不变）。${PLAIN}"
-                        systemctl start sing-box 2>/dev/null || true
-                        read -r -p "按回车键返回..." dummy || true
-                        continue
-                    fi
-                    CERT_MODE="selfsigned"
-                    target_host="$SERVER_IP"
-                    hy_domain=""
-                    hy_skip_cert="true"
-                fi
-
-                local hy_password
-                hy_password=$(/usr/local/bin/sing-box generate rand 16 --base64 | tr -dc 'a-zA-Z0-9' | head -c 16)
-
-                local sub_proto="http"
-                [[ "$CERT_MODE" == "domain" ]] && sub_proto="https"
-
-                clear_port_hopping
-                if [[ -n "$hy_range" ]]; then
-                    setup_port_hopping "$hy_port" "$hy_range"
-                fi
-
-                local node_prefix="$NODE_PREFIX"
-                local server_ip="$SERVER_IP"
-                local vl_port="$VL_PORT"
-                local vl_sni="$VL_SNI"
-                local user_uuid="$VL_UUID"
-                local vl_privkey="${VL_PRIVKEY:-}"
-                local vl_pubkey="$VL_PUBKEY"
-                local vl_shortid="$VL_SHORTID"
-                local sub_port="$SUB_PORT"
-                local sub_token="$SUB_TOKEN"
-
-                # 老版本 env.conf 没有 VL_PRIVKEY，缺失时无法重建 Reality，必须先补齐
-                if [[ -z "$vl_privkey" ]]; then
-                    echo -e "${RED}环境配置缺少 Reality 私钥 (VL_PRIVKEY)，无法安全重建。${PLAIN}"
-                    echo -e "${YELLOW}请进入 [2] VLESS-Reality 模块配置 重新生成一次密钥，再回到此处。${PLAIN}"
-                    systemctl start sing-box 2>/dev/null || true
-                    read -r -p "按回车键返回..." dummy || true
-                    continue
-                fi
-
-                write_singbox_config "$vl_port" "$vl_sni" "$user_uuid" "$vl_privkey" "$vl_shortid" "$hy_port" "$hy_password"
-                if ! write_env_config; then
-                    echo -e "${RED}环境配置写入失败，操作已中止。${PLAIN}"
-                    read -r -p "按回车键返回..." dummy || true
-                    continue
-                fi
-                if ! render_and_reload; then
-                    echo -e "${RED}Hysteria 2 模块更新失败，请检查上面的错误信息。${PLAIN}"
-                    # 证书阶段可能已停服务，失败路径必须把服务拉回来
-                    systemctl start sing-box 2>/dev/null || true
-                    read -r -p "按回车键返回..." dummy || true
-                    continue
-                fi
-
-                local new_sub_url="${sub_proto}://${target_host}:${sub_port}/${sub_token}/config.yaml"
-                echo -e "\n${GREEN}✓ Hysteria 2 模块已成功更新！${PLAIN}"
-                if [[ "$new_sub_url" == "$old_sub_url" ]]; then
-                    echo -e "提示: 订阅链接保持不变，客户端仅需点击「更新订阅」即可自动同步新节点。"
-                else
-                    echo -e "${YELLOW}⚠️  提示: 域名或证书模式已变更，在线订阅地址已更新为:${PLAIN}"
-                    echo -e "   ${CYAN}${new_sub_url}${PLAIN}"
-                    echo -e "${YELLOW}   请在客户端 (如 Clash / Mihomo) 中替换为新的订阅地址。${PLAIN}"
-                fi
-                read -r -p "按回车键返回..." dummy || true
-                set +e; load_env; set -e
-                ;;
-            0) break ;;
-            *) echo -e "${RED}无效选项${PLAIN}"; sleep 1 ;;
-        esac
-    done
+port_holder() {
+    local port="$1" proto="${2:-tcp}" flag="-ltnp"
+    [[ "$proto" == "udp" ]] && flag="-lunp"
+    ss $flag 2>/dev/null | grep ":$port " | grep -oE 'users:\(\("[^"]+' | head -1 | sed 's/.*("//'
 }
 
-# 3. 在线订阅地址独立模块配置 (结构与模块 1、2 统一)
+# 在 Caddy 配置里按「站点块首字段」精确找域名，避免子串误命中
+site_file_for() {
+    local d="${1//./\\.}" f hits=()
+    local dir="${CADDY_SITES_DIR:-/etc/caddy/sites}" main="${CADDYFILE:-/etc/caddy/Caddyfile}"
+    for f in "$dir"/*.caddy "$main"; do
+        [[ -f "$f" ]] || continue
+        grep -qE "^[[:space:]]*(https?://)?${d}(:[0-9]+)?[[:space:]]*\{" "$f" && hits+=("$f")
+    done
+    (( ${#hits[@]} )) || return 1
+    printf '%s\n' "${hits[0]}"
+}
+
+# 外部伪装域名必须支持 TLS 1.3 + h2，否则 Reality 握手失败但配置看起来正常
+probe_external_sni() {
+    local d="$1"
+    timeout 8 openssl s_client -connect "${d}:443" -servername "$d" -tls1_3 -alpn h2 </dev/null 2>/dev/null \
+        | grep -q "ALPN protocol: h2"
+}
+
+sync_hy2_cert() {
+    local d="$1" src=""
+    # 证书目录可能是 /etc/ssl/<域名>，也可能是按站点起的短名（如 /etc/ssl/agisignal）
+    for src in "/etc/ssl/$d" "/etc/ssl/${d%%.*}" "$CERT_DIR"; do
+        [[ -n "$d" && -f "$src/fullchain.cer" && -f "$src/private.key" ]] && break
+        src=""
+    done
+    [[ -n "$src" ]] || return 1
+    [[ "$src" == "$CERT_DIR" ]] && return 0   # 已就位，无需复制
+    install -m 644 "$src/fullchain.cer" "$CERT_DIR/fullchain.cer" || return 1
+    install -m 640 -g caddy "$src/private.key" "$CERT_DIR/private.key" 2>/dev/null \
+        || install -m 600 "$src/private.key" "$CERT_DIR/private.key" || return 1
+}
+
+ensure_reality_creds() {
+    [[ -n "${VL_UUID:-}" && -n "${VL_PRIVKEY:-}" ]] && return 0
+    local kp
+    kp=$(/usr/local/bin/sing-box generate reality-keypair) || return 1
+    VL_PRIVKEY=$(awk '/PrivateKey/{print $2}' <<<"$kp")
+    VL_PUBKEY=$(awk '/PublicKey/{print $2}' <<<"$kp")
+    VL_SHORTID=$(/usr/local/bin/sing-box generate rand 8 --hex)
+    VL_UUID=$(/usr/local/bin/sing-box generate uuid)
+}
+
+# 把大写 env 变量搬进 write_env_config 需要的变量名
+sync_env_locals() {
+    node_prefix="$NODE_PREFIX"; server_ip="$SERVER_IP"
+    vl_port="$VL_PORT"; vl_sni="$VL_SNI"; user_uuid="$VL_UUID"
+    vl_privkey="$VL_PRIVKEY"; vl_pubkey="$VL_PUBKEY"; vl_shortid="$VL_SHORTID"
+    hy_domain="${HY_DOMAIN:-}"; target_host="${TARGET_HOST:-$SERVER_IP}"
+    hy_port="$HY_PORT"; hy_range="${HY_RANGE:-}"; hy_password="$HY_PASS"
+    hy_skip_cert="${HY_SKIP_CERT:-false}"; sub_port="$SUB_PORT"
+    sub_proto="${SUB_PROTO:-https}"; sub_token="$SUB_TOKEN"
+}
+
+# 按启用集合写 config.json；集合来自 config.json 本身，不另设开关
+render_set() {
+    local set=" $1 " vl_p="" hy_p=""
+    [[ "$set" == *" reality "* ]] && vl_p="$VL_PORT"
+    [[ "$set" == *" hy2 "* ]] && hy_p="$HY_PORT"
+    write_singbox_config "$vl_p" "${VL_SNI:-}" "${VL_UUID:-}" "${VL_PRIVKEY:-}" "${VL_SHORTID:-}" \
+        "$hy_p" "${HY_PASS:-}" "${VL_HANDSHAKE:-}" "${VL_HANDSHAKE_PORT:-}"
+}
+
+proto_enable_reality() {
+    load_env || { echo -e "${RED}未检测到已安装的配置${PLAIN}"; return 1; }
+    ensure_reality_creds || return 1
+
+    local port sni
+    ask_trim "请输入 Reality 监听端口 [默认: ${CYAN}${VL_PORT:-443}${PLAIN}]: " "${VL_PORT:-443}" port
+    validate_port "$port" || return 1
+    ask_trim "请输入 Reality 伪装域名 [默认: ${CYAN}${VL_SNI:-www.icloud.com}${PLAIN}]: " "${VL_SNI:-www.icloud.com}" sni
+    validate_domain "$sni" || return 1
+
+    # 检查点 B：这个域名在本机有没有站点
+    local site="" hs="" hsp=""
+    if site=$(site_file_for "$sni"); then
+        echo -e "${GREEN}✓ 找到本机站点 ${site}${PLAIN}"
+        echo -e "  Reality 占用 ${port}，站点回落到 127.0.0.1:${FLIP_PORT:-9443}"
+        hs="127.0.0.1"; hsp="${FLIP_PORT:-9443}"
+    else
+        echo -e "${YELLOW}本机没有 ${sni} 的站点，按外部伪装域名校验 TLS 1.3 + h2 ...${PLAIN}"
+        if ! probe_external_sni "$sni"; then
+            echo -e "${RED}✗ ${sni} 不支持 TLS 1.3 + h2 或不可达${PLAIN}"
+            echo -e "${YELLOW}  换一个域名，或先在本机建好站点再启用。${PLAIN}"
+            return 1
+        fi
+        echo -e "${GREEN}✓ 外部伪装域名可用${PLAIN}"
+    fi
+
+    # 检查点 A：端口归属
+    local holder; holder=$(port_holder "$port" tcp)
+    if [[ -n "$holder" && "$holder" != *sing-box* ]]; then
+        if [[ "$holder" == *caddy* && -n "$site" ]]; then
+            echo -e "${YELLOW}${port} 现在由 Caddy 的站点占用，将迁移到 127.0.0.1:${FLIP_PORT:-9443}${PLAIN}"
+        else
+            echo -e "${RED}✗ ${port} 已被 ${holder} 占用，无法启用 Reality${PLAIN}"
+            return 1
+        fi
+    fi
+
+    VL_PORT="$port"; VL_SNI="$sni"
+    SITE_FILE="$site"; FLIP_HOST="${site:+$sni}"; FLIP_PORT="${FLIP_PORT:-9443}"
+    VL_HANDSHAKE="$hs"; VL_HANDSHAKE_PORT="$hsp"
+
+    local set="reality"; set_has "hy2-in" && set="reality hy2"
+    render_set "$set" || return 1
+    sync_env_locals; write_env_config || return 1
+
+    [[ -n "$site" ]] && { flip_site_toggle on || return 1; }
+    render_and_reload || return 1
+    echo -e "${GREEN}✓ Reality 已启用${PLAIN}"
+}
+
+proto_enable_hy2() {
+    load_env || { echo -e "${RED}未检测到已安装的配置${PLAIN}"; return 1; }
+
+    local domain port range
+    ask_trim "请输入 Hysteria2 域名 [默认: ${CYAN}${HY_DOMAIN:-留空=IP自签}${PLAIN}]: " "${HY_DOMAIN:-}" domain
+    ask_trim "请输入 Hysteria2 端口 [默认: ${CYAN}${HY_PORT:-10443}${PLAIN}]: " "${HY_PORT:-10443}" port
+    validate_port "$port" || return 1
+    ask_trim "请输入端口跳跃范围 [默认: ${CYAN}${HY_RANGE:-none}${PLAIN}] (none=不启用): " "${HY_RANGE:-none}" range
+    [[ "$range" == "none" ]] && range=""
+
+    check_port_conflict "$port" "udp" "hy2" "$range" || return 1
+    if [[ -n "$range" ]]; then
+        check_range_conflict "$range" || return 1
+    fi
+
+    HY_DOMAIN="$domain"; HY_PORT="$port"; HY_RANGE="$range"
+    [[ -z "${HY_PASS:-}" ]] && HY_PASS=$(/usr/local/bin/sing-box generate rand --base64 16)
+    if [[ -n "$domain" ]] && sync_hy2_cert "$domain"; then
+        HY_SKIP_CERT="false"
+        echo -e "${GREEN}✓ 已同步 ${domain} 的证书${PLAIN}"
+    else
+        HY_SKIP_CERT="${HY_SKIP_CERT:-false}"
+        [[ -n "$domain" ]] && echo -e "${YELLOW}未找到 ${domain} 的证书，沿用现有证书文件${PLAIN}"
+    fi
+
+    local set="hy2"; set_has "vless-reality-in" && set="reality hy2"
+    render_set "$set" || return 1
+    sync_env_locals; write_env_config || return 1
+    render_and_reload || return 1
+    echo -e "${GREEN}✓ Hysteria2 已启用${PLAIN}"
+}
+
 menu_sub_module() {
     if [[ ! -f "$ENV_FILE" ]]; then
         echo -e "${RED}未检测到已安装的配置，请先运行选项 6 重新安装Simple-Box！${PLAIN}"
@@ -2655,7 +2539,8 @@ menu_singbox_manage() {
 
 # 用当前 env 变量重建订阅；端口传空表示该协议未启用，SNI 可选覆盖
 regen_from_scope() {
-    local vl_p="${1:-$VL_PORT}" hy_p="${2:-$HY_PORT}" vl_s="${3:-$VL_SNI}"
+    # 注意用 ${1-...} 而不是 ${1:-...}：空串表示「该协议未启用」，不能被默认值顶回来
+    local vl_p="${1-$VL_PORT}" hy_p="${2-$HY_PORT}" vl_s="${3:-$VL_SNI}"
     local server_ip="$SERVER_IP" target_host="${TARGET_HOST:-$HY_DOMAIN}" sub_token="$SUB_TOKEN"
     local node_prefix="$NODE_PREFIX" vl_port="$vl_p" user_uuid="$VL_UUID" vl_sni="$vl_s"
     local vl_pubkey="$VL_PUBKEY" vl_shortid="$VL_SHORTID" hy_port="$hy_p" hy_range="${HY_RANGE:-}"
@@ -2670,7 +2555,23 @@ flip_site_toggle() {
     local mode="$1"
     local site="${SITE_FILE:-}" domain="${FLIP_HOST:-}" port="${FLIP_PORT:-9443}"
     [[ -n "$site" && -f "$site" && -n "$domain" ]] || return 0
-    python3 - "$site" "$domain" "$port" "$mode" <<'PYEOF'
+    local backup; backup=$(mktemp /tmp/caddy-site.XXXXXX)
+    cp -f "$site" "$backup" || return 1
+    if ! flip_transform "$site" "$domain" "$port" "$mode"; then
+        cp -f "$backup" "$site"; rm -f "$backup"; return 1
+    fi
+    if ! caddy validate --config "${CADDYFILE:-/etc/caddy/Caddyfile}" >/dev/null 2>&1; then
+        cp -f "$backup" "$site"; rm -f "$backup"
+        echo -e "${RED}✗ Caddy 配置校验失败，已还原站点文件${PLAIN}"
+        return 1
+    fi
+    rm -f "$backup"
+    systemctl restart caddy && echo -e "${GREEN}✓ Caddy 已重载${PLAIN}"
+}
+
+# 纯文件变换（可单测）：只改站点块的监听地址与 bind，不动其它内容
+flip_transform() {
+    python3 - "$1" "$2" "$3" "$4" <<'PYEOF'
 import sys, pathlib, re
 site, domain, port, mode = sys.argv[1:5]
 p = pathlib.Path(site); s = p.read_text()
@@ -2689,79 +2590,54 @@ else:
     s = re.sub(r"^\tbind 127\.0\.0\.1\n", "", s, count=1, flags=re.M)
 p.write_text(s)
 PYEOF
-    caddy validate --config /etc/caddy/Caddyfile >/dev/null 2>&1 || { echo -e "${RED}✗ Caddy 配置校验失败，未重载${PLAIN}"; return 1; }
-    systemctl restart caddy && echo -e "${GREEN}✓ Caddy 已重载${PLAIN}"
 }
 
 # 停用某个协议：从 config 移除 inbound，重建订阅；Reality 还要退出翻转
 disable_protocol() {
     local which="$1"
-    load_env
-    local vl_p="$VL_PORT" hy_p="$HY_PORT"
-    [[ "$which" == "reality" ]] && vl_p=""
-    [[ "$which" == "hy2" ]] && hy_p=""
+    load_env || { echo -e "${RED}未检测到已安装的配置${PLAIN}"; return 1; }
+    local label="Hysteria2" tag="hy2-in" keep="reality"
+    [[ "$which" == "reality" ]] && { label="Reality"; tag="vless-reality-in"; keep="hy2"; }
 
-    if [[ "$which" == "reality" ]]; then
-        write_singbox_config "" "" "$VL_UUID" "$VL_PRIVKEY" "$VL_SHORTID" "$hy_p" "$HY_PASS" || return 1
-        systemctl restart sing-box || return 1
-        flip_site_toggle off || return 1
-    else
-        write_singbox_config "$vl_p" "$VL_SNI" "$VL_UUID" "$VL_PRIVKEY" "$VL_SHORTID" "" "" "${VL_HANDSHAKE:-}" "${VL_HANDSHAKE_PORT:-}" || return 1
-        systemctl restart sing-box || return 1
+    if ! set_has "$tag"; then
+        echo -e "${YELLOW}${label} 当前未启用${PLAIN}"
+        return 0
     fi
 
-    # 重建订阅：只输出仍启用的协议（不动 env.conf 里的凭证）
-    regen_from_scope "$vl_p" "$hy_p"
-    local label="Hysteria2"; [[ "$which" == "reality" ]] && label="Reality"
+    local set="$keep"
+    set_has "$([[ "$keep" == "hy2" ]] && echo "hy2-in" || echo "vless-reality-in")" || set=""
+    render_set "$set" || return 1
+    systemctl restart sing-box || return 1
+
+    # Reality 停用后 443 空出来，把站点搬回去；Hy2 不涉及站点
+    [[ "$which" == "reality" ]] && { flip_site_toggle off || return 1; }
+
+    local vp="$VL_PORT" hp="$HY_PORT"
+    [[ "$which" == "reality" ]] && vp=""
+    [[ "$which" == "hy2" ]] && hp=""
+    regen_from_scope "$vp" "$hp"
     echo -e "${GREEN}✓ 已停用 ${label}${PLAIN}"
-    echo -e "  恢复：simbo → 协议管理 → 重建 ${label}"
-}
-
-rebuild_protocol() {
-    local which="$1"
-    load_env
-    local vl_p="$VL_PORT" hy_p="$HY_PORT" vl_sni="$VL_SNI"
-    if [[ "$which" == "reality" ]]; then
-        ask "Reality 端口 [${VL_PORT}]: " vl_p
-        vl_p="${vl_p:-$VL_PORT}"
-        ask "伪装域名 [${VL_SNI}]: " vl_sni
-        vl_sni="${vl_sni:-$VL_SNI}"
-        echo -e "${YELLOW}将重做 443 翻转，站点中断约 5 秒${PLAIN}"
-        ask "继续？[y/N]: " ok
-        [[ "$ok" == [yY]* ]] || return 0
-        write_singbox_config "$vl_p" "$vl_sni" "$VL_UUID" "$VL_PRIVKEY" "$VL_SHORTID" "$hy_p" "$HY_PASS" "127.0.0.1" "${FLIP_PORT:-9443}" || return 1
-        # 顺序不能反：Caddy 还占着 443 时重启 sing-box 会 bind 失败（进程活着但不监听）
-        flip_site_toggle on || return 1
-        systemctl restart sing-box || return 1
-    else
-        ask "Hysteria2 端口 [${HY_PORT}]: " hy_p
-        hy_p="${hy_p:-$HY_PORT}"
-        write_singbox_config "$vl_p" "$VL_SNI" "$VL_UUID" "$VL_PRIVKEY" "$VL_SHORTID" "$hy_p" "$HY_PASS" "${VL_HANDSHAKE:-}" "${VL_HANDSHAKE_PORT:-}" || return 1
-        systemctl restart sing-box || return 1
-    fi
-    regen_from_scope "$vl_p" "$hy_p" "$vl_sni"
-    local label="Hysteria2"; [[ "$which" == "reality" ]] && label="Reality"
-    echo -e "${GREEN}✓ 已重建 ${label}${PLAIN}"
+    echo -e "  恢复：simbo → 协议管理 → 启用 ${label}"
 }
 
 menu_protocol() {
     while true; do
         [ -t 1 ] && clear
         echo -e "${GRAY}=================== 协议管理 ===================${PLAIN}"
-        echo " 1. 重建 Reality"
+        echo " 1. 启用 Reality"
         echo " 2. 停用 Reality"
-        echo " 3. 重建 Hysteria2"
+        echo " 3. 启用 Hysteria2"
         echo " 4. 停用 Hysteria2"
         echo " 0. 返回主菜单"
         echo -e "${GRAY}================================================${PLAIN}"
         local opt="" ok=""
         ask "请输入选项 [0-4]: " opt
         case "$opt" in
-            1) rebuild_protocol reality; read -r -p "按回车返回..." _ || true ;;
+            1) proto_enable_reality; read -r -p "按回车返回..." _ || true ;;
             2) read -r -p "确认停用 Reality？[y/N]: " ok || ok=""
                [[ "$ok" == [yY]* ]] && disable_protocol reality
                read -r -p "按回车返回..." _ || true ;;
-            3) rebuild_protocol hy2; read -r -p "按回车返回..." _ || true ;;
+            3) proto_enable_hy2; read -r -p "按回车返回..." _ || true ;;
             4) read -r -p "确认停用 Hysteria2？[y/N]: " ok || ok=""
                [[ "$ok" == [yY]* ]] && disable_protocol hy2
                read -r -p "按回车返回..." _ || true ;;
@@ -2786,7 +2662,7 @@ menu() {
         if [[ -f "$ENV_FILE" ]]; then
             cur_ip=$(grep -oP '^SERVER_IP="\K[^"]*' "$ENV_FILE" 2>/dev/null || true)
         fi
-        [[ -z "${cur_ip:-}" ]] && cur_ip=$(curl -s4m3 https://icanhazip.com 2>/dev/null || echo "检测中...")
+        [[ -z "${cur_ip:-}" ]] && cur_ip=$(detect_public_ip 2>/dev/null || echo "检测中...")
         local cc_algo
         cc_algo=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "关闭")
         if [[ "$cc_algo" == "bbr" ]]; then

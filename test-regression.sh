@@ -487,6 +487,172 @@ else
     bad "13.2 冲突提示缺失"
 fi
 
+# ---------- 15. 协议模块（站点发现 / 翻转 / 渲染） ----------
+group "15. 协议模块"
+
+SB15="$TMPD/m15"; mkdir -p "$SB15/sites"
+CADDYFILE="$SB15/Caddyfile"
+cat > "$CADDYFILE" <<'EOF'
+import sites/*.caddy
+EOF
+cat > "$SB15/sites/signal.caddy" <<'EOF'
+agisignal.example.com {
+	encode gzip
+	root * /var/www/signal
+	file_server
+}
+EOF
+cat > "$SB15/sites/other.caddy" <<'EOF'
+https://other.example.com:9443 {
+	root * /var/www/other
+	file_server
+}
+EOF
+cat > "$SB15/sites/trap.caddy" <<'EOF'
+agisignal.example.com.evil.com {
+	root * /var/www/trap
+}
+EOF
+
+export CADDY_SITES_DIR="$SB15/sites"
+
+# 15.1 命中
+_hit=$(site_file_for "agisignal.example.com" 2>/dev/null || true)
+[[ "$_hit" == "$SB15/sites/signal.caddy" ]] && ok "15.1 精确命中站点文件" || bad "15.1 站点发现失败" "得到: ${_hit:-空}"
+
+# 15.2 子串不误命中
+_hit2=$(site_file_for "agisignal.example.com.evil.com" 2>/dev/null || true)
+[[ "$_hit2" == "$SB15/sites/trap.caddy" ]] && ok "15.2 后缀相似域名各自命中" || bad "15.2 域名匹配不精确" "得到: ${_hit2:-空}"
+
+# 15.3 https://domain:port 形式
+_hit3=$(site_file_for "other.example.com" 2>/dev/null || true)
+[[ "$_hit3" == "$SB15/sites/other.caddy" ]] && ok "15.3 识别 https://域名:端口 站点块" || bad "15.3 未识别带端口的站点块"
+
+# 15.4 未命中返回非零
+if site_file_for "nope.example.com" >/dev/null 2>&1; then bad "15.4 未命中却返回成功"; else ok "15.4 未命中返回非零"; fi
+
+# 15.5 翻转到 9443
+_f="$SB15/sites/signal.caddy"; _orig=$(sha256sum "$_f" | cut -d' ' -f1)
+flip_transform "$_f" "agisignal.example.com" 9443 on >/dev/null 2>&1
+grep -q "^https://agisignal.example.com:9443 {" "$_f" && grep -q "bind 127.0.0.1" "$_f" \
+    && ok "15.5 翻转写入 https://域名:9443 + bind" || bad "15.5 翻转结果不正确"
+
+# 15.6 幂等：再翻一次不变
+_h1=$(sha256sum "$_f" | cut -d' ' -f1)
+flip_transform "$_f" "agisignal.example.com" 9443 on >/dev/null 2>&1
+_h2=$(sha256sum "$_f" | cut -d' ' -f1)
+[[ "$_h1" == "$_h2" ]] && ok "15.6 重复翻转字节不变" || bad "15.6 重复翻转改动了文件"
+
+# 15.7 别的站点块不受影响
+grep -q "^https://other.example.com:9443 {" "$SB15/sites/other.caddy" \
+    && ! grep -q "agisignal" "$SB15/sites/other.caddy" && ok "15.7 其它站点块未被改动" || bad "15.7 误伤其它站点"
+
+# 15.8 翻回来与原文一致
+flip_transform "$_f" "agisignal.example.com" 9443 off >/dev/null 2>&1
+_back=$(sha256sum "$_f" | cut -d' ' -f1)
+[[ "$_back" == "$_orig" ]] && ok "15.8 退出翻转后与原文件字节一致" || bad "15.8 退出翻转未完全还原"
+
+# 15.9 站点内容里的同名域名不被误改
+_f2="$SB15/sites/content.caddy"
+cat > "$_f2" <<'EOF'
+plain.example.com {
+	respond "plain.example.com"
+}
+EOF
+_c_before=$(sha256sum "$_f2" | cut -d' ' -f1)
+flip_transform "$_f2" "other.example.com" 9443 on >/dev/null 2>&1
+_c_after=$(sha256sum "$_f2" | cut -d' ' -f1)
+[[ "$_c_before" == "$_c_after" ]] && ok "15.9 不存在的域名不修改文件" || bad "15.9 错误改写了无关文件"
+
+# 15.10 current_inbounds / set_has
+SB_CONF="$SB15/config.json"
+cat > "$SB_CONF" <<'EOF'
+{"inbounds":[{"type":"vless","tag":"vless-reality-in"},{"type":"hysteria2","tag":"hy2-in"}]}
+EOF
+CONF_FILE="$SB_CONF"
+_t=$(current_inbounds)
+[[ "$_t" == *vless-reality-in* && "$_t" == *hy2-in* ]] && ok "15.10 current_inbounds 解析两个 inbound" || bad "15.10 current_inbounds 解析失败" "$_t"
+set_has "hy2-in" && set_has "vless-reality-in" && ok "15.11 set_has 判定启用" || bad "15.11 set_has 误判"
+cat > "$SB_CONF" <<'EOF'
+{"inbounds":[{"type":"hysteria2","tag":"hy2-in"}]}
+EOF
+if set_has "vless-reality-in"; then bad "15.12 缺席 inbound 被误判为启用"; else ok "15.12 缺席 inbound 判定为未启用"; fi
+
+# 15.13 render_set 只写 Reality
+CERT_DIR="$SB15/cert"; mkdir -p "$CERT_DIR"
+VL_PORT=443; VL_SNI="agisignal.example.com"; VL_UUID="11111111-1111-1111-1111-111111111111"
+VL_PRIVKEY="PRIV"; VL_SHORTID="abcd1234"; VL_HANDSHAKE="127.0.0.1"; VL_HANDSHAKE_PORT=9443
+HY_PORT=10443; HY_PASS="pass123"
+render_set "reality" && python3 -c "import json;d=json.load(open('$SB_CONF'));print(' '.join(i['tag'] for i in d['inbounds']))" > "$SB15/tags1"
+[[ "$(cat "$SB15/tags1")" == "vless-reality-in" ]] && ok "15.13 render_set 单 Reality 只写一个 inbound" || bad "15.13 render_set Reality 输出异常" "$(cat "$SB15/tags1")"
+
+# 15.14 render_set 只写 Hy2
+render_set "hy2" && python3 -c "import json;d=json.load(open('$SB_CONF'));print(' '.join(i['tag'] for i in d['inbounds']))" > "$SB15/tags2"
+[[ "$(cat "$SB15/tags2")" == "hy2-in" ]] && ok "15.14 render_set 单 Hy2 只写一个 inbound" || bad "15.14 render_set Hy2 输出异常" "$(cat "$SB15/tags2")"
+
+# 15.15 render_set 两个都写，且 Reality 使用翻转的 handshake 目标
+render_set "reality hy2" && python3 - <<PY
+import json
+d=json.load(open("$SB_CONF"))
+tags=[i["tag"] for i in d["inbounds"]]
+hs=[i for i in d["inbounds"] if i["tag"]=="vless-reality-in"][0]["tls"]["reality"]["handshake"]
+print(" ".join(tags)); print(hs["server"], hs["server_port"])
+PY
+_three=$(python3 -c "import json;print(' '.join(i['tag'] for i in json.load(open('$SB_CONF'))['inbounds']))")
+_hs=$(python3 -c "import json;print([i for i in json.load(open('$SB_CONF'))['inbounds'] if i['tag']=='vless-reality-in'][0]['tls']['reality']['handshake']['server'])")
+[[ "$_three" == "vless-reality-in hy2-in" && "$_hs" == "127.0.0.1" ]] && ok "15.15 render_set 双协议 + handshake 指向本机站点" || bad "15.15 render_set 双协议异常" "$_three / $_hs"
+
+# 15.16 静态：旧模块已删除、新模块存在
+if grep -qE '^menu_(reality|hy2)_module\(\)' "$TARGET"; then bad "15.16 旧模块函数仍存在"; else ok "15.16 旧模块函数已删除"; fi
+grep -q '^proto_enable_reality()' "$TARGET" && grep -q '^proto_enable_hy2()' "$TARGET" && grep -q '^disable_protocol()' "$TARGET" \
+    && ok "15.17 新协议模块就位" || bad "15.17 新协议模块缺失"
+
+# 15.18 菜单文案
+grep -q '1. 启用 Reality' "$TARGET" && grep -q '3. 启用 Hysteria2' "$TARGET" && ok "15.18 菜单使用「启用」文案" || bad "15.18 菜单文案未更新"
+if grep -q '重建 Reality' "$TARGET"; then bad "15.19 菜单仍残留「重建 Reality」"; else ok "15.19 无「重建」残留"; fi
+
+# 15.20 翻转失败必须还原站点文件（真实 caddy validate）
+CADDY_BIN=""
+for c in /tmp/bin/caddy /usr/bin/caddy /usr/local/bin/caddy; do [[ -x "$c" ]] && { CADDY_BIN="$c"; break; }; done
+if [[ -n "$CADDY_BIN" ]]; then
+    export PATH="$(dirname "$CADDY_BIN"):$PATH"
+    _bad="$SB15/sites/bad.caddy"; printf 'broken.example.com {\n\troot * /x\n' > "$_bad"
+    _b1=$(sha256sum "$_bad" | cut -d' ' -f1)
+    SITE_FILE="$_bad"; FLIP_HOST="broken.example.com"; FLIP_PORT=9443
+    if flip_site_toggle on >/dev/null 2>&1; then bad "15.20 非法配置未被拦截"; else
+        _b2=$(sha256sum "$_bad" | cut -d' ' -f1)
+        [[ "$_b1" == "$_b2" ]] && ok "15.20 validate 失败后站点文件已还原" || bad "15.20 失败后文件未还原"
+    fi
+    rm -f "$_bad"   # 坏站点会让后续 validate 必然失败，先移除
+
+    # 15.21 合法站点：validate 通过后文件变成翻转形态
+    _good="$SB15/sites/signal.caddy"
+    SITE_FILE="$_good"; FLIP_HOST="agisignal.example.com"; FLIP_PORT=9443
+    flip_site_toggle on >/dev/null 2>&1 || true   # 无 caddy 服务时 restart 失败不影响文件断言
+    grep -q '^https://agisignal.example.com:9443 {' "$_good" && grep -q 'bind 127.0.0.1' "$_good" \
+        && ok "15.21 合法站点翻转成功" || bad "15.21 合法站点翻转失败"
+    flip_transform "$_good" "agisignal.example.com" 9443 off >/dev/null 2>&1
+    [[ "$(sha256sum "$_good" | cut -d' ' -f1)" == "$_orig" ]] && ok "15.22 复原后与原始站点一致" || bad "15.22 复原失败"
+else
+    printf '  \033[33m-\033[0m 未找到 caddy 二进制，跳过翻转 validate 测试\n'
+fi
+
+# 15.23 port_holder 能识别占用者
+python3 -m http.server 18099 --bind 127.0.0.1 >/dev/null 2>&1 &
+_ph_pid=$!; sleep 0.6
+_h=$(port_holder 18099 tcp)
+kill "$_ph_pid" 2>/dev/null; wait "$_ph_pid" 2>/dev/null
+[[ "$_h" == *python* ]] && ok "15.23 port_holder 识别端口占用者" || bad "15.23 port_holder 未识别占用者" "${_h:-空}"
+
+# 15.24 外部 SNI 探测：好域名通过、坏域名失败（需要网络）
+if probe_external_sni "www.cloudflare.com"; then
+    if probe_external_sni "example.invalid"; then bad "15.24 不存在的域名被误判为可用"; else ok "15.24 外部 SNI 探测可区分好坏域名"; fi
+else
+    printf '  \033[33m-\033[0m 无外网或 TLS 探测失败，跳过外部 SNI 测试\n'
+fi
+
+unset CADDY_SITES_DIR
+
 # ---------- 14. 清理 ----------
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null

@@ -2706,7 +2706,7 @@ disable_protocol() {
     regen_subscription "$sub_token" >/dev/null 2>&1 || true
     local label="Hysteria2"; [[ "$which" == "reality" ]] && label="Reality"
     echo -e "${GREEN}✓ 已停用 ${label}${PLAIN}"
-    echo -e "  恢复：simbo → 重建配置 → ${label}"
+    echo -e "  恢复：simbo → 协议管理 → 重建 ${label}"
 }
 
 rebuild_protocol() {
@@ -2742,40 +2742,27 @@ rebuild_protocol() {
     echo -e "${GREEN}✓ 已重建 ${label}${PLAIN}"
 }
 
-menu_rebuild() {
+menu_protocol() {
     while true; do
         [ -t 1 ] && clear
-        echo -e "${GRAY}=================== 重建配置 ===================${PLAIN}"
+        echo -e "${GRAY}=================== 协议管理 ===================${PLAIN}"
         echo " 1. 重建 Reality"
-        echo " 2. 重建 Hysteria2"
-        echo " 0. 返回主菜单"
-        echo -e "${GRAY}================================================${PLAIN}"
-        local opt=""
-        read -r -p "请输入选项 [0-2]: " opt || opt=""
-        case "$opt" in
-            1) rebuild_protocol reality; read -r -p "按回车返回..." _ || true ;;
-            2) rebuild_protocol hy2; read -r -p "按回车返回..." _ || true ;;
-            0) break ;;
-            *) echo -e "${RED}无效选项${PLAIN}"; sleep 1 ;;
-        esac
-    done
-}
-
-menu_disable() {
-    while true; do
-        [ -t 1 ] && clear
-        echo -e "${GRAY}=================== 停用协议 ===================${PLAIN}"
-        echo " 1. 停用 Reality"
-        echo " 2. 停用 Hysteria2"
+        echo " 2. 停用 Reality"
+        echo " 3. 重建 Hysteria2"
+        echo " 4. 停用 Hysteria2"
         echo " 0. 返回主菜单"
         echo -e "${GRAY}================================================${PLAIN}"
         local opt="" ok=""
-        read -r -p "请输入选项 [0-2]: " opt || opt=""
+        read -r -p "请输入选项 [0-4]: " opt || opt=""
         case "$opt" in
-            1) read -r -p "确认停用 Reality？[y/N]: " ok || ok=""
-               [[ "$ok" == [yY]* ]] && disable_protocol reality; read -r -p "按回车返回..." _ || true ;;
-            2) read -r -p "确认停用 Hysteria2？[y/N]: " ok || ok=""
-               [[ "$ok" == [yY]* ]] && disable_protocol hy2; read -r -p "按回车返回..." _ || true ;;
+            1) rebuild_protocol reality; read -r -p "按回车返回..." _ || true ;;
+            2) read -r -p "确认停用 Reality？[y/N]: " ok || ok=""
+               [[ "$ok" == [yY]* ]] && disable_protocol reality
+               read -r -p "按回车返回..." _ || true ;;
+            3) rebuild_protocol hy2; read -r -p "按回车返回..." _ || true ;;
+            4) read -r -p "确认停用 Hysteria2？[y/N]: " ok || ok=""
+               [[ "$ok" == [yY]* ]] && disable_protocol hy2
+               read -r -p "按回车返回..." _ || true ;;
             0) break ;;
             *) echo -e "${RED}无效选项${PLAIN}"; sleep 1 ;;
         esac
@@ -2885,12 +2872,11 @@ menu() {
 
         echo -e "${GRAY}----------------------------------------------------${PLAIN}"
         echo -e " 1. 原生链接查看"
-        echo -e " 2. 重建配置"
-        echo -e " 3. 停用协议"
-        echo -e " 4. 订阅地址配置"
-        echo -e " 5. sing-box 内核管理"
-        echo -e " 6. Simple-Box 脚本升级"
-        echo -e " 7. Simple-Box 脚本卸载"
+        echo -e " 2. 协议管理"
+        echo -e " 3. 订阅地址配置"
+        echo -e " 4. sing-box 内核管理"
+        echo -e " 5. Simple-Box 脚本升级"
+        echo -e " 6. Simple-Box 脚本卸载"
         echo -e " 0. 退出控制台"
         echo -e "${GRAY}====================================================${PLAIN}"
         
@@ -2898,11 +2884,10 @@ menu() {
         read -r -p "请输入选项 [0-7]: " opt || opt="0"
         case "$opt" in
             1) show_links || true ;;
-            2) menu_rebuild || true ;;
-            3) menu_disable || true ;;
-            4) menu_sub_module || true ;;
-            5) menu_singbox_manage || true ;;
-            6) reinstall_with_latest || true ;;
+            2) menu_protocol || true ;;
+            3) menu_sub_module || true ;;
+            4) menu_singbox_manage || true ;;
+            5) reinstall_with_latest || true ;;
             7)
                 uninstall_all || true
                 # 卸载已彻底完成：脚本与配置目录均被删除，直接退出

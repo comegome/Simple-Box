@@ -989,10 +989,10 @@ _n_ipv6=$(grep -ci 'ipv6' "$TARGET" || true)
 
 grep -q 'print_io_status' "$TARGET" && ok "20.2 面板使用入站/出站状态块" || bad "20.2 面板未使用状态块"
 _missing=""
-for _kw in '[已启用]' '[未启用]' '[未安装]' '[直连]' '[中转]' '[关闭]'; do
+for _kw in '[已启用]' '[未启用]' '[未安装]' '[关闭]'; do
     grep -qF "$_kw" "$TARGET" || _missing+=" $_kw"
 done
-[[ -z "$_missing" ]] && ok "20.3 六种状态词齐全" || bad "20.3 缺少状态词" "$_missing"
+[[ -z "$_missing" ]] && ok "20.3 状态词齐全" || bad "20.3 缺少状态词" "$_missing"
 
 # ---------- 14. 清理 ----------
 group "14. 清理"

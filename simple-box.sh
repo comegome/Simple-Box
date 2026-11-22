@@ -972,39 +972,36 @@ EOF
 print_io_status() {
     local st
     sync_env_locals   # env 存分协议字段，这里解析成当前生效的一组
-    # ---- 入站 ----
+
+    # ---- 入站（两个协议固定占位）----
     for _p in $PROTOCOLS; do
-        local tag; tag=$(proto_tag "$_p")
         local name; name=$(proto_human "$_p")
         local cred=""
         case "$_p" in reality) cred="${VL_UUID:-}" ;; hy2) cred="${HY_PASS:-}" ;; esac
-        if set_has "$tag"; then
+        if set_has "$(proto_tag "$_p")"; then
             st="${GREEN}[已启用]${PLAIN}"
             case "$_p" in
-                reality) printf ' 入站 %-12s %s TCP %s   %s\n' "$name" "$st" "${VL_PORT:-443}" "${VL_SNI:-}";;
-                hy2)     printf ' 入站 %-12s %s UDP %s  %s%s\n' "$name" "$st" "${HY_PORT:-8443}" \
-                            "${HY_DOMAIN:-$SERVER_IP}" "${HY_RANGE:+ · 跳跃 $HY_RANGE}";;
+                reality) printf ' 入站 %-14s %s  TCP %s   %s\n' "$name" "$st" "${VL_PORT:-443}" "${VL_SNI:-}";;
+                hy2)     printf ' 入站 %-14s %s  UDP %s  %s%s\n' "$name" "$st" "${HY_PORT:-8443}" \
+                            "${HY_DOMAIN:-$SERVER_IP}" "${HY_RANGE:+ $HY_RANGE}";;
             esac
         elif [[ -n "$cred" ]]; then
-            printf ' 入站 %-12s %s\n' "$name" "${YELLOW}[未启用]${PLAIN}"
+            printf ' 入站 %-14s %s\n' "$name" "${YELLOW}[未启用]${PLAIN}"
         else
-            printf ' 入站 %-12s %s\n' "$name" "${GRAY}[未安装]${PLAIN}"
+            printf ' 入站 %-14s %s\n' "$name" "${GRAY}[未安装]${PLAIN}"
         fi
     done
 
-    # ---- 出站 ----
-    printf ' 出站 %-12s %s   本机 %s\n' "Direct" "${CYAN}[直连]${PLAIN}" "$SERVER_IP"
-    if [[ "${EXIT_TYPE:-none}" == "none" ]]; then
-        printf ' 出站 %-12s %s\n' "Relay" "${GRAY}[关闭]${PLAIN}"
+    # ---- 出站：直连是默认行为（route.final=direct），不占行；只报中转 ----
+    local ep="" en=""
+    if set_has "vless-reality-in"; then ep="TCP ${EXIT_ENTRY_VL:-2053}"; fi
+    if set_has "hy2-in"; then ep="${ep:+$ep / }UDP ${EXIT_ENTRY_HY:-2054}"; fi
+    if [[ "${EXIT_TYPE:-none}" != "none" && -n "$ep" ]]; then
+        [[ "$EXIT_TYPE" == "vless" ]] && en="Reality" || en="Hysteria2"
+        printf ' 出站 %-14s %s  %s  →  %s (%s)\n' "Relay" "${GREEN}[已启用]${PLAIN}" \
+            "$ep" "${EXIT_SERVER}" "$en"
     else
-        local _ep="$EXIT_PORT" _en="Hy2"
-        [[ "$EXIT_TYPE" == "vless" ]] && _en="Reality"
-        local entries=""
-        set_has "vless-reality-in" && entries+="${EXIT_ENTRY_VL:-2053}/"
-        set_has "hy2-in" && entries+="${EXIT_ENTRY_HY:-2054}/"
-        entries="${entries%/}"
-        printf ' 出站 %-12s %s   入口 %s → %s:%s (%s)  后缀 -%s\n' "Relay" "${CYAN}[中转]${PLAIN}" \
-            "$entries" "$EXIT_SERVER" "$_ep" "$_en" "${EXIT_LABEL:-SG}"
+        printf ' 出站 %-14s %s\n' "Relay" "${GRAY}[关闭]${PLAIN}"
     fi
 }
 

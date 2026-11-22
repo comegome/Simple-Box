@@ -95,10 +95,9 @@ simbo
  证书管理: 运行中 (Caddy v2.6.2)
  代理服务: 运行中 (sing-box v1.14.3)
 ----------------------------------------------------
- 入站 Reality      [已启用] TCP 443   www.icloud.com
- 入站 Hysteria2    [已启用] UDP 8443  node.example.com · 跳跃 20000:40000
- 出站 Direct       [直连]   本机 203.0.113.10
- 出站 Relay        [关闭]
+ 入站 Reality        [已启用]  TCP 443   www.icloud.com
+ 入站 Hysteria2      [已启用]  UDP 8443  node.example.com 20000:40000
+ 出站 Relay          [关闭]
 ----------------------------------------------------
  订阅: https://node.example.com:8444/<token>/config.yaml
 ----------------------------------------------------

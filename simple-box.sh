@@ -1068,7 +1068,9 @@ proto_label() { case "$1" in reality) echo "VLESS-Reality" ;; hy2) echo "Hysteri
 
 # 订阅 YAML 片段：读调用方的小写局部变量（动态作用域）
 proto_proxy() {
-    local _p="$1" _name="$2" _port="$3"
+    local _p="$1" _name="$2" _port="$3" _ports_override="${4-__default__}"
+    local _ports_line="${ports_line:-}"
+    [[ "$_ports_override" != "__default__" ]] && _ports_line="$_ports_override"
     case "$_p" in
         reality) cat <<EOF
   - name: "${_name}"
@@ -1092,7 +1094,7 @@ EOF
     type: hysteria2
     server: ${domain_or_ip}
     port: ${_port}
-${ports_line}
+${_ports_line}
     password: "${hy_password}"
     sni: ${domain_or_ip}
     skip-cert-verify: ${hy_skip_cert}
@@ -1220,7 +1222,7 @@ EOF
         for _p in $PROTOCOLS; do
             case "$_p" in reality) _port="${EXIT_ENTRY_VL:-}" ;; hy2) _port="${EXIT_ENTRY_HY:-}" ;; esac
             [[ -n "$_port" ]] || continue
-            proto_proxy "$_p" "${node_prefix}-$(proto_label "$_p")-${EXIT_LABEL:-SG}" "$_port" >> "$full_config_file"
+            proto_proxy "$_p" "${node_prefix}-$(proto_label "$_p")-${EXIT_LABEL:-SG}" "$_port" "" >> "$full_config_file"
         done
     fi
 
@@ -1255,7 +1257,7 @@ EOF
         for _p in $PROTOCOLS; do
             case "$_p" in reality) _port="${EXIT_ENTRY_VL:-}" ;; hy2) _port="${EXIT_ENTRY_HY:-}" ;; esac
             [[ -n "$_port" ]] || continue
-            proto_proxy "$_p" "${node_prefix}-$(proto_label "$_p")-${EXIT_LABEL:-SG}" "$_port" >> "$provider_file"
+            proto_proxy "$_p" "${node_prefix}-$(proto_label "$_p")-${EXIT_LABEL:-SG}" "$_port" "" >> "$provider_file"
         done
     fi
 
@@ -1503,14 +1505,17 @@ FLIP_HOST="${FLIP_HOST:-}"
 SITE_FILE="${SITE_FILE:-}"
 FLIP_PORT="${FLIP_PORT:-9443}"
 EXIT_TYPE="${EXIT_TYPE:-none}"
-EXIT_SERVER="${EXIT_SERVER:-}"
-EXIT_PORT="${EXIT_PORT:-}"
-EXIT_PASS="${EXIT_PASS:-}"
-EXIT_SNI="${EXIT_SNI:-}"
+EXIT_HY_SERVER="${EXIT_HY_SERVER:-}"
+EXIT_HY_PORT="${EXIT_HY_PORT:-}"
+EXIT_HY_PASS="${EXIT_HY_PASS:-}"
+EXIT_HY_SNI="${EXIT_HY_SNI:-}"
+EXIT_VL_SERVER="${EXIT_VL_SERVER:-}"
+EXIT_VL_PORT="${EXIT_VL_PORT:-}"
+EXIT_VL_UUID="${EXIT_VL_UUID:-}"
+EXIT_VL_PBK="${EXIT_VL_PBK:-}"
+EXIT_VL_SID="${EXIT_VL_SID:-}"
+EXIT_VL_SNI="${EXIT_VL_SNI:-}"
 EXIT_SKIP_CERT="${EXIT_SKIP_CERT:-false}"
-EXIT_UUID="${EXIT_UUID:-}"
-EXIT_PBK="${EXIT_PBK:-}"
-EXIT_SID="${EXIT_SID:-}"
 EXIT_LABEL="${EXIT_LABEL:-SG}"
 EXIT_ENTRY_VL="${EXIT_ENTRY_VL:-2053}"
 EXIT_ENTRY_HY="${EXIT_ENTRY_HY:-2054}"
@@ -2245,10 +2250,19 @@ ensure_reality_creds() {
 
 # 把大写 env 变量搬进 write_env_config 需要的变量名
 sync_env_locals() {
-    EXIT_TYPE="${EXIT_TYPE:-none}"; EXIT_SERVER="${EXIT_SERVER:-}"; EXIT_PORT="${EXIT_PORT:-}"
-    EXIT_PASS="${EXIT_PASS:-}"; EXIT_SNI="${EXIT_SNI:-}"; EXIT_SKIP_CERT="${EXIT_SKIP_CERT:-false}"
-    EXIT_UUID="${EXIT_UUID:-}"; EXIT_PBK="${EXIT_PBK:-}"; EXIT_SID="${EXIT_SID:-}"
+    EXIT_TYPE="${EXIT_TYPE:-none}"; EXIT_SKIP_CERT="${EXIT_SKIP_CERT:-false}"
     EXIT_LABEL="${EXIT_LABEL:-SG}"; EXIT_ENTRY_VL="${EXIT_ENTRY_VL:-}"; EXIT_ENTRY_HY="${EXIT_ENTRY_HY:-}"
+    # 两套参数按当前类型解析；切换协议只改 EXIT_TYPE，不会串用对方的地址/端口
+    EXIT_SERVER=""; EXIT_PORT=""; EXIT_PASS=""; EXIT_SNI=""; EXIT_UUID=""; EXIT_PBK=""; EXIT_SID=""
+    case "$EXIT_TYPE" in
+        hy2)
+            EXIT_SERVER="${EXIT_HY_SERVER:-}"; EXIT_PORT="${EXIT_HY_PORT:-}"
+            EXIT_PASS="${EXIT_HY_PASS:-}"; EXIT_SNI="${EXIT_HY_SNI:-}" ;;
+        vless)
+            EXIT_SERVER="${EXIT_VL_SERVER:-}"; EXIT_PORT="${EXIT_VL_PORT:-}"
+            EXIT_UUID="${EXIT_VL_UUID:-}"; EXIT_PBK="${EXIT_VL_PBK:-}"
+            EXIT_SID="${EXIT_VL_SID:-}"; EXIT_SNI="${EXIT_VL_SNI:-}" ;;
+    esac
     node_prefix="$NODE_PREFIX"; server_ip="$SERVER_IP"
     vl_port="$VL_PORT"; vl_sni="$VL_SNI"; user_uuid="$VL_UUID"
     vl_privkey="$VL_PRIVKEY"; vl_pubkey="$VL_PUBKEY"; vl_shortid="$VL_SHORTID"
@@ -2747,17 +2761,17 @@ def pick(t):
 
 b = pick("hysteria2")
 if b:
-    for k, v in (("EXIT_TYPE", "hy2"), ("EXIT_SERVER", b.get("server", "")),
-                 ("EXIT_PORT", b.get("port", "")), ("EXIT_PASS", b.get("password", "")),
-                 ("EXIT_SNI", b.get("sni") or b.get("server", ""))):
+    for k, v in (("EXIT_HY_SERVER", b.get("server", "")),
+                 ("EXIT_HY_PORT", b.get("port", "")), ("EXIT_HY_PASS", b.get("password", "")),
+                 ("EXIT_HY_SNI", b.get("sni") or b.get("server", ""))):
         print(f"{k}\t{v}")
     sys.exit(0)
 b = pick("vless")
 if b:
-    for k, v in (("EXIT_TYPE", "vless"), ("EXIT_SERVER", b.get("server", "")),
-                 ("EXIT_PORT", b.get("port", "")), ("EXIT_UUID", b.get("uuid", "")),
-                 ("EXIT_PBK", b.get("public-key", "")), ("EXIT_SID", b.get("short-id", "")),
-                 ("EXIT_SNI", b.get("servername") or b.get("sni") or b.get("server", ""))):
+    for k, v in (("EXIT_VL_SERVER", b.get("server", "")),
+                 ("EXIT_VL_PORT", b.get("port", "")), ("EXIT_VL_UUID", b.get("uuid", "")),
+                 ("EXIT_VL_PBK", b.get("public-key", "")), ("EXIT_VL_SID", b.get("short-id", "")),
+                 ("EXIT_VL_SNI", b.get("servername") or b.get("sni") or b.get("server", ""))):
         print(f"{k}\t{v}")
     sys.exit(0)
 sys.exit(1)
@@ -2829,7 +2843,7 @@ menu_exit() {
             2)
                 local target other
                 if [[ "$cur" == "hy2" ]]; then target="vless"; other="Reality"; else target="hy2"; other="Hy2"; fi
-                if [[ "$target" == "hy2" && -z "${EXIT_PASS:-}" ]] || [[ "$target" == "vless" && -z "${EXIT_UUID:-}" ]]; then
+                if [[ "$target" == "hy2" && -z "${EXIT_HY_PASS:-}" ]] || [[ "$target" == "vless" && -z "${EXIT_VL_UUID:-}" ]]; then
                     echo -e "${YELLOW}${other} 出口的参数还没配置，请先执行 3. 设置出口参数${PLAIN}"
                     read -r -p "按回车返回..." _ || true
                     continue
@@ -2864,10 +2878,13 @@ menu_exit() {
                     fi
                     while IFS=$'\t' read -r _k _v; do
                         case "$_k" in
-                            EXIT_TYPE|EXIT_SERVER|EXIT_PORT|EXIT_PASS|EXIT_SNI|EXIT_UUID|EXIT_PBK|EXIT_SID)
+                            EXIT_HY_SERVER|EXIT_HY_PORT|EXIT_HY_PASS|EXIT_HY_SNI|EXIT_VL_SERVER|EXIT_VL_PORT|EXIT_VL_UUID|EXIT_VL_PBK|EXIT_VL_SID|EXIT_VL_SNI)
                                 printf -v "$_k" '%s' "$_v" ;;
                         esac
                     done <<< "$_imp"
+                    # 导入的是哪套参数就切成哪套
+                    if [[ -n "${EXIT_HY_PORT:-}" ]]; then EXIT_TYPE="hy2"; else EXIT_TYPE="vless"; fi
+                    sync_env_locals
                     echo -e "${GREEN}✓ 已从订阅导入：${EXIT_TYPE} → ${EXIT_SERVER}:${EXIT_PORT}${PLAIN}"
                 fi
                 local typ srv prt
@@ -2883,25 +2900,27 @@ menu_exit() {
                 if [[ -z "$srv" ]]; then echo -e "${RED}地址不能为空${PLAIN}"; sleep 1; continue; fi
                 ask "出口端口 [${EXIT_PORT:-$([[ "$typ" == hy2 ]] && echo 8443 || echo 443)}]: " prt
                 prt="${prt:-${EXIT_PORT:-$([[ "$typ" == hy2 ]] && echo 8443 || echo 443)}}"
-                EXIT_TYPE="$typ"; EXIT_SERVER="$srv"; EXIT_PORT="$prt"
+                EXIT_TYPE="$typ"
                 if [[ "$typ" == "hy2" ]]; then
                     local pw
+                    EXIT_HY_SERVER="$srv"; EXIT_HY_PORT="$prt"
                     ask "出口 Hy2 密码 [回车沿用]: " pw
-                    EXIT_PASS="${pw:-${EXIT_PASS:-}}"
-                    if [[ -z "$EXIT_PASS" ]]; then echo -e "${RED}密码不能为空${PLAIN}"; sleep 1; continue; fi
-                    EXIT_SNI="${EXIT_SNI:-$EXIT_SERVER}"
+                    EXIT_HY_PASS="${pw:-${EXIT_HY_PASS:-}}"
+                    if [[ -z "$EXIT_HY_PASS" ]]; then echo -e "${RED}密码不能为空${PLAIN}"; sleep 1; continue; fi
+                    EXIT_HY_SNI="${EXIT_HY_SNI:-$srv}"
                 else
                     local u k sid
+                    EXIT_VL_SERVER="$srv"; EXIT_VL_PORT="$prt"
                     ask "出口 Reality UUID [回车沿用]: " u
-                    EXIT_UUID="${u:-${EXIT_UUID:-}}"
+                    EXIT_VL_UUID="${u:-${EXIT_VL_UUID:-}}"
                     ask "出口 Reality 公钥 [回车沿用]: " k
-                    EXIT_PBK="${k:-${EXIT_PBK:-}}"
+                    EXIT_VL_PBK="${k:-${EXIT_VL_PBK:-}}"
                     ask "出口 Reality short-id [回车沿用]: " sid
-                    EXIT_SID="${sid:-${EXIT_SID:-}}"
-                    if [[ -z "$EXIT_UUID" || -z "$EXIT_PBK" || -z "$EXIT_SID" ]]; then
+                    EXIT_VL_SID="${sid:-${EXIT_VL_SID:-}}"
+                    if [[ -z "$EXIT_VL_UUID" || -z "$EXIT_VL_PBK" || -z "$EXIT_VL_SID" ]]; then
                         echo -e "${RED}UUID / 公钥 / short-id 都不能为空${PLAIN}"; sleep 1; continue
                     fi
-                    EXIT_SNI="${EXIT_SNI:-$EXIT_SERVER}"
+                    EXIT_VL_SNI="${EXIT_VL_SNI:-$srv}"
                 fi
                 sync_env_locals; write_env_config || { echo -e "${RED}写入 env 失败${PLAIN}"; continue; }
                 local set="reality"; set_has "hy2-in" && set="reality hy2"

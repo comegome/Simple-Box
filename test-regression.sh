@@ -819,6 +819,19 @@ grep -q 'port: 2053' "$WEB_DIR/tok17/provider.yaml" && grep -q 'port: 2054' "$WE
 grep -A1 -- '- "FN-VLESS-Reality-SG"' "$WEB_DIR/tok17/config.yaml" | grep -q 'DIRECT\|FN-' \
     && ok "17.7 链式节点已加入策略组" || bad "17.7 策略组未包含链式节点"
 
+# 17.11 出口 Hy2 节点不得继承端口跳跃（否则客户端会跳到主入口端口，落地变成入口机）
+awk '/FN-Hysteria2-SG/,/FN-VLESS|^EOF|^$/' "$WEB_DIR/tok17/provider.yaml" | grep -q 'ports:' \
+    && bad "17.11 -SG 节点带了端口跳跃" || ok "17.11 -SG 节点不含 ports（避免跳到主入口）"
+
+# 17.12 出口参数按协议分开存：切到另一协议不会串用地址/端口
+EXIT_TYPE="hy2"; EXIT_HY_SERVER="isif.example.com"; EXIT_HY_PORT="8443"; EXIT_HY_PASS="p1"
+EXIT_VL_SERVER="isif2.example.com"; EXIT_VL_PORT="443"
+sync_env_locals
+[[ "$EXIT_SERVER" == "isif.example.com" && "$EXIT_PORT" == "8443" ]] || bad "17.12 Hy2 出口解析错误" "$EXIT_SERVER:$EXIT_PORT"
+EXIT_TYPE="vless"; sync_env_locals
+[[ "$EXIT_SERVER" == "isif2.example.com" && "$EXIT_PORT" == "443" ]] \
+    && ok "17.12 切换协议使用各自的地址/端口" || bad "17.12 出口参数串用" "$EXIT_SERVER:$EXIT_PORT"
+
 # 17.8 vless 出口
 EXIT_TYPE="vless"; EXIT_PORT="443"; EXIT_UUID="22222222-2222-2222-2222-222222222222"
 EXIT_PBK="PBKEXIT"; EXIT_SID="ff00ff00"
@@ -878,12 +891,12 @@ sleep 1.5
 parse_apply() { local k v; while IFS=$'\t' read -r k v; do case "$k" in EXIT_*) printf -v "$k" '%s' "$v" ;; esac; done; }
 _out=$(exit_parse_url "http://127.0.0.1:18093/provider.yaml" 2>/dev/null)
 parse_apply <<< "$_out"
-[[ "$EXIT_TYPE" == "hy2" && "$EXIT_SERVER" == "isif.example.com" && "$EXIT_PORT" == "8443" && "$EXIT_PASS" == "hyisif99" ]] \
+[[ "$EXIT_HY_SERVER" == "isif.example.com" && "$EXIT_HY_PORT" == "8443" && "$EXIT_HY_PASS" == "hyisif99" ]] \
     && ok "18.1 从 provider.yaml 优先解析出 Hy2" || bad "18.1 Hy2 解析失败" "$_out"
 
 _out2=$(exit_parse_url "http://127.0.0.1:18093/only-vless.yaml" 2>/dev/null)
 parse_apply <<< "$_out2"
-[[ "$EXIT_TYPE" == "vless" && "$EXIT_PBK" == "PBKB" && "$EXIT_SID" == "aabbccdd" ]] \
+[[ "$EXIT_VL_PBK" == "PBKB" && "$EXIT_VL_SID" == "aabbccdd" && "$EXIT_VL_SERVER" == "198.51.100.21" ]] \
     && ok "18.2 无 Hy2 时回退解析 Reality 节点" || bad "18.2 Reality 解析失败" "$_out2"
 
 if exit_parse_url "http://127.0.0.1:18093/nope.yaml" >/dev/null 2>&1; then

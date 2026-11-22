@@ -1474,6 +1474,18 @@ SITE_FILE="${SITE_FILE:-}"
 FLIP_PORT="${FLIP_PORT:-9443}"
 VL_HANDSHAKE="${VL_HANDSHAKE:-}"
 VL_HANDSHAKE_PORT="${VL_HANDSHAKE_PORT:-}"
+EXIT_TYPE="${EXIT_TYPE:-none}"
+EXIT_SERVER="${EXIT_SERVER:-}"
+EXIT_PORT="${EXIT_PORT:-}"
+EXIT_PASS="${EXIT_PASS:-}"
+EXIT_SNI="${EXIT_SNI:-}"
+EXIT_SKIP_CERT="${EXIT_SKIP_CERT:-false}"
+EXIT_UUID="${EXIT_UUID:-}"
+EXIT_PBK="${EXIT_PBK:-}"
+EXIT_SID="${EXIT_SID:-}"
+EXIT_LABEL="${EXIT_LABEL:-SG}"
+EXIT_ENTRY_VL="${EXIT_ENTRY_VL:-2053}"
+EXIT_ENTRY_HY="${EXIT_ENTRY_HY:-2054}"
 EOF
     )
     chmod 600 "$ENV_FILE" 2>/dev/null || true
@@ -1491,6 +1503,8 @@ render_and_reload() {
     # 不做配置回滚：调用方已经用 write_singbox_config 把新配置 mv 到正式位置，
     # 此处再备份只会备份到「刚写入的新配置」，回滚等于把坏配置复制回自己。
     # 与其保留一个假的保护，不如直接失败并要求重装（重装会用同一份输入重建）。
+    apply_exit_config
+
     if ! /usr/local/bin/sing-box check -c "$CONF_FILE" >/dev/null 2>&1; then
         echo -e "${RED}sing-box 配置校验失败，服务未启动。${PLAIN}"
         /usr/local/bin/sing-box check -c "$CONF_FILE" 2>&1 | tail -3 || true
@@ -1513,6 +1527,7 @@ render_and_reload() {
 
     # setup_caddy_subscription 末尾已经 reload 过一次 Caddy，这里不再重复调用，
     # 只补一次监听校验（热重载后端口偶尔要几百毫秒才起来）。
+    append_exit_nodes "$sub_token"
     setup_caddy_subscription "$target_host" "$sub_token" "$sub_port" "$CERT_MODE"
     verify_caddy_listening "$sub_port" || true
 }
@@ -2123,6 +2138,137 @@ uninstall_all() {
 # ==================== 模块化独立子菜单 ====================
 
 # 1. VLESS-Reality 独立模块配置
+
+# 按 EXIT_TYPE 给 config.json 追加「链式入口 + 出口」；none 时一个字节都不改
+apply_exit_config() {
+    [[ "${EXIT_TYPE:-none}" == "none" || -z "${EXIT_SERVER:-}" ]] && return 0
+    EXIT_TYPE="$EXIT_TYPE" EXIT_SERVER="$EXIT_SERVER" EXIT_PORT="$EXIT_PORT" \
+    EXIT_PASS="${EXIT_PASS:-}" EXIT_SNI="${EXIT_SNI:-}" EXIT_SKIP_CERT="${EXIT_SKIP_CERT:-false}" \
+    EXIT_UUID="${EXIT_UUID:-}" EXIT_PBK="${EXIT_PBK:-}" EXIT_SID="${EXIT_SID:-}" \
+    EXIT_ENTRY_VL="${EXIT_ENTRY_VL:-}" EXIT_ENTRY_HY="${EXIT_ENTRY_HY:-}" \
+    python3 - "$CONF_FILE" <<'PY'
+import json, os, sys, copy
+conf = sys.argv[1]
+d = json.load(open(conf))
+typ = os.environ["EXIT_TYPE"]
+inb = d.get("inbounds", [])
+tags = {i["tag"]: i for i in inb}
+
+def clone(src_tag, new_tag, port):
+    if not port or src_tag not in tags:
+        return None
+    n = copy.deepcopy(tags[src_tag]); n["tag"] = new_tag; n["listen_port"] = int(port)
+    return n
+
+entries = [e for e in (clone("vless-reality-in", "exit-vless-in", os.environ.get("EXIT_ENTRY_VL")),
+                       clone("hy2-in", "exit-hy2-in", os.environ.get("EXIT_ENTRY_HY"))) if e]
+
+if typ == "hy2":
+    out = {"type": "hysteria2", "tag": "exit-out",
+           "server": os.environ["EXIT_SERVER"], "server_port": int(os.environ["EXIT_PORT"]),
+           "password": os.environ["EXIT_PASS"],
+           "tls": {"enabled": True,
+                   "server_name": os.environ.get("EXIT_SNI") or os.environ["EXIT_SERVER"],
+                   "insecure": os.environ.get("EXIT_SKIP_CERT") == "true"}}
+else:
+    out = {"type": "vless", "tag": "exit-out",
+           "server": os.environ["EXIT_SERVER"], "server_port": int(os.environ["EXIT_PORT"]),
+           "uuid": os.environ["EXIT_UUID"], "flow": "xtls-rprx-vision",
+           "tls": {"enabled": True,
+                   "server_name": os.environ.get("EXIT_SNI") or os.environ["EXIT_SERVER"],
+                   "utls": {"enabled": True, "fingerprint": "chrome"},
+                   "reality": {"enabled": True, "public_key": os.environ["EXIT_PBK"],
+                               "short_id": os.environ["EXIT_SID"]}}}
+
+d["inbounds"] = inb + entries
+d.setdefault("outbounds", []).append(out)
+d["route"] = {"rules": [{"inbound": [e["tag"]], "outbound": "exit-out"} for e in entries],
+              "final": "direct"}
+json.dump(d, open(conf, "w"), ensure_ascii=False, indent=2)
+PY
+}
+
+# 订阅里追加链式节点（-SG 后缀）；none 时不动
+append_exit_nodes() {
+    [[ "${EXIT_TYPE:-none}" == "none" || -z "${EXIT_SERVER:-}" ]] && return 0
+    NODE_PREFIX="${NODE_PREFIX:-}" SERVER_IP="${SERVER_IP:-}" VL_UUID="${VL_UUID:-}" \
+    VL_SNI="${VL_SNI:-}" VL_PUBKEY="${VL_PUBKEY:-}" VL_SHORTID="${VL_SHORTID:-}" \
+    HY_PASS="${HY_PASS:-}" HY_DOMAIN="${HY_DOMAIN:-}" HY_SKIP_CERT="${HY_SKIP_CERT:-false}" \
+    TARGET_HOST="${TARGET_HOST:-}" EXIT_LABEL="${EXIT_LABEL:-SG}" \
+    EXIT_ENTRY_VL="${EXIT_ENTRY_VL:-}" EXIT_ENTRY_HY="${EXIT_ENTRY_HY:-}" \
+    python3 - "$WEB_DIR/${1:-$SUB_TOKEN}" <<'PY'
+import os, sys, pathlib
+web = pathlib.Path(sys.argv[1])
+prefix = os.environ.get("NODE_PREFIX", "")
+label = os.environ.get("EXIT_LABEL", "SG")
+vl_port = os.environ.get("EXIT_ENTRY_VL") or ""
+hy_port = os.environ.get("EXIT_ENTRY_HY") or ""
+blocks, names, links = [], [], []
+
+if vl_port:
+    name = prefix + "-VLESS-Reality-" + label
+    names.append(name)
+    blocks.append("\n".join([
+        '  - name: "%s"' % name,
+        '    type: vless',
+        '    server: %s' % os.environ.get("SERVER_IP"),
+        '    port: %s' % vl_port,
+        '    uuid: %s' % os.environ.get("VL_UUID"),
+        '    network: tcp', '    tls: true', '    udp: true',
+        '    flow: xtls-rprx-vision',
+        '    servername: %s' % os.environ.get("VL_SNI"),
+        '    reality-opts:',
+        '      public-key: %s' % os.environ.get("VL_PUBKEY"),
+        '      short-id: %s' % os.environ.get("VL_SHORTID"),
+        '    client-fingerprint: chrome']))
+    links.append("vless://%s@%s:%s?security=reality&encryption=none&pbk=%s&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=%s&sid=%s#%s" % (
+        os.environ.get("VL_UUID"), os.environ.get("SERVER_IP"), vl_port,
+        os.environ.get("VL_PUBKEY"), os.environ.get("VL_SNI"), os.environ.get("VL_SHORTID"), name))
+
+if hy_port:
+    name = prefix + "-Hysteria2-" + label
+    host = os.environ.get("TARGET_HOST") or os.environ.get("HY_DOMAIN") or os.environ.get("SERVER_IP")
+    names.append(name)
+    blocks.append("\n".join([
+        '  - name: "%s"' % name,
+        '    type: hysteria2',
+        '    server: %s' % host,
+        '    port: %s' % hy_port,
+        '    password: "%s"' % os.environ.get("HY_PASS"),
+        '    sni: %s' % host,
+        '    skip-cert-verify: %s' % os.environ.get("HY_SKIP_CERT", "false")]))
+    links.append("hy2://%s@%s:%s/?sni=%s&insecure=%s#%s" % (
+        os.environ.get("HY_PASS"), host, hy_port, host,
+        "1" if os.environ.get("HY_SKIP_CERT") == "true" else "0", name))
+
+if not blocks:
+    sys.exit(0)
+
+text = "\n".join(blocks) + "\n"
+
+cfg = web / "config.yaml"
+if cfg.exists():
+    c = cfg.read_text()
+    c = c.replace("\nproxy-groups:", "\n" + text + "\nproxy-groups:", 1)
+    for n in names:
+        c = c.replace('      - "DIRECT"', '      - "%s"\n      - "DIRECT"' % n, 1)
+    cfg.write_text(c)
+
+prov = web / "provider.yaml"
+if prov.exists():
+    q = prov.read_text()
+    if not q.endswith("\n"):
+        q += "\n"
+    prov.write_text(q + text)
+
+links_file = web / "links.txt"
+if links_file.exists():
+    with links_file.open("a") as f:
+        for l in links:
+            f.write(l + "\n")
+PY
+}
+
 # ---------------------------------------------------------------- 协议模块
 # enabled 的唯一事实来源：config.json 里的 inbound
 current_inbounds() {
@@ -2190,6 +2336,10 @@ ensure_reality_creds() {
 
 # 把大写 env 变量搬进 write_env_config 需要的变量名
 sync_env_locals() {
+    EXIT_TYPE="${EXIT_TYPE:-none}"; EXIT_SERVER="${EXIT_SERVER:-}"; EXIT_PORT="${EXIT_PORT:-}"
+    EXIT_PASS="${EXIT_PASS:-}"; EXIT_SNI="${EXIT_SNI:-}"; EXIT_SKIP_CERT="${EXIT_SKIP_CERT:-false}"
+    EXIT_UUID="${EXIT_UUID:-}"; EXIT_PBK="${EXIT_PBK:-}"; EXIT_SID="${EXIT_SID:-}"
+    EXIT_LABEL="${EXIT_LABEL:-SG}"; EXIT_ENTRY_VL="${EXIT_ENTRY_VL:-}"; EXIT_ENTRY_HY="${EXIT_ENTRY_HY:-}"
     node_prefix="$NODE_PREFIX"; server_ip="$SERVER_IP"
     vl_port="$VL_PORT"; vl_sni="$VL_SNI"; user_uuid="$VL_UUID"
     vl_privkey="$VL_PRIVKEY"; vl_pubkey="$VL_PUBKEY"; vl_shortid="$VL_SHORTID"
@@ -2201,6 +2351,15 @@ sync_env_locals() {
 
 # 按启用集合写 config.json；集合来自 config.json 本身，不另设开关
 render_set() {
+    # 兜底：env 里没记翻转参数、但本机确实有该域名的站点时，按站点推导，
+    # 避免把 handshake 写成自己的域名:443（= 自环，Reality 直接不可用）
+    if [[ -z "${VL_HANDSHAKE:-}" && -n "${VL_SNI:-}" ]]; then
+        local _site
+        if _site=$(site_file_for "$VL_SNI" 2>/dev/null); then
+            SITE_FILE="$_site"; FLIP_HOST="$VL_SNI"
+            VL_HANDSHAKE="127.0.0.1"; VL_HANDSHAKE_PORT="${FLIP_PORT:-9443}"
+        fi
+    fi
     local set=" $1 " vl_p="" hy_p=""
     [[ "$set" == *" reality "* ]] && vl_p="$VL_PORT"
     [[ "$set" == *" hy2 "* ]] && hy_p="$HY_PORT"
@@ -2629,6 +2788,91 @@ disable_protocol() {
     echo -e "  恢复：simbo → 协议管理 → 启用 ${label}"
 }
 
+menu_exit() {
+    while true; do
+        load_env
+        local cur="${EXIT_TYPE:-none}" desc
+        case "$cur" in
+            hy2)   desc="Hy2 → ${EXIT_SERVER}:${EXIT_PORT}" ;;
+            vless) desc="Reality → ${EXIT_SERVER}:${EXIT_PORT}" ;;
+            *)     desc="未启用（只有直连）" ;;
+        esac
+        [ -t 1 ] && clear
+        echo -e "${GRAY}=================== 出口中转 ===================${PLAIN}"
+        echo -e " 当前: ${CYAN}${desc}${PLAIN}"
+        echo " 1. 查看出口详情"
+        echo " 2. 设置 / 切换出口协议"
+        echo " 3. 关闭出口（只留直连）"
+        echo " 0. 返回主菜单"
+        echo -e "${GRAY}================================================${PLAIN}"
+        local opt=""
+        ask "请输入选项 [0-3]: " opt
+        case "$opt" in
+            1)
+                echo
+                echo -e " 出口类型: ${cur}"
+                echo -e " 出口地址: ${EXIT_SERVER:-—}:${EXIT_PORT:-—}"
+                echo -e " 链式入口: Reality ${EXIT_ENTRY_VL:-—} / Hy2 ${EXIT_ENTRY_HY:-—}"
+                echo -e " 订阅后缀: -${EXIT_LABEL:-SG}"
+                echo
+                read -r -p "按回车返回..." _ || true
+                ;;
+            2)
+                local typ srv prt
+                ask "出口协议 [hy2/reality，当前 ${cur}] : " typ
+                typ="${typ:-${cur}}"
+                case "$typ" in
+                    hy2|h) typ="hy2" ;;
+                    reality|vless|v|r) typ="vless" ;;
+                    *) echo -e "${RED}无效协议${PLAIN}"; sleep 1; continue ;;
+                esac
+                ask "出口地址 [${EXIT_SERVER:-必填}]: " srv
+                srv="${srv:-$EXIT_SERVER}"
+                if [[ -z "$srv" ]]; then echo -e "${RED}地址不能为空${PLAIN}"; sleep 1; continue; fi
+                ask "出口端口 [${EXIT_PORT:-$([[ "$typ" == hy2 ]] && echo 8443 || echo 443)}]: " prt
+                prt="${prt:-${EXIT_PORT:-$([[ "$typ" == hy2 ]] && echo 8443 || echo 443)}}"
+                EXIT_TYPE="$typ"; EXIT_SERVER="$srv"; EXIT_PORT="$prt"
+                if [[ "$typ" == "hy2" ]]; then
+                    local pw
+                    ask "出口 Hy2 密码 [回车沿用]: " pw
+                    EXIT_PASS="${pw:-${EXIT_PASS:-}}"
+                    if [[ -z "$EXIT_PASS" ]]; then echo -e "${RED}密码不能为空${PLAIN}"; sleep 1; continue; fi
+                    EXIT_SNI="${EXIT_SNI:-$EXIT_SERVER}"
+                else
+                    local u k sid
+                    ask "出口 Reality UUID [回车沿用]: " u
+                    EXIT_UUID="${u:-${EXIT_UUID:-}}"
+                    ask "出口 Reality 公钥 [回车沿用]: " k
+                    EXIT_PBK="${k:-${EXIT_PBK:-}}"
+                    ask "出口 Reality short-id [回车沿用]: " sid
+                    EXIT_SID="${sid:-${EXIT_SID:-}}"
+                    if [[ -z "$EXIT_UUID" || -z "$EXIT_PBK" || -z "$EXIT_SID" ]]; then
+                        echo -e "${RED}UUID / 公钥 / short-id 都不能为空${PLAIN}"; sleep 1; continue
+                    fi
+                    EXIT_SNI="${EXIT_SNI:-$EXIT_SERVER}"
+                fi
+                sync_env_locals; write_env_config || { echo -e "${RED}写入 env 失败${PLAIN}"; continue; }
+                local set="reality"; set_has "hy2-in" && set="reality hy2"
+                render_set "$set" && sync_env_locals && render_and_reload \
+                    && echo -e "${GREEN}✓ 出口已设置：${desc}${PLAIN}" \
+                    || echo -e "${RED}✗ 应用失败，请查看上面的输出${PLAIN}"
+                read -r -p "按回车返回..." _ || true
+                ;;
+            3)
+                EXIT_TYPE="none"
+                sync_env_locals; write_env_config
+                local set="reality"; set_has "hy2-in" && set="reality hy2"
+                render_set "$set" && sync_env_locals && render_and_reload \
+                    && echo -e "${GREEN}✓ 出口已关闭，只保留直连${PLAIN}" \
+                    || echo -e "${RED}✗ 应用失败${PLAIN}"
+                read -r -p "按回车返回..." _ || true
+                ;;
+            0) break ;;
+            *) echo -e "${RED}无效选项${PLAIN}"; sleep 1 ;;
+        esac
+    done
+}
+
 menu_protocol() {
     while true; do
         [ -t 1 ] && clear
@@ -2762,8 +3006,9 @@ menu() {
         echo -e " 2. 协议管理"
         echo -e " 3. 订阅地址配置"
         echo -e " 4. sing-box 内核管理"
-        echo -e " 5. Simple-Box 脚本升级"
-        echo -e " 6. Simple-Box 脚本卸载"
+        echo -e " 5. 出口中转"
+        echo -e " 6. Simple-Box 脚本升级"
+        echo -e " 7. Simple-Box 脚本卸载"
         echo -e " 0. 退出控制台"
         echo -e "${GRAY}====================================================${PLAIN}"
         
@@ -2774,7 +3019,8 @@ menu() {
             2) menu_protocol || true ;;
             3) menu_sub_module || true ;;
             4) menu_singbox_manage || true ;;
-            5) reinstall_with_latest || true ;;
+            5) menu_exit || true ;;
+            6) reinstall_with_latest || true ;;
             7)
                 uninstall_all || true
                 # 卸载已彻底完成：脚本与配置目录均被删除，直接退出

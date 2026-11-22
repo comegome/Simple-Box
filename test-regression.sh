@@ -759,6 +759,74 @@ else
 fi
 
 
+# ---------- 17. 出口中转 ----------
+group "17. 出口中转"
+
+SB17="$TMPD/m17"; mkdir -p "$SB17/cert" "$SB17/web/tok17"
+printf '{"log":{"level":"warn"},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}\n' > "$SB17/base.json"
+
+VL_PORT=443; VL_SNI="gh.example.com"; VL_UUID="11111111-1111-1111-1111-111111111111"
+VL_PRIVKEY="PRIV17"; VL_PUBKEY="PBK17"; VL_SHORTID="ab12cd34"
+HY_PORT=8443; HY_PASS="hypass17"
+VL_HANDSHAKE="127.0.0.1"; VL_HANDSHAKE_PORT=9443
+CONF_FILE="$SB17/cfg.json"; CERT_DIR="$SB17/cert"
+NODE_PREFIX="FN"; SERVER_IP="203.0.113.11"; TARGET_HOST="fn.example.com"
+HY_DOMAIN="fn.example.com"; HY_SKIP_CERT="false"; SUB_TOKEN="tok17"
+
+render_set "reality hy2"
+_md5_none=$(md5sum "$CONF_FILE" | cut -d' ' -f1)
+
+# 17.1 none 时不改动配置
+EXIT_TYPE="none"
+apply_exit_config
+[[ "$(md5sum "$CONF_FILE" | cut -d' ' -f1)" == "$_md5_none" ]] \
+    && ok "17.1 EXIT_TYPE=none 配置字节不变" || bad "17.1 none 仍改动了配置"
+
+# 17.2 hy2 出口：4 个 inbound + exit-out + route
+EXIT_TYPE="hy2"; EXIT_SERVER="isif.example.com"; EXIT_PORT="8443"; EXIT_PASS="exitpass17"
+EXIT_SNI="isif.example.com"; EXIT_ENTRY_VL="2053"; EXIT_ENTRY_HY="2054"
+apply_exit_config
+_tags=$(python3 -c "import json;print(' '.join(i['tag'] for i in json.load(open('$CONF_FILE'))['inbounds']))")
+_ob=$(python3 -c "import json;d=json.load(open('$CONF_FILE'));o=[x for x in d['outbounds'] if x['tag']=='exit-out'][0];print(o['type'],o['server_port'])")
+_rt=$(python3 -c "import json;d=json.load(open('$CONF_FILE'));r=d.get('route',{});print(len(r.get('rules',[])), r.get('final'))")
+[[ "$_tags" == *exit-vless-in* && "$_tags" == *exit-hy2-in* && "$_ob" == "hysteria2 8443" && "$_rt" == "2 direct" ]] \
+    && ok "17.2 hy2 出口：链式入口 + exit-out + route final=direct" \
+    || bad "17.2 hy2 出口结构异常" "$_tags / $_ob / $_rt"
+
+# 17.3 出口端口与主入口不冲突
+_ports=$(python3 -c "import json;print(sorted(i['listen_port'] for i in json.load(open('$CONF_FILE'))['inbounds']))")
+[[ "$_ports" == "[443, 2053, 2054, 8443]" ]] && ok "17.3 四个入口端口正确" || bad "17.3 端口集合异常" "$_ports"
+
+# 17.4 订阅追加两条 -SG 节点
+printf 'proxies:\n  - name: "FN-VLESS-Reality"\n    type: vless\nproxy-groups:\n  - name: "节点选择"\n    proxies:\n      - "FN-VLESS-Reality"\n      - "DIRECT"\n' > "$SB17/web/tok17/config.yaml"
+printf 'proxies:\n  - name: "FN-VLESS-Reality"\n    type: vless\n' > "$SB17/web/tok17/provider.yaml"
+: > "$SB17/web/tok17/links.txt"
+WEB_DIR="$SB17/web"
+append_exit_nodes tok17
+grep -q 'FN-VLESS-Reality-SG' "$SB17/web/tok17/config.yaml" && grep -q 'FN-Hysteria2-SG' "$SB17/web/tok17/config.yaml" \
+    && ok "17.4 订阅 config.yaml 追加两条链式节点" || bad "17.4 订阅未追加链式节点"
+grep -q 'port: 2053' "$SB17/web/tok17/provider.yaml" && grep -q 'port: 2054' "$SB17/web/tok17/provider.yaml" \
+    && ok "17.5 provider.yaml 端口为 2053/2054" || bad "17.5 provider 端口异常"
+[[ "$(wc -l < "$SB17/web/tok17/links.txt")" -eq 2 ]] && ok "17.6 links.txt 追加两条链接" || bad "17.6 links 行数异常"
+grep -q 'FN-VLESS-Reality-SG' "$SB17/web/tok17/config.yaml" && grep -A3 '\- "FN-VLESS-Reality-SG"' "$SB17/web/tok17/config.yaml" >/dev/null \
+    && ok "17.7 链式节点已加入策略组" || bad "17.7 策略组未包含链式节点"
+
+# 17.8 vless 出口
+EXIT_TYPE="vless"; EXIT_PORT="443"; EXIT_UUID="22222222-2222-2222-2222-222222222222"
+EXIT_PBK="PBKEXIT"; EXIT_SID="ff00ff00"
+render_set "reality hy2"; apply_exit_config
+_o2=$(python3 -c "import json;d=json.load(open('$CONF_FILE'));o=[x for x in d['outbounds'] if x['tag']=='exit-out'][0];print(o['type'], bool(o['tls'].get('reality')))")
+[[ "$_o2" == "vless True" ]] && ok "17.8 vless 出口生成 Reality 出站" || bad "17.8 vless 出口异常" "$_o2"
+
+# 17.9 关闭出口后回到两个 inbound
+EXIT_TYPE="none"; render_set "reality hy2"; apply_exit_config
+_n=$(python3 -c "import json;print(len(json.load(open('$CONF_FILE'))['inbounds']))")
+[[ "$_n" == "2" ]] && ok "17.9 关闭出口后只剩两个 inbound" || bad "17.9 关闭出口残留" "$_n"
+
+# 17.10 菜单入口
+grep -q '5. 出口中转' "$TARGET" && grep -q '^menu_exit()' "$TARGET" && ok "17.10 菜单含出口中转" || bad "17.10 菜单缺少出口中转"
+
+
 # ---------- 14. 清理 ----------
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null

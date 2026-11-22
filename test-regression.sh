@@ -189,9 +189,10 @@ fi
 # 6.7 清理逻辑必须在生成订阅文件之前（否则删掉刚建的新目录）
 if [[ -n "$_inst_body" ]]; then
     _rm_line=$(grep -n 'find "\$WEB_DIR"' <<<"$_inst_body" | head -1 | cut -d: -f1)
-    _gen_line=$(grep -nE 'regen_subscription|generate_full_client_config' <<<"$_inst_body" | head -1 | cut -d: -f1)
+    # 订阅实际由 proto_enable_* 内部重建，所以「生成」标记取协议启用调用
+    _gen_line=$(grep -nE 'proto_enable_reality|proto_enable_hy2' <<<"$_inst_body" | head -1 | cut -d: -f1)
     if [[ -n "$_rm_line" && -n "$_gen_line" && "$_rm_line" -lt "$_gen_line" ]]; then
-        ok "6.7 清理顺序正确（先删旧目录再生成新订阅）"
+        ok "6.7 清理顺序正确（先删旧订阅目录，再启用协议生成新的）"
     else
         bad "6.7 清理顺序错误" "find 在第 ${_rm_line:-?} 行，generate 在第 ${_gen_line:-?} 行"
     fi

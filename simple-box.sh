@@ -1,14 +1,7 @@
 #!/usr/bin/env bash
-# ==============================================================================
-# Simple-Box Manager - 极简、安全、透明的自用 sing-box 服务端管理脚本
-# 协议支持: 
-#   1. VLESS-TCP-Reality-Vision (日常主力直连)
-#   2. Hysteria 2 (晚高峰弱网/UDP端口跳跃, 支持 Cloudflare 证书或自签证书)
-# 证书管理:
-#   集成 Caddy 提供 HTTPS 订阅地址，输出完整规则模板订阅、纯节点订阅、URI 与二维码
-# 维护约定:
-#   二次开发或修改脚本前请务必阅读 MAINTAINING.md，遵循权限收紧与安全变更规范
-# ==============================================================================
+# Simple-Box Manager —— 自用 sing-box 服务端管理脚本
+# 协议: VLESS-Reality-Vision / Hysteria 2；Caddy 提供订阅分发与证书
+# 改动前请先读 MAINTAINING.md（权限收紧与安全变更规范）
 set -e
 
 RED=$'\033[0;31m'
@@ -43,8 +36,7 @@ SCRIPT_URL="https://raw.githubusercontent.com/comegome/Simple-Box/main/simple-bo
 # 检测依据：BASH_SOURCE[0] 为空 且 stdin 不是终端。
 if [[ -z "${BASH_SOURCE[0]:-}" ]]; then
     cat >/dev/null 2>&1 || true   # 抽干管道，让外层 curl 正常结束（否则 curl: (23)）
-    echo -e "${RED}不支持管道执行（curl ... | bash）。${PLAIN}"
-    echo -e "${YELLOW}原因: bash 从 stdin 读取脚本，脚本内的交互提问会与脚本正文抢同一条输入流。${PLAIN}"
+    echo -e "${RED}不支持管道执行（curl ... | bash）：交互提问会和脚本正文抢 stdin。${PLAIN}"
     echo -e "${YELLOW}请先下载再运行：${PLAIN}"
     echo -e "  curl -fsSL ${SCRIPT_URL} -o /tmp/simple-box.sh && sudo bash /tmp/simple-box.sh"
     exit 1
@@ -1359,12 +1351,8 @@ reinstall_with_latest() {
     if ! fetch_latest_script "$latest"; then
         rm -f "$latest"
         echo -e "${RED}获取最新脚本失败，已中止，没有动任何配置。${PLAIN}"
-        echo -e "${YELLOW}注意: 这里不能回退到 install_node —— 重装会轮换 UUID / 密钥 / short-id，"
-        echo -e "      所有客户端配置都会静默失效。${PLAIN}"
-        echo -e "${GRAY}排查方向：${PLAIN}"
-        echo -e "${GRAY}  1. 仓库是否被设为私有（私有仓库的 raw 地址返回 404）${PLAIN}"
-        echo -e "${GRAY}  2. 本机能否访问 raw.githubusercontent.com${PLAIN}"
-        echo -e "${GRAY}  3. 手动下载后覆盖 ${target} 再重跑本菜单${PLAIN}"
+        echo -e "${YELLOW}不能回退到重装：会轮换密钥，客户端配置全部失效。${PLAIN}"
+        echo -e "${GRAY}排查：仓库是否私有 / 能否访问 raw.githubusercontent.com / 手动覆盖 ${target}${PLAIN}"
         return 1
     fi
 
@@ -1647,9 +1635,7 @@ install_node() {
         return 1
     fi
 
-    echo -e "\n${GRAY}----------------------------------------------------${PLAIN}"
-    echo -e "${BOLD}[1/3] 配置 VLESS-Reality 参数${PLAIN}"
-    echo -e "${GRAY}----------------------------------------------------${PLAIN}"
+    echo -e "\n${GRAY}──────── ${BOLD}[1/3] VLESS-Reality${PLAIN}"
     local vl_port
     while true; do
         ask_trim "请输入 Reality 监听端口 [默认: ${CYAN}${old_vl_port:-443}${PLAIN}]: " "${old_vl_port:-443}" vl_port
@@ -1692,9 +1678,7 @@ install_node() {
         break
     done
 
-    echo -e "\n${GRAY}----------------------------------------------------${PLAIN}"
-    echo -e "${BOLD}[2/3] 配置 Hysteria 2 参数${PLAIN}"
-    echo -e "${GRAY}----------------------------------------------------${PLAIN}"
+    echo -e "\n${GRAY}──────── ${BOLD}[2/3] Hysteria 2${PLAIN}"
     local hy_skip_cert="false"
     local cert_fell_back=""
 
@@ -1716,12 +1700,9 @@ install_node() {
 
     # 2. 若无已配置域名，或用户输入 n 放弃沿用，则提示输入
     if [[ -z "$hy_domain" ]]; then
-        echo -e "提示:"
-        echo -e "  • 使用自有域名: 需在 Cloudflare 将 A 记录解析至本机公网 IP (${CYAN}${server_ip}${PLAIN})"
-        echo -e "  • Cloudflare 代理状态必须为【仅限 DNS】(灰色云朵)，开启小黄云会阻断 UDP"
-        echo -e "  • 直接回车 = 使用 IP 自签证书（10 年 ECC，客户端自动开启跳过证书校验）"
+        echo -e "${GRAY}域名需在 Cloudflare 指向 ${server_ip}（仅限 DNS，小黄云会断 UDP）；回车 = IP 自签${PLAIN}"
         if (( ${#local_sites[@]} )); then
-            echo -e "  • 本机已有站点 ${CYAN}${local_sites[0]}${PLAIN}，填它可以复用现成证书（推荐）"
+            echo -e "${GRAY}本机站点 ${local_sites[0]} 可复用现成证书（推荐）${PLAIN}"
         fi
 
         while true; do
@@ -1799,9 +1780,7 @@ install_node() {
     done
     HY_RANGE="$hy_range"
 
-    echo -e "\n${GRAY}----------------------------------------------------${PLAIN}"
-    echo -e "${BOLD}[3/3] 配置在线订阅与节点参数${PLAIN}"
-    echo -e "${GRAY}----------------------------------------------------${PLAIN}"
+    echo -e "\n${GRAY}──────── ${BOLD}[3/3] 订阅与节点${PLAIN}"
     local sub_port
     while true; do
         ask_trim "请输入 Caddy 订阅监听端口 [默认: ${CYAN}${old_sub_port:-8444}${PLAIN}]: " "${old_sub_port:-8444}" sub_port
@@ -1950,7 +1929,7 @@ EOF
     fi
 
     if [[ "${cert_fell_back:-}" == "true" ]]; then
-        echo -e "${YELLOW}注意: 本次因域名证书申请失败已回退为 IP 自签证书，客户端已自动设为 skip-cert-verify。${PLAIN}"
+        echo -e "${YELLOW}证书申请失败，已回退 IP 自签（客户端已自动跳过校验）。${PLAIN}"
     fi
 
     echo -e "\n${GRAY}====================================================${PLAIN}"
@@ -1960,13 +1939,8 @@ EOF
     echo -e "${GRAY}====================================================${PLAIN}\n"
 }
 
-# ---------------------------------------------------------------------------
-# 输出可直接粘贴进 mihomo / Clash.Meta 的 proxies 片段
-#
-# 字段口径必须与 generate_full_client_config 保持一致（同一份 env.conf 取数），
-# 否则面板打印的片段会和订阅里的 provider.yaml 漂移，用户按哪个都对不上。
-# 故意不套 ANSI 颜色：这段是要整段复制走的，带转义序列粘进编辑器就是废文本。
-# ---------------------------------------------------------------------------
+# 输出可直接粘贴进 mihomo / Clash.Meta 的片段。
+# 直接 cat provider.yaml，保证与订阅同源；不套 ANSI 颜色（要整段复制）。
 show_clash_snippet() {
     if [[ ! -f "$ENV_FILE" ]]; then
         echo -e "${RED}未找到节点环境配置，请先执行安装！${PLAIN}"
@@ -2755,7 +2729,7 @@ regen_from_scope() {
 }
 
 
-# ---------------------------------------------------------------- 协议停用 / 重建
+# ---------------------------------------------------------------- 协议停用 / 启用
 # 翻转：把伪装站搬到 127.0.0.1:9443（on）或搬回公网 443（off）
 flip_site_toggle() {
     local mode="$1"

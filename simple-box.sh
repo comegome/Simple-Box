@@ -682,6 +682,21 @@ issue_cert_bundle() {
     # 模式 A0: 有域名但无 Token —— 尝试复用本地已有的该域名证书（免输 Token 场景）
     # 必须先于下面的失败降级逻辑判断，否则会把有效域名证书覆盖成自签证书
     if [[ -n "$domain" && -z "$cf_token" ]]; then
+        # 本机已有该域名的证书（/etc/ssl/<域名> 或 acme.sh 目录）→ 拷进 CERT_DIR 直接复用
+        local _src=""
+        if ! cert_covers_domain "$domain" && _src=$(find_cert_dir "$domain"); then
+            if [[ "$_src" != "$CERT_DIR" ]]; then
+                install -m 644 "$_src/fullchain.cer" "${CERT_DIR}/fullchain.cer" 2>/dev/null || true
+                if [[ -f "$_src/private.key" ]]; then
+                    install -m 640 -g caddy "$_src/private.key" "${CERT_DIR}/private.key" 2>/dev/null \
+                        || install -m 600 "$_src/private.key" "${CERT_DIR}/private.key" 2>/dev/null || true
+                else
+                    install -m 640 -g caddy "$_src/${domain}.key" "${CERT_DIR}/private.key" 2>/dev/null \
+                        || install -m 600 "$_src/${domain}.key" "${CERT_DIR}/private.key" 2>/dev/null || true
+                fi
+                echo -e "${GREEN}检测到本机已有 ${domain} 的证书（${_src}），已同步复用。${PLAIN}"
+            fi
+        fi
         if cert_covers_domain "$domain"; then
             echo -e "${GREEN}本地已有覆盖 ${domain} 的有效证书，直接复用（无需重新申请）。${PLAIN}"
             chmod 755 "$CONF_DIR" "$CERT_DIR" 2>/dev/null || true
@@ -1646,11 +1661,28 @@ install_node() {
     # 写入全局，供后续 hy_port / sub_port 的冲突校验比较（新建时 env.conf 里还没有值）
     VL_PORT="$vl_port"
 
-    local vl_sni
+    local vl_sni local_sites=() _site_default
+    mapfile -t local_sites < <(local_site_domains)
+    if (( ${#local_sites[@]} )); then
+        if (( ${#local_sites[@]} == 1 )); then
+            echo -e "${GREEN}✓ 检测到本机站点: ${local_sites[0]}${PLAIN}"
+            echo -e "${GRAY}  用它做伪装域名，探测者访问该域名看到的是真实站点，伪装效果最好。${PLAIN}"
+        else
+            echo -e "${GREEN}✓ 检测到本机站点:${PLAIN}"
+            local _i=1 _d
+            for _d in "${local_sites[@]}"; do echo -e "   ${_i}) ${_d}"; _i=$((_i+1)); done
+        fi
+    fi
+    _site_default="${local_sites[0]:-}"
+    if [[ -z "$old_vl_sni" && -n "$_site_default" ]]; then
+        _site_default="$_site_default"
+    else
+        _site_default="${old_vl_sni:-www.icloud.com}"
+    fi
     while true; do
-        ask "请输入 Reality 借壳伪装域名 [默认: ${CYAN}${old_vl_sni:-www.icloud.com}${PLAIN}]: " vl_sni
+        ask "请输入 Reality 借壳伪装域名 [默认: ${CYAN}${_site_default}${PLAIN}]: " vl_sni
         vl_sni=$(trim_string "$vl_sni")
-        vl_sni=${vl_sni:-${old_vl_sni:-www.icloud.com}}
+        vl_sni=${vl_sni:-$_site_default}
         if [[ "$vl_sni" == "$server_ip" ]]; then
             echo -e "${RED}Reality 伪装域名不能是本机 IP，请重新输入！${PLAIN}"; continue
         fi
@@ -1688,6 +1720,9 @@ install_node() {
         echo -e "  • 使用自有域名: 需在 Cloudflare 将 A 记录解析至本机公网 IP (${CYAN}${server_ip}${PLAIN})"
         echo -e "  • Cloudflare 代理状态必须为【仅限 DNS】(灰色云朵)，开启小黄云会阻断 UDP"
         echo -e "  • 直接回车 = 使用 IP 自签证书（10 年 ECC，客户端自动开启跳过证书校验）"
+        if (( ${#local_sites[@]} )); then
+            echo -e "  • 本机已有站点 ${CYAN}${local_sites[0]}${PLAIN}，填它可以复用现成证书（推荐）"
+        fi
 
         while true; do
             ask "请输入域名 [回车=IP自签]: " hy_domain
@@ -2212,6 +2247,33 @@ port_holder() {
 }
 
 # 在 Caddy 配置里按「站点块首字段」精确找域名，避免子串误命中
+# 列出本机 Caddy 站点域名（去掉端口，去重）
+local_site_domains() {
+    local dir="${CADDY_SITES_DIR:-/etc/caddy/sites}" f line d seen=""
+    for f in "$dir"/*.caddy; do
+        [[ -f "$f" ]] || continue
+        while IFS= read -r line; do
+            [[ "$line" =~ ^[[:space:]]*(https?://)?([A-Za-z0-9.-]+\.[A-Za-z]{2,})(:[0-9]+)?[[:space:]]*\{ ]] || continue
+            d="${BASH_REMATCH[2]}"
+            [[ ",$seen," == *",$d,"* ]] && continue
+            seen+="$d,"; printf '%s\n' "$d"
+        done < "$f"
+    done
+}
+
+# 依次查找该域名可用的证书目录：/etc/ssl/<域名> → 短名 → acme.sh → 已就位目录
+find_cert_dir() {
+    local d="${1:-}" c=()
+    [[ -z "$d" ]] && return 1
+    c=("/etc/ssl/$d" "/etc/ssl/${d%%.*}" "/root/.acme.sh/${d}_ecc" "${CERT_DIR}")
+    for x in "${c[@]}"; do
+        [[ -f "$x/fullchain.cer" ]] || continue
+        [[ -f "$x/private.key" || -f "$x/$d.key" ]] || continue
+        printf '%s\n' "$x"; return 0
+    done
+    return 1
+}
+
 site_file_for() {
     local d="${1//./\\.}" f hits=()
     local dir="${CADDY_SITES_DIR:-/etc/caddy/sites}" main="${CADDYFILE:-/etc/caddy/Caddyfile}"

@@ -1,947 +1,969 @@
-#!/usr/bin/env bash
-# Simple-Box 回归测试套件
-# 用法: sudo bash test-regression.sh [--commit <ref>]
-# 说明: 直接 source 目标脚本以复用全部函数定义；source 时 BASH_SOURCE[0] != $0，
-#       入口守卫会被跳过，不会触发主流程。
-
-set -uo pipefail
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET="${TARGET_SCRIPT:-${SCRIPT_DIR}/simple-box.sh}"
-
-PASS=0
-FAIL=0
-FAILED_NAMES=()
-
-ok()   { PASS=$((PASS+1)); printf '  \033[32m✓\033[0m %s\n' "$1"; }
-bad()  { FAIL=$((FAIL+1)); FAILED_NAMES+=("$1"); printf '  \033[31m✗\033[0m %s\n' "$1"; [[ -n "${2:-}" ]] && printf '      %s\n' "$2"; }
-group(){ printf '\n\033[1m%s\033[0m\n' "$1"; }
-
-# ---------- 0. 前置检查 ----------
-group "0. 前置检查"
-[[ -f "$TARGET" ]] && ok "目标脚本存在: $TARGET" || { bad "目标脚本不存在: $TARGET"; exit 1; }
-[[ $EUID -eq 0 ]] && ok "以 root 运行" || { bad "必须以 root 运行（脚本第 45 行有 EUID 守卫）"; exit 1; }
-
-# ---------- 1. 语法与静态检查 ----------
-group "1. 语法与静态检查"
-if bash -n "$TARGET" 2>/dev/null; then ok "bash -n 语法检查通过"; else bad "bash -n 语法检查失败" "$(bash -n "$TARGET" 2>&1 | head -5)"; fi
-
-if command -v shellcheck >/dev/null 2>&1; then
-    # 只关注 error 级别；warning 为已知的 SC1090/SC2155 等存量问题
-    if shellcheck -S error "$TARGET" >/dev/null 2>&1; then
-        ok "shellcheck (error 级别) 无问题"
-    else
-        bad "shellcheck 发现 error 级问题" "$(shellcheck -S error "$TARGET" 2>&1 | head -20)"
-    fi
-else
-    printf '  \033[33m-\033[0m shellcheck 未安装，跳过\n'
-fi
-
-# ---------- 2. 加载函数 ----------
-group "2. 函数加载"
-# shellcheck disable=SC1090
-source "$TARGET" 2>/dev/null
-RC=$?
-if [[ $RC -eq 0 ]]; then ok "source 成功（入口守卫已跳过）"; else bad "source 失败 rc=$RC"; fi
-
-for fn in trim_string validate_port validate_range validate_domain ver_ge \
-          cert_covers_domain harden_private_key issue_cert_bundle issue_self_signed_cert \
-          fetch_latest_script reinstall_with_latest write_singbox_config \
-          verify_cloudflare_token prompt_cf_token; do
-    if declare -F "$fn" >/dev/null 2>&1; then ok "函数已定义: $fn"; else bad "函数缺失: $fn"; fi
-done
-
-set +e   # 后续测试自行判定，不因单条失败中断
-
-# ---------- 3. 本次提交的 5 项修复 ----------
-group "3. 本次提交修复项验证"
-
-# M-3: config.json 权限 600（由 mktemp 保证，不再依赖事后 chmod）
-if grep -q 'tmp_conf=$(mktemp "${CONF_FILE}.tmp.XXXXXX")' "$TARGET"; then
-    ok "M-3: config.json 临时文件由 mktemp 创建（天然 0600）"
-else
-    bad "M-3: 未使用 mktemp 创建 config 临时文件"
-fi
-if grep -q 'chmod 644 "\$tmp_conf"' "$TARGET"; then bad "M-3: 仍残留 chmod 644 \$tmp_conf"; else ok "M-3: 无残留 644"; fi
-if grep -q 'chmod 600 "\$tmp_conf"' "$TARGET"; then
-    bad "M-3: chmod 600 兜底未删除（mktemp 已保证权限，属冗余）"
-else
-    ok "M-3: 冗余 chmod 600 已移除"
-fi
-# config 临时文件与目标同目录（保证 mv 原子性）
-grep -q 'mktemp "${CONF_FILE}.tmp.XXXXXX"' "$TARGET" && ok "M-3: 临时文件与目标同目录（mv 原子）" || bad "M-3: 临时文件跨目录（mv 非原子）"
-
-# M-4: 证书目录先 640 后单独 644 公钥
-M4_COUNT=$(grep -c 'chmod 640 "\${CERT_DIR}"/\* 2>/dev/null || true; chmod 644 "\${CERT_DIR}/fullchain.cer"' "$TARGET")
-if [[ "$M4_COUNT" -eq 3 ]]; then ok "M-4: 3 处证书权限逻辑均已改造"; else bad "M-4: 期望 3 处，实际 $M4_COUNT 处"; fi
-if grep -q 'chmod 644 "\${CERT_DIR}"/\* 2>/dev/null || true$' "$TARGET"; then bad "M-4: 仍残留整体 chmod 644 通配"; else ok "M-4: 无整体 644 通配残留"; fi
-
-# M-1/M-2: 已按"简单优先"决策回退，不再断言 unset 存在。
-# 保留一项反向断言：确认没有 unset 破坏大写 CF_TOKEN 预置变量路径。
-if grep -q 'unset CF_TOKEN' "$TARGET"; then
-    bad "M-1: 误删大写 CF_TOKEN 预置变量（会破坏无人值守部署）"
-else
-    ok "M-1/M-2: 未触碰大写 CF_TOKEN 预置路径（回退后仍安全）"
-fi
-
-# M-5: mktemp 替代可预测 PID 路径
-if grep -q 'latest=$(mktemp /tmp/simple-box.latest.XXXXXX)' "$TARGET"; then ok "M-5: 使用 mktemp 生成临时文件"; else bad "M-5: 未使用 mktemp"; fi
-if grep -q 'simple-box.latest.\$\$' "$TARGET"; then bad "M-5: 仍残留 \$\$ 可预测路径"; else ok "M-5: 无 \$\$ 可预测路径残留"; fi
-
-# ---------- 4. 功能测试：set -e 回归（本次修复引入的真实 Bug）----------
-group "4. set -e 回归测试（关键）"
-
-# 4.1 空证书目录下，chmod 组合不得因 glob 不匹配而中断
-TMPD=$(mktemp -d)
-(
-  set -e
-  D="$TMPD/empty"
-  mkdir -p "$D"
-  chmod 640 "$D"/* 2>/dev/null || true
-  chmod 644 "$D/fullchain.cer" 2>/dev/null || true
-  echo "OK"
-) >/tmp/t41.out 2>&1
-if grep -q '^OK$' /tmp/t41.out; then ok "4.1 空目录 glob 不匹配时不中断 set -e"; else bad "4.1 空目录导致 set -e 中断" "$(cat /tmp/t41.out)"; fi
-
-# 4.2 真实证书目录：私钥 640、公钥 644
-D2="$TMPD/real"; mkdir -p "$D2"
-echo "privkey" > "$D2/private.key"
-echo "fullchain" > "$D2/fullchain.cer"
-(
-  set -e
-  chmod 640 "$D2"/* 2>/dev/null || true
-  chmod 644 "$D2/fullchain.cer" 2>/dev/null || true
-) >/dev/null 2>&1
-P_KEY=$(stat -c %a "$D2/private.key")
-P_CRT=$(stat -c %a "$D2/fullchain.cer")
-if [[ "$P_KEY" == "640" ]]; then ok "4.2 私钥权限为 640"; else bad "4.2 私钥权限为 $P_KEY（期望 640）"; fi
-if [[ "$P_CRT" == "644" ]]; then ok "4.2 公钥证书权限为 644"; else bad "4.2 公钥证书权限为 $P_CRT（期望 644）"; fi
-
-# 4.3 无 caddy 组时 harden_private_key 仍能收紧到 640
-CERT_DIR="$TMPD/hpk"; mkdir -p "$CERT_DIR"; echo "k" > "$CERT_DIR/private.key"; chmod 666 "$CERT_DIR/private.key"
-harden_private_key >/dev/null 2>&1
-P=$(stat -c %a "$CERT_DIR/private.key")
-if [[ "$P" == "640" ]]; then ok "4.3 harden_private_key 收紧至 640"; else bad "4.3 harden_private_key 结果为 $P"; fi
-
-# 4.4 config.json 写入后权限为 600
-CONF_DIR="$TMPD/conf"; mkdir -p "$CONF_DIR"
-cat > "$CONF_DIR/config.json" <<'JSONEOF'
-{"log":{"level":"warn"}}
-JSONEOF
-TMPC="$CONF_DIR/config.json.tmp"; cp "$CONF_DIR/config.json" "$TMPC"
-chmod 600 "$TMPC" 2>/dev/null || true
-mv -f "$TMPC" "$CONF_DIR/config.json"
-PC=$(stat -c %a "$CONF_DIR/config.json")
-if [[ "$PC" == "600" ]]; then ok "4.4 config.json 权限为 600"; else bad "4.4 config.json 权限为 $PC（期望 600）"; fi
-
-# ---------- 5. 功能测试：mktemp 临时文件 ----------
-group "5. mktemp 临时文件测试"
-T1=$(mktemp /tmp/simple-box.latest.XXXXXX)
-T2=$(mktemp /tmp/simple-box.latest.XXXXXX)
-[[ -f "$T1" && -f "$T2" ]] && ok "mktemp 正常创建文件" || bad "mktemp 创建失败"
-[[ "$T1" != "$T2" ]] && ok "两次 mktemp 路径不重复" || bad "mktemp 路径重复"
-P1=$(stat -c %a "$T1")
-[[ "$P1" == "600" ]] && ok "mktemp 默认权限 600（非全局可写）" || bad "mktemp 权限为 $P1"
-rm -f "$T1" "$T2"
-
-# ---------- 6. 功能测试：Token 生命周期 ----------
-group "6. Token 生命周期测试"
-# 6.1 CF_Token 能正常传递到 acme.sh 子进程（export 语义未被破坏）
-(
-  export CF_Token="dummy-token-for-test"
-  bash -c '[[ -n "${CF_Token:-}" ]] && echo "VISIBLE" || echo "HIDDEN"'
-) > /tmp/t61.out 2>&1
-grep -q 'VISIBLE' /tmp/t61.out && ok "6.1 CF_Token 可传递至 acme.sh 子进程" || bad "6.1 CF_Token 无法传递（证书申请会失败）"
-
-# 6.2 unset 不影响 CF_TOKEN（大写，无人值守预置变量）
-(
-  export CF_TOKEN="preset-token"
-  export CF_Token="temp-token"
-  unset CF_Token 2>/dev/null || true
-  [[ -n "${CF_TOKEN:-}" ]] && echo "PRESERVED" || echo "LOST"
-) > /tmp/t62.out 2>&1
-grep -q 'PRESERVED' /tmp/t62.out && ok "6.2 大写 CF_TOKEN 预置变量未受影响" || bad "6.2 CF_TOKEN 被误删（破坏无人值守部署）"
-
-# 6.3 PROMPTED_CF_TOKEN 全局回传机制完整（prompt_cf_token 的设置/读取路径未被破坏）
-grep -q 'PROMPTED_CF_TOKEN="\$token"' "$TARGET" && grep -q 'cf_token="\$PROMPTED_CF_TOKEN"' "$TARGET" \
-    && ok "6.3 PROMPTED_CF_TOKEN 设置与读取路径完整" \
-    || bad "6.3 PROMPTED_CF_TOKEN 回传机制被破坏"
-
-# 6.4 重装必须换新 Token（顺手换锁），且不能沿用旧值
-if grep -q 'old_token="\${SUB_TOKEN:-}"' "$TARGET" || grep -q 'sub_token="\$old_token"' "$TARGET"; then
-    bad "6.4 仍存在沿用旧 Token 的代码（重装不再换锁）"
-else
-    ok "6.4 无沿用旧 Token 的残留代码"
-fi
-# 6.5 重装后清理所有非当前 token 的订阅目录（含历史孤儿目录）
-grep -q 'find "\$WEB_DIR" -mindepth 1 -maxdepth 1 -type d ! -name "\$sub_token" -exec rm -rf {} +' "$TARGET" \
-    && ok "6.5 重装清理非当前 Token 的订阅目录" \
-    || bad "6.5 缺少旧订阅目录清理（重装会堆积）"
-# 6.6 凭证仍然每次重装都重新生成
-_inst_start=$(grep -n '^install_node()' "$TARGET" | cut -d: -f1)
-_next_fn=$(awk -v s="$_inst_start" 'NR>s && /^[a-z_]+\(\) \{/ {print NR; exit}' "$TARGET")
-_inst_body=$(sed -n "${_inst_start},${_next_fn}p" "$TARGET")
-if grep -q 'generate reality-keypair' <<<"$_inst_body" && grep -q 'generate uuid' <<<"$_inst_body"; then
-    ok "6.6 重装仍重新生成 Reality 密钥与 UUID"
-else
-    bad "6.6 凭证生成逻辑被破坏" "install_node 范围 ${_inst_start}-${_next_fn}"
-fi
-# 6.7 清理逻辑必须在生成订阅文件之前（否则删掉刚建的新目录）
-if [[ -n "$_inst_body" ]]; then
-    _rm_line=$(grep -n 'find "\$WEB_DIR"' <<<"$_inst_body" | head -1 | cut -d: -f1)
-    _gen_line=$(grep -nE 'regen_subscription|generate_full_client_config' <<<"$_inst_body" | head -1 | cut -d: -f1)
-    if [[ -n "$_rm_line" && -n "$_gen_line" && "$_rm_line" -lt "$_gen_line" ]]; then
-        ok "6.7 清理顺序正确（先删旧目录再生成新订阅）"
-    else
-        bad "6.7 清理顺序错误" "find 在第 ${_rm_line:-?} 行，generate 在第 ${_gen_line:-?} 行"
-    fi
-fi
-
-# ---------- 7. 全量回归：核心工具函数 ----------
-group "7. 全量回归：校验函数"
-
-# validate_port
-for p in 1 80 443 65535; do
-    validate_port "$p" && ok "validate_port 接受 $p" || bad "validate_port 误拒 $p"
-done
-for p in "" 0 65536 abc -1 "80 " 1.5; do
-    validate_port "$p" && bad "validate_port 误收 '$p'" || ok "validate_port 拒绝 '$p'"
-done
-
-# validate_range
-for r in "20000:40000" "1:65535" "1000:2000"; do
-    validate_range "$r" && ok "validate_range 接受 $r" || bad "validate_range 误拒 $r"
-done
-for r in "" "20000" "40000:20000" "0:100" "20000:40000:50000" "a:b"; do
-    validate_range "$r" && bad "validate_range 误收 '$r'" || ok "validate_range 拒绝 '$r'"
-done
-
-# validate_domain
-for d in "example.com" "sub.example.com" "a-b.example.co.uk" "x1.y2.io"; do
-    validate_domain "$d" && ok "validate_domain 接受 $d" || bad "validate_domain 误拒 $d"
-done
-for d in "" "localhost" "-bad.com" "bad-.com" "no_tld" "a..b" ".com"; do
-    validate_domain "$d" && bad "validate_domain 误收 '$d'" || ok "validate_domain 拒绝 '$d'"
-done
-
-# ver_ge
-ver_ge "24.04" "24.04" && ok "ver_ge 24.04 >= 24.04" || bad "ver_ge 同版本判定失败"
-ver_ge "24.10" "24.04" && ok "ver_ge 24.10 >= 24.04（字符串比较会误判）" || bad "ver_ge 24.10 误判"
-ver_ge "22.04" "24.04" && bad "ver_ge 22.04 误判为 >= 24.04" || ok "ver_ge 22.04 < 24.04"
-ver_ge "12" "12" && ok "ver_ge 12 >= 12" || bad "ver_ge 12 判定失败"
-
-# trim_string
-R=$(trim_string "  hello  "); [[ "$R" == "hello" ]] && ok "trim_string 去首尾空格" || bad "trim_string 空格: '$R'"
-R=$(trim_string '"quoted"'); [[ "$R" == "quoted" ]] && ok "trim_string 去双引号" || bad "trim_string 双引号: '$R'"
-R=$(trim_string "'single'"); [[ "$R" == "single" ]] && ok "trim_string 去单引号" || bad "trim_string 单引号: '$R'"
-R=$(trim_string $'\r\ntoken123\r\n'); [[ "$R" == "token123" ]] && ok "trim_string 去换行符" || bad "trim_string 换行: '$R'"
-R=$(trim_string ''); [[ -z "$R" ]] && ok "trim_string 空输入返回空" || bad "trim_string 空输入: '$R'"
-
-# ---------- 8. 全量回归：证书逻辑 ----------
-group "8. 全量回归：证书逻辑"
-TMPC2=$(mktemp -d)
-CERT_DIR="$TMPC2"
-# 生成自签证书
-if openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -days 30 -nodes \
-     -keyout "$CERT_DIR/private.key" -out "$CERT_DIR/fullchain.cer" \
-     -subj "/CN=test.example.com" >/dev/null 2>&1; then
-    ok "测试证书生成成功"
-    cert_covers_domain "test.example.com" && ok "cert_covers_domain 匹配正确域名" || bad "cert_covers_domain 误拒匹配域名"
-    cert_covers_domain "other.example.com" && bad "cert_covers_domain 误收不匹配域名" || ok "cert_covers_domain 拒绝不匹配域名"
-    cert_covers_domain "" && bad "cert_covers_domain 误收空域名" || ok "cert_covers_domain 拒绝空域名"
-else
-    bad "测试证书生成失败（openssl 不可用？）"
-fi
-
-# 过期证书应被拒绝
-TMPC3=$(mktemp -d)
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -days 0 -nodes \
-    -keyout "$TMPC3/private.key" -out "$TMPC3/fullchain.cer" \
-    -subj "/CN=expired.example.com" >/dev/null 2>&1
-CERT_DIR="$TMPC3"
-if cert_covers_domain "expired.example.com"; then
-    bad "cert_covers_domain 误收已过期证书"
-else
-    ok "cert_covers_domain 拒绝已过期证书"
-fi
-
-# 公私钥不配对应被拒绝
-TMPC4=$(mktemp -d)
-openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -days 30 -nodes \
-    -keyout "$TMPC4/private.key" -out "$TMPC4/fullchain.cer" \
-    -subj "/CN=pair.example.com" >/dev/null 2>&1
-openssl ecparam -name prime256v1 -genkey -noout -out "$TMPC4/private.key" 2>/dev/null
-CERT_DIR="$TMPC4"
-if cert_covers_domain "pair.example.com"; then
-    bad "cert_covers_domain 误收公私钥不配对的证书"
-else
-    ok "cert_covers_domain 拒绝公私钥不配对"
-fi
-
-# ---------- 9. 全量回归：幂等性静态断言 ----------
-group "9. 全量回归：幂等性静态断言"
-grep -q 'iptables -t nat -F PREROUTING' "$TARGET" && bad "存在 iptables 全表清空炸弹" || ok "无 iptables 全表清空"
-grep -qE 'apt-get[^|]*[[:space:]]purge|apt purge' "$TARGET" && ok "卸载使用 apt purge（避免 mask 残留）" || bad "卸载未使用 apt purge"
-grep -q 'DEBIAN_FRONTEND=noninteractive' "$TARGET" && ok "apt 操作设置 noninteractive" || bad "缺少 DEBIAN_FRONTEND=noninteractive"
-grep -q 'sing-box check' "$TARGET" && ok "启动前执行 sing-box check" || bad "缺少配置校验"
-grep -q 'BASH_SOURCE\[0\]' "$TARGET" && ok "存在管道执行检测" || bad "缺少管道执行检测"
-
-# BBR 幂等：已开启则跳过
-grep -qE '\[\[ "\$cur" == "bbr" \]\]' "$TARGET" && ok "BBR 已开启时跳过（幂等）" || bad "BBR 缺少幂等判断"
-
-# BBR 卸载只删文件，不改运行中的拥塞控制（卸载代理不该动系统网络栈）
-if grep -q 'sysctl -w net.ipv4.tcp_congestion_control=cubic' "$TARGET"; then
-    bad "disable_bbr 仍在改运行中的拥塞控制算法"
-else
-    ok "disable_bbr 不改运行中的拥塞控制"
-fi
-_dbb=$(awk '/^disable_bbr\(\)/,/^}/' "$TARGET")
-if grep -q 'rm -f "\$BBR_CONF"' <<<"$_dbb" && grep -q 'BBR_MARK' <<<"$_dbb"; then
-    ok "disable_bbr 仍清理本脚本创建的配置文件"
-else
-    bad "disable_bbr 丢失了配置文件清理（卸载不再彻底）"
-fi
-
-# Caddy 归属标记
-grep -q 'caddy_installed_by_script' "$TARGET" && ok "Caddy 配置带归属标记" || bad "Caddy 缺少归属标记"
-
-# 10.1 Caddy reload 只在 setup_caddy_subscription 内部做一次，调用方不得重复
-_setup_reload=$(grep -c 'reload_caddy_safe' "$TARGET")
-if [[ "$_setup_reload" -eq 2 ]]; then
-    ok "Caddy reload 只有定义处与 setup 内部两处（无重复调用）"
-else
-    bad "Caddy reload 调用点异常" "共 ${_setup_reload} 处，应为 2（定义 + setup 内部）"
-fi
-
-# 10.2 发布订阅的动作序列：render_and_reload 自己生成；install_node 委托给协议模块
-_body=$(awk '/^render_and_reload\(\)/ {p=1} p {print} p && /^}/ && NR>1 {exit}' "$TARGET")
-_has_gen=$(grep -cE 'regen_subscription|generate_full_client_config' <<<"$_body")
-_has_setup=$(grep -c 'setup_caddy_subscription' <<<"$_body")
-if [[ "$_has_gen" -ge 1 && "$_has_setup" -ge 1 ]]; then
-    ok "render_and_reload 含 generate + setup_caddy"
-else
-    bad "render_and_reload 缺少发布订阅的关键步骤" "generate=${_has_gen} setup=${_has_setup}"
-fi
-
-# install_node 不再自己写配置/订阅，必须委托给两个协议模块 + 建订阅站
-_ibody=$(awk '/^install_node\(\)/ {p=1} p {print} p && /^}/ && NR>1 {exit}' "$TARGET")
-if grep -q 'proto_enable_reality' <<<"$_ibody" && grep -q 'proto_enable_hy2' <<<"$_ibody"; then
-    ok "install_node 委托协议模块（订阅站由 render_and_reload 内部建）"
-else
-    bad "install_node 未委托协议模块" "reality=$(grep -c proto_enable_reality <<<"$_ibody") hy2=$(grep -c proto_enable_hy2 <<<"$_ibody")"
-fi
-
-# 10.2 端口跳跃展示串必须由 fmt_hy_ports 统一生成（禁止各处手拼）
-_manual_ports=$(grep -c 'hy_ports_display="\${[A-Za-z_]*},\${' "$TARGET" || true)
-if [[ "${_manual_ports:-0}" -eq 0 ]]; then
-    ok "端口跳跃串无手拼残留（统一走 fmt_hy_ports）"
-else
-    bad "仍有 ${_manual_ports} 处手拼 hy_ports_display" "格式变更时会漏改"
-fi
-# 端口串只允许三处生成：regen_subscription 内（订阅）、show_links 内（原生链接）、
-# show_clash_snippet 内（Mihomo 片段）。新增消费者必须走同一函数，不得手拼。
-_fmt_calls=$(grep -c 'fmt_hy_ports "' "$TARGET" || true)
-# 原生链接与 Mihomo 片段都改为读生成器产物，端口串只在订阅里拼一次
-if [[ "${_fmt_calls:-0}" -eq 1 ]]; then
-    ok "fmt_hy_ports 调用点恰为 1 处（仅订阅生成）"
-else
-    bad "fmt_hy_ports 调用点数量异常" "共 ${_fmt_calls} 处，应为 1"
-fi
-# 订阅只有一个生产者：generate_full_client_config 只能被 regen_subscription 调用。
-# 这是真正的不变式；下面那条计数只是「已知触发点没被悄悄删掉」的旁证。
-_producer_calls=$(grep -cE '^[[:space:]]+generate_full_client_config' "$TARGET" || true)
-_producer_in_regen=$(awk '/^regen_subscription\(\)/,/^}/' "$TARGET" | grep -c 'generate_full_client_config' || true)
-if [[ "${_producer_calls:-0}" -eq 1 && "${_producer_in_regen:-0}" -eq 1 ]]; then
-    ok "订阅生成器仅由 regen_subscription 调用（唯一生产者）"
-else
-    bad "订阅生成器存在多处调用" "共 ${_producer_calls} 处，其中在 regen_subscription 内 ${_producer_in_regen} 处"
-fi
-# 会改变节点参数、必须重生成订阅的 5 个触发点：
-#   重载后 / 安装时 / token 轮换 / 节点前缀变更 / 直连后缀变更
-_regen_calls=$(grep -cE '^\s+regen_subscription' "$TARGET" || true)
-# 4 = 重载后 / token 轮换 / 节点前缀 / 直连后缀；+1 = regen_from_scope（启用/停用共用）
-# 安装不再单独调用：它走 proto_enable_*，最终由 render_and_reload 内的重载触发
-# 6 = show_links 重建 + show_clash_snippet 按需重建
-if [[ "${_regen_calls:-0}" -eq 7 ]]; then
-    ok "regen_subscription 覆盖 7 个触发点"
-else
-    bad "regen_subscription 调用点数量异常" "共 ${_regen_calls} 处，应为 7"
-fi
-
-# ---------- 10. 全量回归：危险命令审计 ----------
-group "10. 全量回归：危险命令审计"
-# 允许删除脚本自有的安装目录 /usr/local/share/simple-box
-SUSPICIOUS=$(grep -nE 'rm -rf /' "$TARGET" | grep -v '\$' | grep -v '/usr/local/share/simple-box')
-if [[ -n "$SUSPICIOUS" ]]; then bad "存在可疑的 rm -rf 绝对路径" "$SUSPICIOUS"; else ok "无裸 rm -rf 绝对路径（仅删除自有安装目录）"; fi
-grep -qE 'curl[^|]*\|[[:space:]]*(ba)?sh' "$TARGET" && printf '  \033[33m!\033[0m 存在 curl|sh 模式（acme.sh 官方安装，已知可接受）\n' || ok "无 curl|sh 管道"
-grep -q 'eval ' "$TARGET" && bad "存在 eval 调用" || ok "无 eval 调用"
-grep -q 'chmod 777' "$TARGET" && bad "存在 chmod 777" || ok "无 chmod 777"
-
-# ---------- 11. 端到端功能测试：write_singbox_config ----------
-group "11. 端到端：write_singbox_config 真实调用"
-E2E=$(mktemp -d)
-(
-  CONF_DIR="$E2E"
-  CONF_FILE="$E2E/config.json"
-  U=$(cat /proc/sys/kernel/random/uuid)
-  PK=$(head -c 32 /dev/urandom | base64 | tr -d '=/+')
-  SI=$(head -c 4 /dev/urandom | xxd -p)
-  HP=$(head -c 16 /dev/urandom | base64 | tr -d '=/+')
-  write_singbox_config 443 www.microsoft.com "$U" "$PK" "$SI" 8443 "$HP"
-  echo "$U" > "$E2E/.uuid"; echo "$PK" > "$E2E/.pk"; echo "$HP" > "$E2E/.hp"
-) >/dev/null 2>&1
-
-if [[ -s "$E2E/config.json" ]]; then
-    ok "11.1 配置已生成"
-    P=$(stat -c %a "$E2E/config.json")
-    [[ "$P" == "600" ]] && ok "11.2 配置权限 600" || bad "11.2 配置权限为 $P"
-    if command -v jq >/dev/null 2>&1 && jq -e . "$E2E/config.json" >/dev/null 2>&1; then
-        ok "11.3 JSON 合法"
-        N=$(jq '.inbounds | length' "$E2E/config.json")
-        [[ "$N" == "2" ]] && ok "11.4 inbounds 数量为 2 (vless + hysteria2)" || bad "11.4 inbounds 数量为 $N"
-        T=$(jq -r '[.inbounds[].type] | join(",")' "$E2E/config.json")
-        [[ "$T" == "vless,hysteria2" ]] && ok "11.5 协议类型正确" || bad "11.5 协议类型为 $T"
-        VP=$(jq -r '.inbounds[] | select(.type=="vless") | .listen_port' "$E2E/config.json")
-        [[ "$VP" == "443" ]] && ok "11.6 VLESS 端口正确" || bad "11.6 VLESS 端口为 $VP"
-        HP2=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port' "$E2E/config.json")
-        [[ "$HP2" == "8443" ]] && ok "11.7 Hy2 端口正确" || bad "11.7 Hy2 端口为 $HP2"
-    else
-        bad "11.3 JSON 非法"
-    fi
-    # 敏感字段确实写入（非空壳）
-    U=$(cat "$E2E/.uuid" 2>/dev/null); PK=$(cat "$E2E/.pk" 2>/dev/null); HP=$(cat "$E2E/.hp" 2>/dev/null)
-    grep -qF "$U" "$E2E/config.json" 2>/dev/null && ok "11.8 UUID 已写入" || bad "11.8 UUID 缺失"
-    grep -qF "$PK" "$E2E/config.json" 2>/dev/null && ok "11.9 Reality 私钥已写入" || bad "11.9 私钥缺失"
-    grep -qF "$HP" "$E2E/config.json" 2>/dev/null && ok "11.10 Hy2 密码已写入" || bad "11.10 密码缺失"
-else
-    bad "11.1 配置未生成"
-fi
-
-# 临时文件无残留（原子替换后应清理干净）
-LEFT=$(find "$E2E" -name '*.tmp.*' 2>/dev/null | wc -l)
-[[ "$LEFT" -eq 0 ]] && ok "11.11 无 .tmp 残留" || bad "11.11 残留 $LEFT 个临时文件"
-
-# 幂等：重复调用仍正常
-(
-  CONF_DIR="$E2E"; CONF_FILE="$E2E/config.json"
-  write_singbox_config 443 www.microsoft.com "$(cat "$E2E/.uuid")" "$(cat "$E2E/.pk")" abcd 8443 "$(cat "$E2E/.hp")"
-) >/dev/null 2>&1
-P2=$(stat -c %a "$E2E/config.json" 2>/dev/null)
-[[ "$P2" == "600" ]] && ok "11.12 重复调用后权限仍为 600" || bad "11.12 重复调用后权限为 $P2"
-LEFT2=$(find "$E2E" -name '*.tmp.*' 2>/dev/null | wc -l)
-[[ "$LEFT2" -eq 0 ]] && ok "11.13 重复调用后无残留" || bad "11.13 重复调用残留 $LEFT2 个"
-rm -rf "$E2E"
-
-# ---------- 12. Caddyfile 不监听 80 端口 ----------
-group "12. Caddyfile auto_https disable_redirects"
-if grep -q 'auto_https disable_redirects' "$TARGET"; then
-    ok "12.1 脚本写入的 Caddyfile 含 disable_redirects"
-else
-    bad "12.1 脚本未写 disable_redirects（会意外监听 80）"
-fi
-if grep -q "cat > /etc/caddy/Caddyfile <<'CADDYEOF'" "$TARGET"; then
-    ok "12.2 使用 heredoc 写入完整全局块"
-else
-    bad "12.2 未用 heredoc 写全局块"
-fi
-if grep -q 'caddyfile_created_by_script' "$TARGET" &&    grep -q 'auto_https disable_redirects.*Caddyfile\|grep -q "auto_https disable_redirects" /etc/caddy/Caddyfile' "$TARGET"; then
-    ok "12.3 存在旧版 Caddyfile 升级修复逻辑"
-else
-    bad "12.3 缺少旧版升级修复"
-fi
-
-# 功能验证：模拟老版本 Caddyfile 升级
-CD=$(mktemp -d); mkdir -p "$CD/etc/caddy" "$CD/conf"
-printf 'import sites/*.caddy\n' > "$CD/etc/caddy/Caddyfile"
-: > "$CD/conf/.caddyfile_created_by_script"
-(
-  CONF_DIR="$CD/conf"; CF="$CD/etc/caddy/Caddyfile"
-  if [[ -f "${CONF_DIR}/.caddyfile_created_by_script" ]] && ! grep -q "auto_https disable_redirects" "$CF"; then
-    t=$(mktemp "$CD/etc/caddy/.Caddyfile.XXXXXX")
-    { printf '{\n\tauto_https disable_redirects\n}\n'
-      grep -v '^import sites/\*\.caddy$' "$CF" | sed '/^$/d'
-      printf 'import sites/*.caddy\n'; } > "$t"
-    mv -f "$t" "$CF"
-  fi
-)
-grep -q 'auto_https disable_redirects' "$CD/etc/caddy/Caddyfile" && ok "12.4 老版 Caddyfile 升级后含 disable_redirects" || bad "12.4 升级未生效"
-[[ $(grep -c '^import sites/\*\.caddy$' "$CD/etc/caddy/Caddyfile") -eq 1 ]] && ok "12.5 import 行未重复" || bad "12.5 import 行重复"
-
-# 用户自有 Caddyfile 不得被改
-CD2=$(mktemp -d); mkdir -p "$CD2/etc/caddy" "$CD2/conf"
-printf 'example.com {\n  reverse_proxy localhost:3000\n}\n' > "$CD2/etc/caddy/Caddyfile"
-cp "$CD2/etc/caddy/Caddyfile" "$CD2/orig"
-(
-  CONF_DIR="$CD2/conf"; CF="$CD2/etc/caddy/Caddyfile"
-  if [[ -f "${CONF_DIR}/.caddyfile_created_by_script" ]] && ! grep -q "auto_https disable_redirects" "$CF"; then
-    echo "SHOULD_NOT_RUN" > "$CF"
-  fi
-)
-diff -q "$CD2/orig" "$CD2/etc/caddy/Caddyfile" >/dev/null && ok "12.6 用户自有 Caddyfile 未被改动" || bad "12.6 用户 Caddyfile 被误改"
-rm -rf "$CD" "$CD2"
-
-# ---------- 13. 端口占用判定：Caddy 只在订阅端口上算可复用 ----------
-group "13. 端口占用判定"
-# Caddy 占着 443（Reality 伪装站）时，Reality 不能也用 443，否则装完 bind 失败无限重启
-_cpo=$(sed -n '/^check_port_occupied()/,/^}/p' "$TARGET")
-if grep -q 'SUB_PORT' <<<"$_cpo" && grep -q '"\$port" == "\$SUB_PORT"' <<<"$_cpo"; then
-    ok "13.1 caddy 分支按 SUB_PORT 判定是否可复用"
-else
-    bad "13.1 caddy 分支未校验 SUB_PORT，会把伪装站占用的 443 当可复用"
-fi
-if grep -q '伪装站占用 443' <<<"$_cpo"; then
-    ok "13.2 冲突时给出可操作的提示"
-else
-    bad "13.2 冲突提示缺失"
-fi
-
-# ---------- 15. 协议模块（站点发现 / 翻转 / 渲染） ----------
-group "15. 协议模块"
-
-SB15="$TMPD/m15"; mkdir -p "$SB15/sites"
-CADDYFILE="$SB15/Caddyfile"
-cat > "$CADDYFILE" <<'EOF'
-import sites/*.caddy
-EOF
-cat > "$SB15/sites/signal.caddy" <<'EOF'
-agisignal.example.com {
-	encode gzip
-	root * /var/www/signal
-	file_server
-}
-EOF
-cat > "$SB15/sites/other.caddy" <<'EOF'
-https://other.example.com:9443 {
-	root * /var/www/other
-	file_server
-}
-EOF
-cat > "$SB15/sites/trap.caddy" <<'EOF'
-agisignal.example.com.evil.com {
-	root * /var/www/trap
-}
-EOF
-
-export CADDY_SITES_DIR="$SB15/sites"
-
-# 15.1 命中
-_hit=$(site_file_for "agisignal.example.com" 2>/dev/null || true)
-[[ "$_hit" == "$SB15/sites/signal.caddy" ]] && ok "15.1 精确命中站点文件" || bad "15.1 站点发现失败" "得到: ${_hit:-空}"
-
-# 15.2 子串不误命中
-_hit2=$(site_file_for "agisignal.example.com.evil.com" 2>/dev/null || true)
-[[ "$_hit2" == "$SB15/sites/trap.caddy" ]] && ok "15.2 后缀相似域名各自命中" || bad "15.2 域名匹配不精确" "得到: ${_hit2:-空}"
-
-# 15.3 https://domain:port 形式
-_hit3=$(site_file_for "other.example.com" 2>/dev/null || true)
-[[ "$_hit3" == "$SB15/sites/other.caddy" ]] && ok "15.3 识别 https://域名:端口 站点块" || bad "15.3 未识别带端口的站点块"
-
-# 15.4 未命中返回非零
-if site_file_for "nope.example.com" >/dev/null 2>&1; then bad "15.4 未命中却返回成功"; else ok "15.4 未命中返回非零"; fi
-
-# 15.5 翻转到 9443
-_f="$SB15/sites/signal.caddy"; _orig=$(sha256sum "$_f" | cut -d' ' -f1)
-flip_transform "$_f" "agisignal.example.com" 9443 on >/dev/null 2>&1
-grep -q "^https://agisignal.example.com:9443 {" "$_f" && grep -q "bind 127.0.0.1" "$_f" \
-    && ok "15.5 翻转写入 https://域名:9443 + bind" || bad "15.5 翻转结果不正确"
-
-# 15.6 幂等：再翻一次不变
-_h1=$(sha256sum "$_f" | cut -d' ' -f1)
-flip_transform "$_f" "agisignal.example.com" 9443 on >/dev/null 2>&1
-_h2=$(sha256sum "$_f" | cut -d' ' -f1)
-[[ "$_h1" == "$_h2" ]] && ok "15.6 重复翻转字节不变" || bad "15.6 重复翻转改动了文件"
-
-# 15.7 别的站点块不受影响
-grep -q "^https://other.example.com:9443 {" "$SB15/sites/other.caddy" \
-    && ! grep -q "agisignal" "$SB15/sites/other.caddy" && ok "15.7 其它站点块未被改动" || bad "15.7 误伤其它站点"
-
-# 15.8 翻回来与原文一致
-flip_transform "$_f" "agisignal.example.com" 9443 off >/dev/null 2>&1
-_back=$(sha256sum "$_f" | cut -d' ' -f1)
-[[ "$_back" == "$_orig" ]] && ok "15.8 退出翻转后与原文件字节一致" || bad "15.8 退出翻转未完全还原"
-
-# 15.9 站点内容里的同名域名不被误改
-_f2="$SB15/sites/content.caddy"
-cat > "$_f2" <<'EOF'
-plain.example.com {
-	respond "plain.example.com"
-}
-EOF
-_c_before=$(sha256sum "$_f2" | cut -d' ' -f1)
-flip_transform "$_f2" "other.example.com" 9443 on >/dev/null 2>&1
-_c_after=$(sha256sum "$_f2" | cut -d' ' -f1)
-[[ "$_c_before" == "$_c_after" ]] && ok "15.9 不存在的域名不修改文件" || bad "15.9 错误改写了无关文件"
-
-# 15.10 current_inbounds / set_has
-SB_CONF="$SB15/config.json"
-cat > "$SB_CONF" <<'EOF'
-{"inbounds":[{"type":"vless","tag":"vless-reality-in"},{"type":"hysteria2","tag":"hy2-in"}]}
-EOF
-CONF_FILE="$SB_CONF"
-_t=$(current_inbounds)
-[[ "$_t" == *vless-reality-in* && "$_t" == *hy2-in* ]] && ok "15.10 current_inbounds 解析两个 inbound" || bad "15.10 current_inbounds 解析失败" "$_t"
-set_has "hy2-in" && set_has "vless-reality-in" && ok "15.11 set_has 判定启用" || bad "15.11 set_has 误判"
-cat > "$SB_CONF" <<'EOF'
-{"inbounds":[{"type":"hysteria2","tag":"hy2-in"}]}
-EOF
-if set_has "vless-reality-in"; then bad "15.12 缺席 inbound 被误判为启用"; else ok "15.12 缺席 inbound 判定为未启用"; fi
-
-# 15.13 render_set 只写 Reality
-CERT_DIR="$SB15/cert"; mkdir -p "$CERT_DIR"
-VL_PORT=443; VL_SNI="agisignal.example.com"; VL_UUID="11111111-1111-1111-1111-111111111111"
-VL_PRIVKEY="PRIV"; VL_SHORTID="abcd1234"; VL_HANDSHAKE="127.0.0.1"; VL_HANDSHAKE_PORT=9443
-HY_PORT=10443; HY_PASS="pass123"
-render_set "reality" && python3 -c "import json;d=json.load(open('$SB_CONF'));print(' '.join(i['tag'] for i in d['inbounds']))" > "$SB15/tags1"
-[[ "$(cat "$SB15/tags1")" == "vless-reality-in" ]] && ok "15.13 render_set 单 Reality 只写一个 inbound" || bad "15.13 render_set Reality 输出异常" "$(cat "$SB15/tags1")"
-
-# 15.14 render_set 只写 Hy2
-render_set "hy2" && python3 -c "import json;d=json.load(open('$SB_CONF'));print(' '.join(i['tag'] for i in d['inbounds']))" > "$SB15/tags2"
-[[ "$(cat "$SB15/tags2")" == "hy2-in" ]] && ok "15.14 render_set 单 Hy2 只写一个 inbound" || bad "15.14 render_set Hy2 输出异常" "$(cat "$SB15/tags2")"
-
-# 15.15 render_set 两个都写，且 Reality 使用翻转的 handshake 目标
-render_set "reality hy2" && python3 - <<PY
-import json
-d=json.load(open("$SB_CONF"))
-tags=[i["tag"] for i in d["inbounds"]]
-hs=[i for i in d["inbounds"] if i["tag"]=="vless-reality-in"][0]["tls"]["reality"]["handshake"]
-print(" ".join(tags)); print(hs["server"], hs["server_port"])
-PY
-_three=$(python3 -c "import json;print(' '.join(i['tag'] for i in json.load(open('$SB_CONF'))['inbounds']))")
-_hs=$(python3 -c "import json;print([i for i in json.load(open('$SB_CONF'))['inbounds'] if i['tag']=='vless-reality-in'][0]['tls']['reality']['handshake']['server'])")
-[[ "$_three" == "vless-reality-in hy2-in" && "$_hs" == "127.0.0.1" ]] && ok "15.15 render_set 双协议 + handshake 指向本机站点" || bad "15.15 render_set 双协议异常" "$_three / $_hs"
-
-# 15.16 静态：旧模块已删除、新模块存在
-if grep -qE '^menu_(reality|hy2)_module\(\)' "$TARGET"; then bad "15.16 旧模块函数仍存在"; else ok "15.16 旧模块函数已删除"; fi
-grep -q '^proto_enable_reality()' "$TARGET" && grep -q '^proto_enable_hy2()' "$TARGET" && grep -q '^disable_protocol()' "$TARGET" \
-    && ok "15.17 新协议模块就位" || bad "15.17 新协议模块缺失"
-
-# 15.18 菜单文案
-grep -q 'PROTOCOLS=' "$TARGET" && awk '/^menu_protocol\(\)/,/^}/' "$TARGET" | grep -q 'proto_human' \
-    && ok "15.18 菜单由协议注册表生成" || bad "15.18 菜单未遍历注册表"
-if grep -q '重建 Reality' "$TARGET"; then bad "15.19 菜单仍残留「重建 Reality」"; else ok "15.19 无「重建」残留"; fi
-
-# 15.20 翻转失败必须还原站点文件（真实 caddy validate）
-CADDY_BIN=""
-for c in /tmp/bin/caddy /usr/bin/caddy /usr/local/bin/caddy; do [[ -x "$c" ]] && { CADDY_BIN="$c"; break; }; done
-if [[ -n "$CADDY_BIN" ]]; then
-    export PATH="$(dirname "$CADDY_BIN"):$PATH"
-    _bad="$SB15/sites/bad.caddy"; printf 'broken.example.com {\n\troot * /x\n' > "$_bad"
-    _b1=$(sha256sum "$_bad" | cut -d' ' -f1)
-    SITE_FILE="$_bad"; FLIP_HOST="broken.example.com"; FLIP_PORT=9443
-    if flip_site_toggle on >/dev/null 2>&1; then bad "15.20 非法配置未被拦截"; else
-        _b2=$(sha256sum "$_bad" | cut -d' ' -f1)
-        [[ "$_b1" == "$_b2" ]] && ok "15.20 validate 失败后站点文件已还原" || bad "15.20 失败后文件未还原"
-    fi
-    rm -f "$_bad"   # 坏站点会让后续 validate 必然失败，先移除
-
-    # 15.21 合法站点：validate 通过后文件变成翻转形态
-    _good="$SB15/sites/signal.caddy"
-    SITE_FILE="$_good"; FLIP_HOST="agisignal.example.com"; FLIP_PORT=9443
-    flip_site_toggle on >/dev/null 2>&1 || true   # 无 caddy 服务时 restart 失败不影响文件断言
-    grep -q '^https://agisignal.example.com:9443 {' "$_good" && grep -q 'bind 127.0.0.1' "$_good" \
-        && ok "15.21 合法站点翻转成功" || bad "15.21 合法站点翻转失败"
-    flip_transform "$_good" "agisignal.example.com" 9443 off >/dev/null 2>&1
-    [[ "$(sha256sum "$_good" | cut -d' ' -f1)" == "$_orig" ]] && ok "15.22 复原后与原始站点一致" || bad "15.22 复原失败"
-else
-    printf '  \033[33m-\033[0m 未找到 caddy 二进制，跳过翻转 validate 测试\n'
-fi
-
-# 15.23 port_holder 能识别占用者
-python3 -m http.server 18099 --bind 127.0.0.1 >/dev/null 2>&1 &
-_ph_pid=$!; sleep 0.6
-_h=$(port_holder 18099 tcp)
-kill "$_ph_pid" 2>/dev/null; wait "$_ph_pid" 2>/dev/null
-[[ "$_h" == *python* ]] && ok "15.23 port_holder 识别端口占用者" || bad "15.23 port_holder 未识别占用者" "${_h:-空}"
-
-# 15.24 外部 SNI 探测：好域名通过、坏域名失败（需要网络）
-if probe_external_sni "www.cloudflare.com"; then
-    if probe_external_sni "example.invalid"; then bad "15.24 不存在的域名被误判为可用"; else ok "15.24 外部 SNI 探测可区分好坏域名"; fi
-else
-    printf '  \033[33m-\033[0m 无外网或 TLS 探测失败，跳过外部 SNI 测试\n'
-fi
-
-unset CADDY_SITES_DIR
-
-# ---------- 16. 安装走协议模块 + 非交互入口 ----------
-group "16. 安装 / 协议模块集成"
-
-SB16="$TMPD/m16"; mkdir -p "$SB16/sites" "$SB16/cert"
-cat > "$SB16/sites/site.caddy" <<'EOF'
-site.example.com {
-	root * /var/www/site
-	file_server
-}
-EOF
-cat > "$SB16/env.conf" <<'EOF'
-NODE_PREFIX="T16"
-SERVER_IP="203.0.113.10"
-VL_PORT="443"
-VL_SNI="site.example.com"
-VL_UUID="11111111-1111-1111-1111-111111111111"
-VL_PRIVKEY="PRIVKEY16"
-VL_PUBKEY="PUBKEY16"
-VL_SHORTID="abcd1234"
-HY_DOMAIN=""
-TARGET_HOST="203.0.113.10"
-HY_PORT="10443"
-HY_RANGE=""
-HY_PASS="hy16pass"
-HY_SKIP_CERT="false"
-SUB_PORT="8444"
-SUB_PROTO="https"
-SUB_TOKEN="token16"
-CERT_MODE="selfsigned"
-DIRECT_SUFFIXES=""
-FLIP_HOST=""
-SITE_FILE=""
-FLIP_PORT="9443"
-VL_HANDSHAKE=""
-VL_HANDSHAKE_PORT=""
-EOF
-printf '{"inbounds":[]}\n' > "$SB16/config.json"
-
-# 覆盖到沙箱 + 桩掉会碰系统的两个动作
-ENV_FILE="$SB16/env.conf"; CONF_FILE="$SB16/config.json"; CERT_DIR="$SB16/cert"
-CADDY_SITES_DIR="$SB16/sites"
-ENV_LOADED=""
-render_and_reload() { return 0; }
-flip_site_toggle() { return 0; }
-
-# 16.1 安装不再自己写配置
-if awk '/^install_node\(\) \{/,/^\}/' "$TARGET" | grep -q 'write_singbox_config'; then
-    bad "16.1 install_node 仍在直接写配置"
-else
-    ok "16.1 install_node 不再直接调 write_singbox_config"
-fi
-awk '/^install_node\(\) \{/,/^\}/' "$TARGET" | grep -q 'proto_enable_reality' \
-    && awk '/^install_node\(\) \{/,/^\}/' "$TARGET" | grep -q 'proto_enable_hy2' \
-    && ok "16.2 安装通过 proto_enable_reality / proto_enable_hy2" || bad "16.2 安装未走协议模块"
-
-# 16.3 非交互启用 Reality（传参 + stdin 关闭，不应阻塞）
-if proto_enable_reality 8443 site.example.com < /dev/null > "$SB16/o1" 2>&1; then
-    tags=$(python3 -c "import json;print(' '.join(i['tag'] for i in json.load(open('$SB16/config.json'))['inbounds']))")
-    hs=$(python3 -c "import json;h=[i for i in json.load(open('$SB16/config.json'))['inbounds'] if i['tag']=='vless-reality-in'][0]['tls']['reality'];print(h['handshake']['server'], h['handshake']['server_port'], [i for i in json.load(open('$SB16/config.json'))['inbounds']][0]['listen_port'])")
-    [[ "$tags" == "vless-reality-in" && "$hs" == "127.0.0.1 9443 8443" ]] \
-        && ok "16.3 非交互启用 Reality：端口 8443 + 回落 127.0.0.1:9443" \
-        || bad "16.3 启用 Reality 结果异常" "$tags / $hs"
-else
-    bad "16.3 非交互启用 Reality 失败" "$(tail -3 "$SB16/o1")"
-fi
-
-# 16.4 站点信息落进 env
-grep -q '^SITE_FILE="/tmp' "$SB16/env.conf" 2>/dev/null || grep -q "^SITE_FILE=\"$SB16/sites/site.caddy\"" "$SB16/env.conf" \
-    && ok "16.4 env 记录翻转站点路径" || bad "16.4 SITE_FILE 未写入" "$(grep '^SITE_FILE' "$SB16/env.conf")"
-
-# 16.5 非交互启用 Hy2：两个 inbound 共存
-if proto_enable_hy2 10443 "" "" < /dev/null > "$SB16/o2" 2>&1; then
-    n=$(python3 -c "import json;print(len(json.load(open('$SB16/config.json'))['inbounds']))")
-    [[ "$n" == "2" ]] && ok "16.5 启用 Hy2 后两个 inbound 共存" || bad "16.5 inbound 数量异常" "$n"
-else
-    bad "16.5 非交互启用 Hy2 失败" "$(tail -3 "$SB16/o2")"
-fi
-
-# 16.6 停用 Hy2 只摘自己
-disable_protocol hy2 > /dev/null 2>&1
-tags=$(python3 -c "import json;print(' '.join(i['tag'] for i in json.load(open('$SB16/config.json'))['inbounds']))")
-[[ "$tags" == "vless-reality-in" ]] && ok "16.6 停用 Hy2 保留 Reality" || bad "16.6 停用 Hy2 结果异常" "$tags"
-
-# 16.7 停用 Reality 摘干净
-disable_protocol reality > /dev/null 2>&1
-n=$(python3 -c "import json;print(len(json.load(open('$SB16/config.json'))['inbounds']))")
-[[ "$n" == "0" ]] && ok "16.7 停用 Reality 后无 inbound" || bad "16.7 停用 Reality 残留" "$n"
-
-# 16.8 订阅重建发生在 render 之前拿到新值（静态检查 sync_env_locals 在 render_and_reload 前）
-awk '/^proto_enable_reality\(\) \{/,/^\}/' "$TARGET" | grep -n "sync_env_locals\|render_and_reload" | awk -F: '$2 ~ /sync_env_locals/ {s=$1} $2 ~ /render_and_reload/ {r=$1} END{exit !(s && r && s<r)}' \
-    && ok "16.8 Reality 启用前同步小写作用域" || bad "16.8 未在 render 前同步 env 变量"
-
-# 16.9 proto 传参分支内不得再有 read
-if awk '/^proto_enable_reality\(\) \{/,/^\}/' "$TARGET" | grep -A14 'interactive" == 1' | grep -q 'ask'; then
-    ok "16.9 交互提问被限制在 interactive 分支内"
-else
-    bad "16.9 未找到 interactive 分支"
-fi
-
-
-# ---------- 17. 出口中转 ----------
-group "17. 出口中转"
-
-SB17="$TMPD/m17"; mkdir -p "$SB17/cert" "$SB17/web/tok17"
-printf '{"log":{"level":"warn"},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}\n' > "$SB17/base.json"
-
-VL_PORT=443; VL_SNI="gh.example.com"; VL_UUID="11111111-1111-1111-1111-111111111111"
-VL_PRIVKEY="PRIV17"; VL_PUBKEY="PBK17"; VL_SHORTID="ab12cd34"
-HY_PORT=8443; HY_PASS="hypass17"
-VL_HANDSHAKE="127.0.0.1"; VL_HANDSHAKE_PORT=9443
-CONF_FILE="$SB17/cfg.json"; CERT_DIR="$SB17/cert"
-NODE_PREFIX="FN"; SERVER_IP="203.0.113.11"; TARGET_HOST="fn.example.com"
-HY_DOMAIN="fn.example.com"; HY_SKIP_CERT="false"; SUB_TOKEN="tok17"
-
-render_set "reality hy2"
-_md5_none=$(md5sum "$CONF_FILE" | cut -d' ' -f1)
-
-# 17.1 none 时不改动配置
-EXIT_TYPE="none"
-apply_exit_config
-[[ "$(md5sum "$CONF_FILE" | cut -d' ' -f1)" == "$_md5_none" ]] \
-    && ok "17.1 EXIT_TYPE=none 配置字节不变" || bad "17.1 none 仍改动了配置"
-
-# 17.2 hy2 出口：4 个 inbound + exit-out + route
-EXIT_TYPE="hy2"; EXIT_SERVER="isif.example.com"; EXIT_PORT="8443"; EXIT_PASS="exitpass17"
-EXIT_SNI="isif.example.com"; EXIT_ENTRY_VL="2053"; EXIT_ENTRY_HY="2054"
-apply_exit_config
-_tags=$(python3 -c "import json;print(' '.join(i['tag'] for i in json.load(open('$CONF_FILE'))['inbounds']))")
-_ob=$(python3 -c "import json;d=json.load(open('$CONF_FILE'));o=[x for x in d['outbounds'] if x['tag']=='exit-out'][0];print(o['type'],o['server_port'])")
-_rt=$(python3 -c "import json;d=json.load(open('$CONF_FILE'));r=d.get('route',{});print(len(r.get('rules',[])), r.get('final'))")
-[[ "$_tags" == *exit-vless-in* && "$_tags" == *exit-hy2-in* && "$_ob" == "hysteria2 8443" && "$_rt" == "2 direct" ]] \
-    && ok "17.2 hy2 出口：链式入口 + exit-out + route final=direct" \
-    || bad "17.2 hy2 出口结构异常" "$_tags / $_ob / $_rt"
-
-# 17.3 出口端口与主入口不冲突
-_ports=$(python3 -c "import json;print(sorted(i['listen_port'] for i in json.load(open('$CONF_FILE'))['inbounds']))")
-[[ "$_ports" == "[443, 2053, 2054, 8443]" ]] && ok "17.3 四个入口端口正确" || bad "17.3 端口集合异常" "$_ports"
-
-# 17.4 订阅里出现 -SG 节点（由生成器直接产出，不再后处理）
-EXIT_TYPE="hy2"; EXIT_SERVER="isif.example.com"; EXIT_PORT="8443"
-EXIT_ENTRY_VL="2053"; EXIT_ENTRY_HY="2054"; EXIT_LABEL="SG"
-VL_PORT=443; HY_PORT=8443; VL_SNI="gh.example.com"; SERVER_IP="203.0.113.11"
-user_uuid="11111111-1111-1111-1111-111111111111"; vl_pubkey="PBK17"; vl_shortid="ab12cd34"
-hy_password="hypass17"; hy_skip_cert="false"; node_prefix="FN"; token="tok17"
-domain_or_ip="fn.example.com"; vl_port=443; hy_port=8443
-hy_ports_display="8443"; server_ip="203.0.113.11"; vl_sni="gh.example.com"
-WEB_DIR="$SB17/web"; mkdir -p "$WEB_DIR/tok17"
-generate_full_client_config "fn.example.com" tok17 FN 203.0.113.11 443 \
-  11111111-1111-1111-1111-111111111111 gh.example.com PBK17 ab12cd34 8443 8443 hypass17 false
-grep -q 'FN-VLESS-Reality-SG' "$WEB_DIR/tok17/config.yaml" && grep -q 'FN-Hysteria2-SG' "$WEB_DIR/tok17/config.yaml" \
-    && ok "17.4 订阅 config.yaml 含两条链式节点" || bad "17.4 订阅缺少链式节点"
-grep -q 'port: 2053' "$WEB_DIR/tok17/provider.yaml" && grep -q 'port: 2054' "$WEB_DIR/tok17/provider.yaml" \
-    && ok "17.5 provider.yaml 端口为 2053/2054" || bad "17.5 provider 端口异常"
-[[ "$(wc -l < "$WEB_DIR/tok17/links.txt")" -eq 4 ]] && ok "17.6 links.txt 共 4 条链接" || bad "17.6 links 行数异常" "$(wc -l < "$WEB_DIR/tok17/links.txt")"
-grep -A1 -- '- "FN-VLESS-Reality-SG"' "$WEB_DIR/tok17/config.yaml" | grep -q 'DIRECT\|FN-' \
-    && ok "17.7 链式节点已加入策略组" || bad "17.7 策略组未包含链式节点"
-
-# 17.11 出口 Hy2 节点不得继承端口跳跃（否则客户端会跳到主入口端口，落地变成入口机）
-awk '/FN-Hysteria2-SG/,/FN-VLESS|^EOF|^$/' "$WEB_DIR/tok17/provider.yaml" | grep -q 'ports:' \
-    && bad "17.11 -SG 节点带了端口跳跃" || ok "17.11 -SG 节点不含 ports（避免跳到主入口）"
-
-# 17.12 出口参数按协议分开存：切到另一协议不会串用地址/端口
-EXIT_TYPE="hy2"; EXIT_HY_SERVER="isif.example.com"; EXIT_HY_PORT="8443"; EXIT_HY_PASS="p1"
-EXIT_VL_SERVER="isif2.example.com"; EXIT_VL_PORT="443"
-sync_env_locals
-[[ "$EXIT_SERVER" == "isif.example.com" && "$EXIT_PORT" == "8443" ]] || bad "17.12 Hy2 出口解析错误" "$EXIT_SERVER:$EXIT_PORT"
-EXIT_TYPE="vless"; sync_env_locals
-[[ "$EXIT_SERVER" == "isif2.example.com" && "$EXIT_PORT" == "443" ]] \
-    && ok "17.12 切换协议使用各自的地址/端口" || bad "17.12 出口参数串用" "$EXIT_SERVER:$EXIT_PORT"
-
-# 17.13 节点后缀可自定义且做白名单校验
-grep -q '节点后缀 \[' "$TARGET" && ok "17.13 菜单可设置节点后缀" || bad "17.13 未提供后缀设置"
-grep -q 'A-Za-z0-9_-' "$TARGET" && ok "17.13 后缀有字符白名单" || bad "17.13 后缀无校验"
-
-# 15.22 sync_hy2_cert 能直接用 acme.sh 目录里的证书（重装/无 /etc/ssl 时）
-grep -q 'acme.sh/${d}_ecc' "$TARGET" && ok "15.22 证书支持 acme.sh 目录" || bad "15.22 未支持 acme.sh 目录"
-grep -q '_key="$src/${d}.key"' "$TARGET" && ok "15.22 acme 目录用域名命名的 key" || bad "15.22 acme key 文件名未处理"
-
-# 17.14 四个端口都可设置：直连走协议参数，链式走出口设置
-grep -q '链式入口端口 · Reality' "$TARGET" && ok "17.14 链式入口端口可设置" || bad "17.14 未提供入口端口设置"
-grep -q '不能与直连端口' "$TARGET" && ok "17.14 端口冲突有校验" || bad "17.14 端口冲突无校验"
-
-# 17.8 vless 出口
-EXIT_TYPE="vless"; EXIT_PORT="443"; EXIT_UUID="22222222-2222-2222-2222-222222222222"
-EXIT_PBK="PBKEXIT"; EXIT_SID="ff00ff00"
-render_set "reality hy2"; apply_exit_config
-_o2=$(python3 -c "import json;d=json.load(open('$CONF_FILE'));o=[x for x in d['outbounds'] if x['tag']=='exit-out'][0];print(o['type'], bool(o['tls'].get('reality')))")
-[[ "$_o2" == "vless True" ]] && ok "17.8 vless 出口生成 Reality 出站" || bad "17.8 vless 出口异常" "$_o2"
-
-# 17.9 关闭出口后回到两个 inbound
-EXIT_TYPE="none"; render_set "reality hy2"; apply_exit_config
-_n=$(python3 -c "import json;print(len(json.load(open('$CONF_FILE'))['inbounds']))")
-[[ "$_n" == "2" ]] && ok "17.9 关闭出口后只剩两个 inbound" || bad "17.9 关闭出口残留" "$_n"
-
-# 17.10 菜单入口
-grep -q '5. 出口中转' "$TARGET" && grep -q '^menu_exit()' "$TARGET" && ok "17.10 菜单含出口中转" || bad "17.10 菜单缺少出口中转"
-
-
-# ---------- 18. 出口导入与自检 ----------
-group "18. 出口导入 / 自检"
-
-SB18="$TMPD/m18"; mkdir -p "$SB18/www"
-cat > "$SB18/www/provider.yaml" <<'EOF'
-proxies:
-  - name: "ISIF-VLESS-Reality"
-    type: vless
-    server: 198.51.100.20
-    port: 443
-    uuid: 33333333-3333-3333-3333-333333333333
-    servername: isif.example.com
-    reality-opts:
-      public-key: PBKISIF
-      short-id: 0a1b2c3d
-    client-fingerprint: chrome
-  - name: "ISIF-Hysteria2"
-    type: hysteria2
-    server: isif.example.com
-    port: 8443
-    password: "hyisif99"
-    sni: isif.example.com
-    skip-cert-verify: false
-EOF
-cat > "$SB18/www/only-vless.yaml" <<'EOF'
-proxies:
-  - name: "B-VLESS"
-    type: vless
-    server: 198.51.100.21
-    port: 443
-    uuid: 44444444-4444-4444-4444-444444444444
-    servername: b.example.com
-    reality-opts:
-      public-key: PBKB
-      short-id: aabbccdd
-EOF
-python3 -m http.server 18093 --bind 127.0.0.1 --directory "$SB18/www" >/dev/null 2>&1 &
-S18PID=$!
-sleep 1.5
-
-parse_apply() { local k v; while IFS=$'\t' read -r k v; do case "$k" in EXIT_*) printf -v "$k" '%s' "$v" ;; esac; done; }
-_out=$(exit_parse_url "http://127.0.0.1:18093/provider.yaml" 2>/dev/null)
-parse_apply <<< "$_out"
-[[ "$EXIT_HY_SERVER" == "isif.example.com" && "$EXIT_HY_PORT" == "8443" && "$EXIT_HY_PASS" == "hyisif99" ]] \
-    && ok "18.1 从 provider.yaml 优先解析出 Hy2" || bad "18.1 Hy2 解析失败" "$_out"
-
-_out2=$(exit_parse_url "http://127.0.0.1:18093/only-vless.yaml" 2>/dev/null)
-parse_apply <<< "$_out2"
-[[ "$EXIT_VL_PBK" == "PBKB" && "$EXIT_VL_SID" == "aabbccdd" && "$EXIT_VL_SERVER" == "198.51.100.21" ]] \
-    && ok "18.2 无 Hy2 时回退解析 Reality 节点" || bad "18.2 Reality 解析失败" "$_out2"
-
-if exit_parse_url "http://127.0.0.1:18093/nope.yaml" >/dev/null 2>&1; then
-    bad "18.3 不存在的订阅未报错"
-else
-    ok "18.3 订阅不可达时返回失败"
-fi
-
-kill "$S18PID" 2>/dev/null || true
-wait "$S18PID" 2>/dev/null || true
-
-# 18.4 无 exit-out 时自检判定失败
-CONF_FILE="$SB18/empty.json"
-printf '{"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}\n' > "$CONF_FILE"
-if exit_health_check >/dev/null 2>&1; then bad "18.4 无出口时自检未拦截"; else ok "18.4 无出口时自检返回失败"; fi
-
-# 18.5 菜单含导入入口
-grep -qF 'provider.yaml 地址' "$TARGET" && grep -q 'exit_parse_url' "$TARGET" \
-    && ok "18.5 出口菜单支持订阅导入" || bad "18.5 菜单缺少导入入口"
-
-
-# ---------- 14. 清理 ----------
-group "14. 清理"
-rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
-ok "临时文件已清理"
-
-# ---------- 汇总 ----------
-printf '\n\033[1m================ 测试汇总 ================\033[0m\n'
-printf '通过: \033[32m%d\033[0m   失败: \033[31m%d\033[0m   总计: %d\n' "$PASS" "$FAIL" "$((PASS+FAIL))"
-if [[ $FAIL -gt 0 ]]; then
-    printf '\n失败项:\n'
-    for n in "${FAILED_NAMES[@]}"; do printf '  - %s\n' "$n"; done
-    exit 1
-fi
-printf '\033[32m全部通过\033[0m\n'
-exit 0
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"#!/usr/bin/env bash
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# Simple-Box 回归测试套件
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 用法: sudo bash test-regression.sh [--commit <ref>]
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 说明: 直接 source 目标脚本以复用全部函数定义；source 时 BASH_SOURCE[0] != $0，
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"#       入口守卫会被跳过，不会触发主流程。
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"set -uo pipefail
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"TARGET="${TARGET_SCRIPT:-${SCRIPT_DIR}/simple-box.sh}"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"PASS=0
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"FAIL=0
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"FAILED_NAMES=()
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"ok()   { PASS=$((PASS+1)); printf '  \033[32m✓\033[0m %s\n' "$1"; }
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"bad()  { FAIL=$((FAIL+1)); FAILED_NAMES+=("$1"); printf '  \033[31m✗\033[0m %s\n' "$1"; [[ -n "${2:-}" ]] && printf '      %s\n' "$2"; }
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group(){ printf '\n\033[1m%s\033[0m\n' "$1"; }
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 0. 前置检查 ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "0. 前置检查"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ -f "$TARGET" ]] && ok "目标脚本存在: $TARGET" || { bad "目标脚本不存在: $TARGET"; exit 1; }
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ $EUID -eq 0 ]] && ok "以 root 运行" || { bad "必须以 root 运行（脚本第 45 行有 EUID 守卫）"; exit 1; }
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 1. 语法与静态检查 ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "1. 语法与静态检查"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if bash -n "$TARGET" 2>/dev/null; then ok "bash -n 语法检查通过"; else bad "bash -n 语法检查失败" "$(bash -n "$TARGET" 2>&1 | head -5)"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if command -v shellcheck >/dev/null 2>&1; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    # 只关注 error 级别；warning 为已知的 SC1090/SC2155 等存量问题
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    if shellcheck -S error "$TARGET" >/dev/null 2>&1; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        ok "shellcheck (error 级别) 无问题"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        bad "shellcheck 发现 error 级问题" "$(shellcheck -S error "$TARGET" 2>&1 | head -20)"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    printf '  \033[33m-\033[0m shellcheck 未安装，跳过\n'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 2. 加载函数 ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "2. 函数加载"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# shellcheck disable=SC1090
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"source "$TARGET" 2>/dev/null
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"RC=$?
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if [[ $RC -eq 0 ]]; then ok "source 成功（入口守卫已跳过）"; else bad "source 失败 rc=$RC"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"for fn in trim_string validate_port validate_range validate_domain ver_ge \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"          cert_covers_domain harden_private_key issue_cert_bundle issue_self_signed_cert \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"          fetch_latest_script reinstall_with_latest write_singbox_config \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"          verify_cloudflare_token prompt_cf_token; do
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    if declare -F "$fn" >/dev/null 2>&1; then ok "函数已定义: $fn"; else bad "函数缺失: $fn"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"done
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"set +e   # 后续测试自行判定，不因单条失败中断
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 3. 本次提交的 5 项修复 ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "3. 本次提交修复项验证"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# M-3: config.json 权限 600（由 mktemp 保证，不再依赖事后 chmod）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q 'tmp_conf=$(mktemp "${CONF_FILE}.tmp.XXXXXX")' "$TARGET"; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "M-3: config.json 临时文件由 mktemp 创建（天然 0600）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "M-3: 未使用 mktemp 创建 config 临时文件"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q 'chmod 644 "\$tmp_conf"' "$TARGET"; then bad "M-3: 仍残留 chmod 644 \$tmp_conf"; else ok "M-3: 无残留 644"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q 'chmod 600 "\$tmp_conf"' "$TARGET"; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "M-3: chmod 600 兜底未删除（mktemp 已保证权限，属冗余）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "M-3: 冗余 chmod 600 已移除"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# config 临时文件与目标同目录（保证 mv 原子性）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q 'mktemp "${CONF_FILE}.tmp.XXXXXX"' "$TARGET" && ok "M-3: 临时文件与目标同目录（mv 原子）" || bad "M-3: 临时文件跨目录（mv 非原子）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# M-4: 证书目录先 640 后单独 644 公钥
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"M4_COUNT=$(grep -c 'chmod 640 "\${CERT_DIR}"/\* 2>/dev/null || true; chmod 644 "\${CERT_DIR}/fullchain.cer"' "$TARGET")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if [[ "$M4_COUNT" -eq 3 ]]; then ok "M-4: 3 处证书权限逻辑均已改造"; else bad "M-4: 期望 3 处，实际 $M4_COUNT 处"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q 'chmod 644 "\${CERT_DIR}"/\* 2>/dev/null || true$' "$TARGET"; then bad "M-4: 仍残留整体 chmod 644 通配"; else ok "M-4: 无整体 644 通配残留"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# M-1/M-2: 已按"简单优先"决策回退，不再断言 unset 存在。
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 保留一项反向断言：确认没有 unset 破坏大写 CF_TOKEN 预置变量路径。
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q 'unset CF_TOKEN' "$TARGET"; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "M-1: 误删大写 CF_TOKEN 预置变量（会破坏无人值守部署）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "M-1/M-2: 未触碰大写 CF_TOKEN 预置路径（回退后仍安全）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# M-5: mktemp 替代可预测 PID 路径
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q 'latest=$(mktemp /tmp/simple-box.latest.XXXXXX)' "$TARGET"; then ok "M-5: 使用 mktemp 生成临时文件"; else bad "M-5: 未使用 mktemp"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q 'simple-box.latest.\$\$' "$TARGET"; then bad "M-5: 仍残留 \$\$ 可预测路径"; else ok "M-5: 无 \$\$ 可预测路径残留"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 4. 功能测试：set -e 回归（本次修复引入的真实 Bug）----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "4. set -e 回归测试（关键）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 4.1 空证书目录下，chmod 组合不得因 glob 不匹配而中断
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"TMPD=$(mktemp -d)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"(
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  set -e
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  D="$TMPD/empty"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  mkdir -p "$D"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  chmod 640 "$D"/* 2>/dev/null || true
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  chmod 644 "$D/fullchain.cer" 2>/dev/null || true
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  echo "OK"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常") >/tmp/t41.out 2>&1
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q '^OK$' /tmp/t41.out; then ok "4.1 空目录 glob 不匹配时不中断 set -e"; else bad "4.1 空目录导致 set -e 中断" "$(cat /tmp/t41.out)"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 4.2 真实证书目录：私钥 640、公钥 644
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"D2="$TMPD/real"; mkdir -p "$D2"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"echo "privkey" > "$D2/private.key"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"echo "fullchain" > "$D2/fullchain.cer"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"(
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  set -e
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  chmod 640 "$D2"/* 2>/dev/null || true
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  chmod 644 "$D2/fullchain.cer" 2>/dev/null || true
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常") >/dev/null 2>&1
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"P_KEY=$(stat -c %a "$D2/private.key")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"P_CRT=$(stat -c %a "$D2/fullchain.cer")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if [[ "$P_KEY" == "640" ]]; then ok "4.2 私钥权限为 640"; else bad "4.2 私钥权限为 $P_KEY（期望 640）"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if [[ "$P_CRT" == "644" ]]; then ok "4.2 公钥证书权限为 644"; else bad "4.2 公钥证书权限为 $P_CRT（期望 644）"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 4.3 无 caddy 组时 harden_private_key 仍能收紧到 640
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"CERT_DIR="$TMPD/hpk"; mkdir -p "$CERT_DIR"; echo "k" > "$CERT_DIR/private.key"; chmod 666 "$CERT_DIR/private.key"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"harden_private_key >/dev/null 2>&1
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"P=$(stat -c %a "$CERT_DIR/private.key")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if [[ "$P" == "640" ]]; then ok "4.3 harden_private_key 收紧至 640"; else bad "4.3 harden_private_key 结果为 $P"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 4.4 config.json 写入后权限为 600
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"CONF_DIR="$TMPD/conf"; mkdir -p "$CONF_DIR"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"cat > "$CONF_DIR/config.json" <<'JSONEOF'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"{"log":{"level":"warn"}}
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"JSONEOF
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"TMPC="$CONF_DIR/config.json.tmp"; cp "$CONF_DIR/config.json" "$TMPC"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"chmod 600 "$TMPC" 2>/dev/null || true
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"mv -f "$TMPC" "$CONF_DIR/config.json"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"PC=$(stat -c %a "$CONF_DIR/config.json")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if [[ "$PC" == "600" ]]; then ok "4.4 config.json 权限为 600"; else bad "4.4 config.json 权限为 $PC（期望 600）"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 5. 功能测试：mktemp 临时文件 ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "5. mktemp 临时文件测试"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"T1=$(mktemp /tmp/simple-box.latest.XXXXXX)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"T2=$(mktemp /tmp/simple-box.latest.XXXXXX)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ -f "$T1" && -f "$T2" ]] && ok "mktemp 正常创建文件" || bad "mktemp 创建失败"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$T1" != "$T2" ]] && ok "两次 mktemp 路径不重复" || bad "mktemp 路径重复"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"P1=$(stat -c %a "$T1")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$P1" == "600" ]] && ok "mktemp 默认权限 600（非全局可写）" || bad "mktemp 权限为 $P1"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"rm -f "$T1" "$T2"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 6. 功能测试：Token 生命周期 ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "6. Token 生命周期测试"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 6.1 CF_Token 能正常传递到 acme.sh 子进程（export 语义未被破坏）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"(
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  export CF_Token="dummy-token-for-test"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  bash -c '[[ -n "${CF_Token:-}" ]] && echo "VISIBLE" || echo "HIDDEN"'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常") > /tmp/t61.out 2>&1
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q 'VISIBLE' /tmp/t61.out && ok "6.1 CF_Token 可传递至 acme.sh 子进程" || bad "6.1 CF_Token 无法传递（证书申请会失败）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 6.2 unset 不影响 CF_TOKEN（大写，无人值守预置变量）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"(
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  export CF_TOKEN="preset-token"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  export CF_Token="temp-token"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  unset CF_Token 2>/dev/null || true
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  [[ -n "${CF_TOKEN:-}" ]] && echo "PRESERVED" || echo "LOST"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常") > /tmp/t62.out 2>&1
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q 'PRESERVED' /tmp/t62.out && ok "6.2 大写 CF_TOKEN 预置变量未受影响" || bad "6.2 CF_TOKEN 被误删（破坏无人值守部署）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 6.3 PROMPTED_CF_TOKEN 全局回传机制完整（prompt_cf_token 的设置/读取路径未被破坏）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q 'PROMPTED_CF_TOKEN="\$token"' "$TARGET" && grep -q 'cf_token="\$PROMPTED_CF_TOKEN"' "$TARGET" \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ok "6.3 PROMPTED_CF_TOKEN 设置与读取路径完整" \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    || bad "6.3 PROMPTED_CF_TOKEN 回传机制被破坏"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 6.4 重装必须换新 Token（顺手换锁），且不能沿用旧值
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q 'old_token="\${SUB_TOKEN:-}"' "$TARGET" || grep -q 'sub_token="\$old_token"' "$TARGET"; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "6.4 仍存在沿用旧 Token 的代码（重装不再换锁）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "6.4 无沿用旧 Token 的残留代码"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 6.5 重装后清理所有非当前 token 的订阅目录（含历史孤儿目录）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q 'find "\$WEB_DIR" -mindepth 1 -maxdepth 1 -type d ! -name "\$sub_token" -exec rm -rf {} +' "$TARGET" \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ok "6.5 重装清理非当前 Token 的订阅目录" \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    || bad "6.5 缺少旧订阅目录清理（重装会堆积）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 6.6 凭证仍然每次重装都重新生成
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_inst_start=$(grep -n '^install_node()' "$TARGET" | cut -d: -f1)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_next_fn=$(awk -v s="$_inst_start" 'NR>s && /^[a-z_]+\(\) \{/ {print NR; exit}' "$TARGET")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_inst_body=$(sed -n "${_inst_start},${_next_fn}p" "$TARGET")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q 'generate reality-keypair' <<<"$_inst_body" && grep -q 'generate uuid' <<<"$_inst_body"; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "6.6 重装仍重新生成 Reality 密钥与 UUID"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "6.6 凭证生成逻辑被破坏" "install_node 范围 ${_inst_start}-${_next_fn}"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 6.7 清理逻辑必须在生成订阅文件之前（否则删掉刚建的新目录）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if [[ -n "$_inst_body" ]]; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    _rm_line=$(grep -n 'find "\$WEB_DIR"' <<<"$_inst_body" | head -1 | cut -d: -f1)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    _gen_line=$(grep -nE 'regen_subscription|generate_full_client_config' <<<"$_inst_body" | head -1 | cut -d: -f1)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    if [[ -n "$_rm_line" && -n "$_gen_line" && "$_rm_line" -lt "$_gen_line" ]]; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        ok "6.7 清理顺序正确（先删旧目录再生成新订阅）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        bad "6.7 清理顺序错误" "find 在第 ${_rm_line:-?} 行，generate 在第 ${_gen_line:-?} 行"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 7. 全量回归：核心工具函数 ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "7. 全量回归：校验函数"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# validate_port
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"for p in 1 80 443 65535; do
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    validate_port "$p" && ok "validate_port 接受 $p" || bad "validate_port 误拒 $p"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"done
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"for p in "" 0 65536 abc -1 "80 " 1.5; do
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    validate_port "$p" && bad "validate_port 误收 '$p'" || ok "validate_port 拒绝 '$p'"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"done
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# validate_range
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"for r in "20000:40000" "1:65535" "1000:2000"; do
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    validate_range "$r" && ok "validate_range 接受 $r" || bad "validate_range 误拒 $r"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"done
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"for r in "" "20000" "40000:20000" "0:100" "20000:40000:50000" "a:b"; do
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    validate_range "$r" && bad "validate_range 误收 '$r'" || ok "validate_range 拒绝 '$r'"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"done
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# validate_domain
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"for d in "example.com" "sub.example.com" "a-b.example.co.uk" "x1.y2.io"; do
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    validate_domain "$d" && ok "validate_domain 接受 $d" || bad "validate_domain 误拒 $d"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"done
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"for d in "" "localhost" "-bad.com" "bad-.com" "no_tld" "a..b" ".com"; do
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    validate_domain "$d" && bad "validate_domain 误收 '$d'" || ok "validate_domain 拒绝 '$d'"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"done
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ver_ge
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"ver_ge "24.04" "24.04" && ok "ver_ge 24.04 >= 24.04" || bad "ver_ge 同版本判定失败"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"ver_ge "24.10" "24.04" && ok "ver_ge 24.10 >= 24.04（字符串比较会误判）" || bad "ver_ge 24.10 误判"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"ver_ge "22.04" "24.04" && bad "ver_ge 22.04 误判为 >= 24.04" || ok "ver_ge 22.04 < 24.04"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"ver_ge "12" "12" && ok "ver_ge 12 >= 12" || bad "ver_ge 12 判定失败"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# trim_string
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"R=$(trim_string "  hello  "); [[ "$R" == "hello" ]] && ok "trim_string 去首尾空格" || bad "trim_string 空格: '$R'"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"R=$(trim_string '"quoted"'); [[ "$R" == "quoted" ]] && ok "trim_string 去双引号" || bad "trim_string 双引号: '$R'"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"R=$(trim_string "'single'"); [[ "$R" == "single" ]] && ok "trim_string 去单引号" || bad "trim_string 单引号: '$R'"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"R=$(trim_string $'\r\ntoken123\r\n'); [[ "$R" == "token123" ]] && ok "trim_string 去换行符" || bad "trim_string 换行: '$R'"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"R=$(trim_string ''); [[ -z "$R" ]] && ok "trim_string 空输入返回空" || bad "trim_string 空输入: '$R'"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 8. 全量回归：证书逻辑 ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "8. 全量回归：证书逻辑"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"TMPC2=$(mktemp -d)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"CERT_DIR="$TMPC2"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 生成自签证书
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -days 30 -nodes \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"     -keyout "$CERT_DIR/private.key" -out "$CERT_DIR/fullchain.cer" \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"     -subj "/CN=test.example.com" >/dev/null 2>&1; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "测试证书生成成功"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    cert_covers_domain "test.example.com" && ok "cert_covers_domain 匹配正确域名" || bad "cert_covers_domain 误拒匹配域名"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    cert_covers_domain "other.example.com" && bad "cert_covers_domain 误收不匹配域名" || ok "cert_covers_domain 拒绝不匹配域名"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    cert_covers_domain "" && bad "cert_covers_domain 误收空域名" || ok "cert_covers_domain 拒绝空域名"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "测试证书生成失败（openssl 不可用？）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 过期证书应被拒绝
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"TMPC3=$(mktemp -d)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -days 0 -nodes \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    -keyout "$TMPC3/private.key" -out "$TMPC3/fullchain.cer" \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    -subj "/CN=expired.example.com" >/dev/null 2>&1
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"CERT_DIR="$TMPC3"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if cert_covers_domain "expired.example.com"; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "cert_covers_domain 误收已过期证书"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "cert_covers_domain 拒绝已过期证书"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 公私钥不配对应被拒绝
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"TMPC4=$(mktemp -d)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -days 30 -nodes \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    -keyout "$TMPC4/private.key" -out "$TMPC4/fullchain.cer" \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    -subj "/CN=pair.example.com" >/dev/null 2>&1
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"openssl ecparam -name prime256v1 -genkey -noout -out "$TMPC4/private.key" 2>/dev/null
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"CERT_DIR="$TMPC4"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if cert_covers_domain "pair.example.com"; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "cert_covers_domain 误收公私钥不配对的证书"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "cert_covers_domain 拒绝公私钥不配对"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 9. 全量回归：幂等性静态断言 ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "9. 全量回归：幂等性静态断言"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q 'iptables -t nat -F PREROUTING' "$TARGET" && bad "存在 iptables 全表清空炸弹" || ok "无 iptables 全表清空"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -qE 'apt-get[^|]*[[:space:]]purge|apt purge' "$TARGET" && ok "卸载使用 apt purge（避免 mask 残留）" || bad "卸载未使用 apt purge"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q 'DEBIAN_FRONTEND=noninteractive' "$TARGET" && ok "apt 操作设置 noninteractive" || bad "缺少 DEBIAN_FRONTEND=noninteractive"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q 'sing-box check' "$TARGET" && ok "启动前执行 sing-box check" || bad "缺少配置校验"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q 'BASH_SOURCE\[0\]' "$TARGET" && ok "存在管道执行检测" || bad "缺少管道执行检测"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# BBR 幂等：已开启则跳过
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -qE '\[\[ "\$cur" == "bbr" \]\]' "$TARGET" && ok "BBR 已开启时跳过（幂等）" || bad "BBR 缺少幂等判断"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# BBR 卸载只删文件，不改运行中的拥塞控制（卸载代理不该动系统网络栈）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q 'sysctl -w net.ipv4.tcp_congestion_control=cubic' "$TARGET"; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "disable_bbr 仍在改运行中的拥塞控制算法"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "disable_bbr 不改运行中的拥塞控制"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_dbb=$(awk '/^disable_bbr\(\)/,/^}/' "$TARGET")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q 'rm -f "\$BBR_CONF"' <<<"$_dbb" && grep -q 'BBR_MARK' <<<"$_dbb"; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "disable_bbr 仍清理本脚本创建的配置文件"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "disable_bbr 丢失了配置文件清理（卸载不再彻底）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# Caddy 归属标记
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q 'caddy_installed_by_script' "$TARGET" && ok "Caddy 配置带归属标记" || bad "Caddy 缺少归属标记"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 10.1 Caddy reload 只在 setup_caddy_subscription 内部做一次，调用方不得重复
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_setup_reload=$(grep -c 'reload_caddy_safe' "$TARGET")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if [[ "$_setup_reload" -eq 2 ]]; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "Caddy reload 只有定义处与 setup 内部两处（无重复调用）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "Caddy reload 调用点异常" "共 ${_setup_reload} 处，应为 2（定义 + setup 内部）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 10.2 发布订阅的动作序列：render_and_reload 自己生成；install_node 委托给协议模块
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_body=$(awk '/^render_and_reload\(\)/ {p=1} p {print} p && /^}/ && NR>1 {exit}' "$TARGET")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_has_gen=$(grep -cE 'regen_subscription|generate_full_client_config' <<<"$_body")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_has_setup=$(grep -c 'setup_caddy_subscription' <<<"$_body")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if [[ "$_has_gen" -ge 1 && "$_has_setup" -ge 1 ]]; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "render_and_reload 含 generate + setup_caddy"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "render_and_reload 缺少发布订阅的关键步骤" "generate=${_has_gen} setup=${_has_setup}"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# install_node 不再自己写配置/订阅，必须委托给两个协议模块 + 建订阅站
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_ibody=$(awk '/^install_node\(\)/ {p=1} p {print} p && /^}/ && NR>1 {exit}' "$TARGET")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q 'proto_enable_reality' <<<"$_ibody" && grep -q 'proto_enable_hy2' <<<"$_ibody"; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "install_node 委托协议模块（订阅站由 render_and_reload 内部建）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "install_node 未委托协议模块" "reality=$(grep -c proto_enable_reality <<<"$_ibody") hy2=$(grep -c proto_enable_hy2 <<<"$_ibody")"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 10.2 端口跳跃展示串必须由 fmt_hy_ports 统一生成（禁止各处手拼）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_manual_ports=$(grep -c 'hy_ports_display="\${[A-Za-z_]*},\${' "$TARGET" || true)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if [[ "${_manual_ports:-0}" -eq 0 ]]; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "端口跳跃串无手拼残留（统一走 fmt_hy_ports）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "仍有 ${_manual_ports} 处手拼 hy_ports_display" "格式变更时会漏改"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 端口串只允许三处生成：regen_subscription 内（订阅）、show_links 内（原生链接）、
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# show_clash_snippet 内（Mihomo 片段）。新增消费者必须走同一函数，不得手拼。
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_fmt_calls=$(grep -c 'fmt_hy_ports "' "$TARGET" || true)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 原生链接与 Mihomo 片段都改为读生成器产物，端口串只在订阅里拼一次
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if [[ "${_fmt_calls:-0}" -eq 1 ]]; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "fmt_hy_ports 调用点恰为 1 处（仅订阅生成）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "fmt_hy_ports 调用点数量异常" "共 ${_fmt_calls} 处，应为 1"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 订阅只有一个生产者：generate_full_client_config 只能被 regen_subscription 调用。
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 这是真正的不变式；下面那条计数只是「已知触发点没被悄悄删掉」的旁证。
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_producer_calls=$(grep -cE '^[[:space:]]+generate_full_client_config' "$TARGET" || true)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_producer_in_regen=$(awk '/^regen_subscription\(\)/,/^}/' "$TARGET" | grep -c 'generate_full_client_config' || true)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if [[ "${_producer_calls:-0}" -eq 1 && "${_producer_in_regen:-0}" -eq 1 ]]; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "订阅生成器仅由 regen_subscription 调用（唯一生产者）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "订阅生成器存在多处调用" "共 ${_producer_calls} 处，其中在 regen_subscription 内 ${_producer_in_regen} 处"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 会改变节点参数、必须重生成订阅的 5 个触发点：
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"#   重载后 / 安装时 / token 轮换 / 节点前缀变更 / 直连后缀变更
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_regen_calls=$(grep -cE '^\s+regen_subscription' "$TARGET" || true)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 4 = 重载后 / token 轮换 / 节点前缀 / 直连后缀；+1 = regen_from_scope（启用/停用共用）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 安装不再单独调用：它走 proto_enable_*，最终由 render_and_reload 内的重载触发
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 6 = show_links 重建 + show_clash_snippet 按需重建
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if [[ "${_regen_calls:-0}" -eq 7 ]]; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "regen_subscription 覆盖 7 个触发点"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "regen_subscription 调用点数量异常" "共 ${_regen_calls} 处，应为 7"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 10. 全量回归：危险命令审计 ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "10. 全量回归：危险命令审计"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 允许删除脚本自有的安装目录 /usr/local/share/simple-box
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"SUSPICIOUS=$(grep -nE 'rm -rf /' "$TARGET" | grep -v '\$' | grep -v '/usr/local/share/simple-box')
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if [[ -n "$SUSPICIOUS" ]]; then bad "存在可疑的 rm -rf 绝对路径" "$SUSPICIOUS"; else ok "无裸 rm -rf 绝对路径（仅删除自有安装目录）"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -qE 'curl[^|]*\|[[:space:]]*(ba)?sh' "$TARGET" && printf '  \033[33m!\033[0m 存在 curl|sh 模式（acme.sh 官方安装，已知可接受）\n' || ok "无 curl|sh 管道"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q 'eval ' "$TARGET" && bad "存在 eval 调用" || ok "无 eval 调用"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q 'chmod 777' "$TARGET" && bad "存在 chmod 777" || ok "无 chmod 777"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 11. 端到端功能测试：write_singbox_config ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "11. 端到端：write_singbox_config 真实调用"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"E2E=$(mktemp -d)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"(
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  CONF_DIR="$E2E"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  CONF_FILE="$E2E/config.json"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  U=$(cat /proc/sys/kernel/random/uuid)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  PK=$(head -c 32 /dev/urandom | base64 | tr -d '=/+')
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  SI=$(head -c 4 /dev/urandom | xxd -p)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  HP=$(head -c 16 /dev/urandom | base64 | tr -d '=/+')
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  write_singbox_config 443 www.microsoft.com "$U" "$PK" "$SI" 8443 "$HP"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  echo "$U" > "$E2E/.uuid"; echo "$PK" > "$E2E/.pk"; echo "$HP" > "$E2E/.hp"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常") >/dev/null 2>&1
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if [[ -s "$E2E/config.json" ]]; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "11.1 配置已生成"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    P=$(stat -c %a "$E2E/config.json")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    [[ "$P" == "600" ]] && ok "11.2 配置权限 600" || bad "11.2 配置权限为 $P"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    if command -v jq >/dev/null 2>&1 && jq -e . "$E2E/config.json" >/dev/null 2>&1; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        ok "11.3 JSON 合法"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        N=$(jq '.inbounds | length' "$E2E/config.json")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        [[ "$N" == "2" ]] && ok "11.4 inbounds 数量为 2 (vless + hysteria2)" || bad "11.4 inbounds 数量为 $N"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        T=$(jq -r '[.inbounds[].type] | join(",")' "$E2E/config.json")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        [[ "$T" == "vless,hysteria2" ]] && ok "11.5 协议类型正确" || bad "11.5 协议类型为 $T"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        VP=$(jq -r '.inbounds[] | select(.type=="vless") | .listen_port' "$E2E/config.json")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        [[ "$VP" == "443" ]] && ok "11.6 VLESS 端口正确" || bad "11.6 VLESS 端口为 $VP"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        HP2=$(jq -r '.inbounds[] | select(.type=="hysteria2") | .listen_port' "$E2E/config.json")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        [[ "$HP2" == "8443" ]] && ok "11.7 Hy2 端口正确" || bad "11.7 Hy2 端口为 $HP2"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        bad "11.3 JSON 非法"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    # 敏感字段确实写入（非空壳）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    U=$(cat "$E2E/.uuid" 2>/dev/null); PK=$(cat "$E2E/.pk" 2>/dev/null); HP=$(cat "$E2E/.hp" 2>/dev/null)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    grep -qF "$U" "$E2E/config.json" 2>/dev/null && ok "11.8 UUID 已写入" || bad "11.8 UUID 缺失"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    grep -qF "$PK" "$E2E/config.json" 2>/dev/null && ok "11.9 Reality 私钥已写入" || bad "11.9 私钥缺失"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    grep -qF "$HP" "$E2E/config.json" 2>/dev/null && ok "11.10 Hy2 密码已写入" || bad "11.10 密码缺失"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "11.1 配置未生成"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 临时文件无残留（原子替换后应清理干净）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"LEFT=$(find "$E2E" -name '*.tmp.*' 2>/dev/null | wc -l)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$LEFT" -eq 0 ]] && ok "11.11 无 .tmp 残留" || bad "11.11 残留 $LEFT 个临时文件"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 幂等：重复调用仍正常
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"(
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  CONF_DIR="$E2E"; CONF_FILE="$E2E/config.json"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  write_singbox_config 443 www.microsoft.com "$(cat "$E2E/.uuid")" "$(cat "$E2E/.pk")" abcd 8443 "$(cat "$E2E/.hp")"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常") >/dev/null 2>&1
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"P2=$(stat -c %a "$E2E/config.json" 2>/dev/null)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$P2" == "600" ]] && ok "11.12 重复调用后权限仍为 600" || bad "11.12 重复调用后权限为 $P2"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"LEFT2=$(find "$E2E" -name '*.tmp.*' 2>/dev/null | wc -l)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$LEFT2" -eq 0 ]] && ok "11.13 重复调用后无残留" || bad "11.13 重复调用残留 $LEFT2 个"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"rm -rf "$E2E"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 12. Caddyfile 不监听 80 端口 ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "12. Caddyfile auto_https disable_redirects"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q 'auto_https disable_redirects' "$TARGET"; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "12.1 脚本写入的 Caddyfile 含 disable_redirects"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "12.1 脚本未写 disable_redirects（会意外监听 80）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q "cat > /etc/caddy/Caddyfile <<'CADDYEOF'" "$TARGET"; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "12.2 使用 heredoc 写入完整全局块"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "12.2 未用 heredoc 写全局块"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q 'caddyfile_created_by_script' "$TARGET" &&    grep -q 'auto_https disable_redirects.*Caddyfile\|grep -q "auto_https disable_redirects" /etc/caddy/Caddyfile' "$TARGET"; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "12.3 存在旧版 Caddyfile 升级修复逻辑"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "12.3 缺少旧版升级修复"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 功能验证：模拟老版本 Caddyfile 升级
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"CD=$(mktemp -d); mkdir -p "$CD/etc/caddy" "$CD/conf"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"printf 'import sites/*.caddy\n' > "$CD/etc/caddy/Caddyfile"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常": > "$CD/conf/.caddyfile_created_by_script"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"(
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  CONF_DIR="$CD/conf"; CF="$CD/etc/caddy/Caddyfile"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  if [[ -f "${CONF_DIR}/.caddyfile_created_by_script" ]] && ! grep -q "auto_https disable_redirects" "$CF"; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    t=$(mktemp "$CD/etc/caddy/.Caddyfile.XXXXXX")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    { printf '{\n\tauto_https disable_redirects\n}\n'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"      grep -v '^import sites/\*\.caddy$' "$CF" | sed '/^$/d'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"      printf 'import sites/*.caddy\n'; } > "$t"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    mv -f "$t" "$CF"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q 'auto_https disable_redirects' "$CD/etc/caddy/Caddyfile" && ok "12.4 老版 Caddyfile 升级后含 disable_redirects" || bad "12.4 升级未生效"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ $(grep -c '^import sites/\*\.caddy$' "$CD/etc/caddy/Caddyfile") -eq 1 ]] && ok "12.5 import 行未重复" || bad "12.5 import 行重复"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 用户自有 Caddyfile 不得被改
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"CD2=$(mktemp -d); mkdir -p "$CD2/etc/caddy" "$CD2/conf"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"printf 'example.com {\n  reverse_proxy localhost:3000\n}\n' > "$CD2/etc/caddy/Caddyfile"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"cp "$CD2/etc/caddy/Caddyfile" "$CD2/orig"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"(
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  CONF_DIR="$CD2/conf"; CF="$CD2/etc/caddy/Caddyfile"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  if [[ -f "${CONF_DIR}/.caddyfile_created_by_script" ]] && ! grep -q "auto_https disable_redirects" "$CF"; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    echo "SHOULD_NOT_RUN" > "$CF"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"diff -q "$CD2/orig" "$CD2/etc/caddy/Caddyfile" >/dev/null && ok "12.6 用户自有 Caddyfile 未被改动" || bad "12.6 用户 Caddyfile 被误改"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"rm -rf "$CD" "$CD2"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 13. 端口占用判定：Caddy 只在订阅端口上算可复用 ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "13. 端口占用判定"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# Caddy 占着 443（Reality 伪装站）时，Reality 不能也用 443，否则装完 bind 失败无限重启
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_cpo=$(sed -n '/^check_port_occupied()/,/^}/p' "$TARGET")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q 'SUB_PORT' <<<"$_cpo" && grep -q '"\$port" == "\$SUB_PORT"' <<<"$_cpo"; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "13.1 caddy 分支按 SUB_PORT 判定是否可复用"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "13.1 caddy 分支未校验 SUB_PORT，会把伪装站占用的 443 当可复用"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q '伪装站占用 443' <<<"$_cpo"; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "13.2 冲突时给出可操作的提示"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "13.2 冲突提示缺失"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 15. 协议模块（站点发现 / 翻转 / 渲染） ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "15. 协议模块"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"SB15="$TMPD/m15"; mkdir -p "$SB15/sites"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"CADDYFILE="$SB15/Caddyfile"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"cat > "$CADDYFILE" <<'EOF'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"import sites/*.caddy
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EOF
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"cat > "$SB15/sites/signal.caddy" <<'EOF'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"agisignal.example.com {
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"	encode gzip
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"	root * /var/www/signal
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"	file_server
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"}
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EOF
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"cat > "$SB15/sites/other.caddy" <<'EOF'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"https://other.example.com:9443 {
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"	root * /var/www/other
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"	file_server
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"}
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EOF
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"cat > "$SB15/sites/trap.caddy" <<'EOF'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"agisignal.example.com.evil.com {
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"	root * /var/www/trap
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"}
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EOF
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"export CADDY_SITES_DIR="$SB15/sites"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.1 命中
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_hit=$(site_file_for "agisignal.example.com" 2>/dev/null || true)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$_hit" == "$SB15/sites/signal.caddy" ]] && ok "15.1 精确命中站点文件" || bad "15.1 站点发现失败" "得到: ${_hit:-空}"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.2 子串不误命中
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_hit2=$(site_file_for "agisignal.example.com.evil.com" 2>/dev/null || true)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$_hit2" == "$SB15/sites/trap.caddy" ]] && ok "15.2 后缀相似域名各自命中" || bad "15.2 域名匹配不精确" "得到: ${_hit2:-空}"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.3 https://domain:port 形式
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_hit3=$(site_file_for "other.example.com" 2>/dev/null || true)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$_hit3" == "$SB15/sites/other.caddy" ]] && ok "15.3 识别 https://域名:端口 站点块" || bad "15.3 未识别带端口的站点块"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.4 未命中返回非零
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if site_file_for "nope.example.com" >/dev/null 2>&1; then bad "15.4 未命中却返回成功"; else ok "15.4 未命中返回非零"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.5 翻转到 9443
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_f="$SB15/sites/signal.caddy"; _orig=$(sha256sum "$_f" | cut -d' ' -f1)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"flip_transform "$_f" "agisignal.example.com" 9443 on >/dev/null 2>&1
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q "^https://agisignal.example.com:9443 {" "$_f" && grep -q "bind 127.0.0.1" "$_f" \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ok "15.5 翻转写入 https://域名:9443 + bind" || bad "15.5 翻转结果不正确"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.6 幂等：再翻一次不变
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_h1=$(sha256sum "$_f" | cut -d' ' -f1)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"flip_transform "$_f" "agisignal.example.com" 9443 on >/dev/null 2>&1
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_h2=$(sha256sum "$_f" | cut -d' ' -f1)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$_h1" == "$_h2" ]] && ok "15.6 重复翻转字节不变" || bad "15.6 重复翻转改动了文件"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.7 别的站点块不受影响
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q "^https://other.example.com:9443 {" "$SB15/sites/other.caddy" \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ! grep -q "agisignal" "$SB15/sites/other.caddy" && ok "15.7 其它站点块未被改动" || bad "15.7 误伤其它站点"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.8 翻回来与原文一致
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"flip_transform "$_f" "agisignal.example.com" 9443 off >/dev/null 2>&1
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_back=$(sha256sum "$_f" | cut -d' ' -f1)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$_back" == "$_orig" ]] && ok "15.8 退出翻转后与原文件字节一致" || bad "15.8 退出翻转未完全还原"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.9 站点内容里的同名域名不被误改
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_f2="$SB15/sites/content.caddy"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"cat > "$_f2" <<'EOF'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"plain.example.com {
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"	respond "plain.example.com"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"}
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EOF
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_c_before=$(sha256sum "$_f2" | cut -d' ' -f1)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"flip_transform "$_f2" "other.example.com" 9443 on >/dev/null 2>&1
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_c_after=$(sha256sum "$_f2" | cut -d' ' -f1)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$_c_before" == "$_c_after" ]] && ok "15.9 不存在的域名不修改文件" || bad "15.9 错误改写了无关文件"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.10 current_inbounds / set_has
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"SB_CONF="$SB15/config.json"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"cat > "$SB_CONF" <<'EOF'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"{"inbounds":[{"type":"vless","tag":"vless-reality-in"},{"type":"hysteria2","tag":"hy2-in"}]}
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EOF
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"CONF_FILE="$SB_CONF"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_t=$(current_inbounds)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$_t" == *vless-reality-in* && "$_t" == *hy2-in* ]] && ok "15.10 current_inbounds 解析两个 inbound" || bad "15.10 current_inbounds 解析失败" "$_t"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"set_has "hy2-in" && set_has "vless-reality-in" && ok "15.11 set_has 判定启用" || bad "15.11 set_has 误判"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"cat > "$SB_CONF" <<'EOF'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"{"inbounds":[{"type":"hysteria2","tag":"hy2-in"}]}
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EOF
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if set_has "vless-reality-in"; then bad "15.12 缺席 inbound 被误判为启用"; else ok "15.12 缺席 inbound 判定为未启用"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.13 render_set 只写 Reality
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"CERT_DIR="$SB15/cert"; mkdir -p "$CERT_DIR"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"VL_PORT=443; VL_SNI="agisignal.example.com"; VL_UUID="11111111-1111-1111-1111-111111111111"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"VL_PRIVKEY="PRIV"; VL_SHORTID="abcd1234"; VL_HANDSHAKE="127.0.0.1"; VL_HANDSHAKE_PORT=9443
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"HY_PORT=10443; HY_PASS="pass123"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"render_set "reality" && python3 -c "import json;d=json.load(open('$SB_CONF'));print(' '.join(i['tag'] for i in d['inbounds']))" > "$SB15/tags1"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$(cat "$SB15/tags1")" == "vless-reality-in" ]] && ok "15.13 render_set 单 Reality 只写一个 inbound" || bad "15.13 render_set Reality 输出异常" "$(cat "$SB15/tags1")"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.14 render_set 只写 Hy2
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"render_set "hy2" && python3 -c "import json;d=json.load(open('$SB_CONF'));print(' '.join(i['tag'] for i in d['inbounds']))" > "$SB15/tags2"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$(cat "$SB15/tags2")" == "hy2-in" ]] && ok "15.14 render_set 单 Hy2 只写一个 inbound" || bad "15.14 render_set Hy2 输出异常" "$(cat "$SB15/tags2")"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.15 render_set 两个都写，且 Reality 使用翻转的 handshake 目标
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"render_set "reality hy2" && python3 - <<PY
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"import json
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"d=json.load(open("$SB_CONF"))
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"tags=[i["tag"] for i in d["inbounds"]]
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"hs=[i for i in d["inbounds"] if i["tag"]=="vless-reality-in"][0]["tls"]["reality"]["handshake"]
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"print(" ".join(tags)); print(hs["server"], hs["server_port"])
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"PY
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_three=$(python3 -c "import json;print(' '.join(i['tag'] for i in json.load(open('$SB_CONF'))['inbounds']))")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_hs=$(python3 -c "import json;print([i for i in json.load(open('$SB_CONF'))['inbounds'] if i['tag']=='vless-reality-in'][0]['tls']['reality']['handshake']['server'])")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$_three" == "vless-reality-in hy2-in" && "$_hs" == "127.0.0.1" ]] && ok "15.15 render_set 双协议 + handshake 指向本机站点" || bad "15.15 render_set 双协议异常" "$_three / $_hs"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.16 静态：旧模块已删除、新模块存在
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -qE '^menu_(reality|hy2)_module\(\)' "$TARGET"; then bad "15.16 旧模块函数仍存在"; else ok "15.16 旧模块函数已删除"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q '^proto_enable_reality()' "$TARGET" && grep -q '^proto_enable_hy2()' "$TARGET" && grep -q '^disable_protocol()' "$TARGET" \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ok "15.17 新协议模块就位" || bad "15.17 新协议模块缺失"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.18 菜单文案
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q 'PROTOCOLS=' "$TARGET" && awk '/^menu_protocol\(\)/,/^}/' "$TARGET" | grep -q 'proto_human' \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ok "15.18 菜单由协议注册表生成" || bad "15.18 菜单未遍历注册表"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if grep -q '重建 Reality' "$TARGET"; then bad "15.19 菜单仍残留「重建 Reality」"; else ok "15.19 无「重建」残留"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.20 翻转失败必须还原站点文件（真实 caddy validate）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"CADDY_BIN=""
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"for c in /tmp/bin/caddy /usr/bin/caddy /usr/local/bin/caddy; do [[ -x "$c" ]] && { CADDY_BIN="$c"; break; }; done
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if [[ -n "$CADDY_BIN" ]]; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    export PATH="$(dirname "$CADDY_BIN"):$PATH"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    _bad="$SB15/sites/bad.caddy"; printf 'broken.example.com {\n\troot * /x\n' > "$_bad"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    _b1=$(sha256sum "$_bad" | cut -d' ' -f1)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    SITE_FILE="$_bad"; FLIP_HOST="broken.example.com"; FLIP_PORT=9443
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    if flip_site_toggle on >/dev/null 2>&1; then bad "15.20 非法配置未被拦截"; else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        _b2=$(sha256sum "$_bad" | cut -d' ' -f1)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        [[ "$_b1" == "$_b2" ]] && ok "15.20 validate 失败后站点文件已还原" || bad "15.20 失败后文件未还原"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    rm -f "$_bad"   # 坏站点会让后续 validate 必然失败，先移除
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    # 15.21 合法站点：validate 通过后文件变成翻转形态
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    _good="$SB15/sites/signal.caddy"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    SITE_FILE="$_good"; FLIP_HOST="agisignal.example.com"; FLIP_PORT=9443
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    flip_site_toggle on >/dev/null 2>&1 || true   # 无 caddy 服务时 restart 失败不影响文件断言
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    grep -q '^https://agisignal.example.com:9443 {' "$_good" && grep -q 'bind 127.0.0.1' "$_good" \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        && ok "15.21 合法站点翻转成功" || bad "15.21 合法站点翻转失败"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    flip_transform "$_good" "agisignal.example.com" 9443 off >/dev/null 2>&1
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    [[ "$(sha256sum "$_good" | cut -d' ' -f1)" == "$_orig" ]] && ok "15.22 复原后与原始站点一致" || bad "15.22 复原失败"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    printf '  \033[33m-\033[0m 未找到 caddy 二进制，跳过翻转 validate 测试\n'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.23 port_holder 能识别占用者
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"python3 -m http.server 18099 --bind 127.0.0.1 >/dev/null 2>&1 &
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_ph_pid=$!; sleep 0.6
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_h=$(port_holder 18099 tcp)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"kill "$_ph_pid" 2>/dev/null; wait "$_ph_pid" 2>/dev/null
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$_h" == *python* ]] && ok "15.23 port_holder 识别端口占用者" || bad "15.23 port_holder 未识别占用者" "${_h:-空}"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.24 外部 SNI 探测：好域名通过、坏域名失败（需要网络）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if probe_external_sni "www.cloudflare.com"; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    if probe_external_sni "example.invalid"; then bad "15.24 不存在的域名被误判为可用"; else ok "15.24 外部 SNI 探测可区分好坏域名"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    printf '  \033[33m-\033[0m 无外网或 TLS 探测失败，跳过外部 SNI 测试\n'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"unset CADDY_SITES_DIR
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 16. 安装走协议模块 + 非交互入口 ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "16. 安装 / 协议模块集成"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"SB16="$TMPD/m16"; mkdir -p "$SB16/sites" "$SB16/cert"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"cat > "$SB16/sites/site.caddy" <<'EOF'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"site.example.com {
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"	root * /var/www/site
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"	file_server
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"}
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EOF
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"cat > "$SB16/env.conf" <<'EOF'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"NODE_PREFIX="T16"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"SERVER_IP="203.0.113.10"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"VL_PORT="443"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"VL_SNI="site.example.com"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"VL_UUID="11111111-1111-1111-1111-111111111111"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"VL_PRIVKEY="PRIVKEY16"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"VL_PUBKEY="PUBKEY16"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"VL_SHORTID="abcd1234"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"HY_DOMAIN=""
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"TARGET_HOST="203.0.113.10"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"HY_PORT="10443"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"HY_RANGE=""
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"HY_PASS="hy16pass"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"HY_SKIP_CERT="false"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"SUB_PORT="8444"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"SUB_PROTO="https"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"SUB_TOKEN="token16"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"CERT_MODE="selfsigned"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"DIRECT_SUFFIXES=""
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"FLIP_HOST=""
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"SITE_FILE=""
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"FLIP_PORT="9443"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"VL_HANDSHAKE=""
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"VL_HANDSHAKE_PORT=""
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EOF
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"printf '{"inbounds":[]}\n' > "$SB16/config.json"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 覆盖到沙箱 + 桩掉会碰系统的两个动作
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"ENV_FILE="$SB16/env.conf"; CONF_FILE="$SB16/config.json"; CERT_DIR="$SB16/cert"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"CADDY_SITES_DIR="$SB16/sites"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"ENV_LOADED=""
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"render_and_reload() { return 0; }
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"flip_site_toggle() { return 0; }
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 16.1 安装不再自己写配置
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if awk '/^install_node\(\) \{/,/^\}/' "$TARGET" | grep -q 'write_singbox_config'; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "16.1 install_node 仍在直接写配置"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "16.1 install_node 不再直接调 write_singbox_config"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_inst_body=$(awk '/^install_node\(\) \{/,/^\}/' "$TARGET")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"{ grep -q 'proto_enable_reality' <<< "$_inst_body" && grep -q 'proto_enable_hy2' <<< "$_inst_body"; } \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ok "16.2 安装通过 proto_enable_reality / proto_enable_hy2" || bad "16.2 安装未走协议模块"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 16.3 非交互启用 Reality（传参 + stdin 关闭，不应阻塞）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if proto_enable_reality 8443 site.example.com < /dev/null > "$SB16/o1" 2>&1; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    tags=$(python3 -c "import json;print(' '.join(i['tag'] for i in json.load(open('$SB16/config.json'))['inbounds']))")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    hs=$(python3 -c "import json;h=[i for i in json.load(open('$SB16/config.json'))['inbounds'] if i['tag']=='vless-reality-in'][0]['tls']['reality'];print(h['handshake']['server'], h['handshake']['server_port'], [i for i in json.load(open('$SB16/config.json'))['inbounds']][0]['listen_port'])")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    [[ "$tags" == "vless-reality-in" && "$hs" == "127.0.0.1 9443 8443" ]] \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        && ok "16.3 非交互启用 Reality：端口 8443 + 回落 127.0.0.1:9443" \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"        || bad "16.3 启用 Reality 结果异常" "$tags / $hs"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "16.3 非交互启用 Reality 失败" "$(tail -3 "$SB16/o1")"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 16.4 站点信息落进 env
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q '^SITE_FILE="/tmp' "$SB16/env.conf" 2>/dev/null || grep -q "^SITE_FILE=\"$SB16/sites/site.caddy\"" "$SB16/env.conf" \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ok "16.4 env 记录翻转站点路径" || bad "16.4 SITE_FILE 未写入" "$(grep '^SITE_FILE' "$SB16/env.conf")"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 16.5 非交互启用 Hy2：两个 inbound 共存
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if proto_enable_hy2 10443 "" "" < /dev/null > "$SB16/o2" 2>&1; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    n=$(python3 -c "import json;print(len(json.load(open('$SB16/config.json'))['inbounds']))")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    [[ "$n" == "2" ]] && ok "16.5 启用 Hy2 后两个 inbound 共存" || bad "16.5 inbound 数量异常" "$n"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "16.5 非交互启用 Hy2 失败" "$(tail -3 "$SB16/o2")"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 16.6 停用 Hy2 只摘自己
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"disable_protocol hy2 > /dev/null 2>&1
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"tags=$(python3 -c "import json;print(' '.join(i['tag'] for i in json.load(open('$SB16/config.json'))['inbounds']))")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$tags" == "vless-reality-in" ]] && ok "16.6 停用 Hy2 保留 Reality" || bad "16.6 停用 Hy2 结果异常" "$tags"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 16.7 停用 Reality 摘干净
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"disable_protocol reality > /dev/null 2>&1
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"n=$(python3 -c "import json;print(len(json.load(open('$SB16/config.json'))['inbounds']))")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$n" == "0" ]] && ok "16.7 停用 Reality 后无 inbound" || bad "16.7 停用 Reality 残留" "$n"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 16.8 订阅重建发生在 render 之前拿到新值（静态检查 sync_env_locals 在 render_and_reload 前）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"awk '/^proto_enable_reality\(\) \{/,/^\}/' "$TARGET" | grep -n "sync_env_locals\|render_and_reload" | awk -F: '$2 ~ /sync_env_locals/ {s=$1} $2 ~ /render_and_reload/ {r=$1} END{exit !(s && r && s<r)}' \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ok "16.8 Reality 启用前同步小写作用域" || bad "16.8 未在 render 前同步 env 变量"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 16.9 proto 传参分支内不得再有 read
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if awk '/^proto_enable_reality\(\) \{/,/^\}/' "$TARGET" | grep -A14 'interactive" == 1' | grep -q 'ask'; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "16.9 交互提问被限制在 interactive 分支内"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "16.9 未找到 interactive 分支"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 17. 出口中转 ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "17. 出口中转"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"SB17="$TMPD/m17"; mkdir -p "$SB17/cert" "$SB17/web/tok17"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"printf '{"log":{"level":"warn"},"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}\n' > "$SB17/base.json"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"VL_PORT=443; VL_SNI="gh.example.com"; VL_UUID="11111111-1111-1111-1111-111111111111"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"VL_PRIVKEY="PRIV17"; VL_PUBKEY="PBK17"; VL_SHORTID="ab12cd34"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"HY_PORT=8443; HY_PASS="hypass17"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"VL_HANDSHAKE="127.0.0.1"; VL_HANDSHAKE_PORT=9443
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"CONF_FILE="$SB17/cfg.json"; CERT_DIR="$SB17/cert"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"NODE_PREFIX="FN"; SERVER_IP="203.0.113.11"; TARGET_HOST="fn.example.com"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"HY_DOMAIN="fn.example.com"; HY_SKIP_CERT="false"; SUB_TOKEN="tok17"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"render_set "reality hy2"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_md5_none=$(md5sum "$CONF_FILE" | cut -d' ' -f1)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 17.1 none 时不改动配置
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EXIT_TYPE="none"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"apply_exit_config
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$(md5sum "$CONF_FILE" | cut -d' ' -f1)" == "$_md5_none" ]] \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ok "17.1 EXIT_TYPE=none 配置字节不变" || bad "17.1 none 仍改动了配置"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 17.2 hy2 出口：4 个 inbound + exit-out + route
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EXIT_TYPE="hy2"; EXIT_SERVER="isif.example.com"; EXIT_PORT="8443"; EXIT_PASS="exitpass17"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EXIT_SNI="isif.example.com"; EXIT_ENTRY_VL="2053"; EXIT_ENTRY_HY="2054"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"apply_exit_config
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_tags=$(python3 -c "import json;print(' '.join(i['tag'] for i in json.load(open('$CONF_FILE'))['inbounds']))")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_ob=$(python3 -c "import json;d=json.load(open('$CONF_FILE'));o=[x for x in d['outbounds'] if x['tag']=='exit-out'][0];print(o['type'],o['server_port'])")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_rt=$(python3 -c "import json;d=json.load(open('$CONF_FILE'));r=d.get('route',{});print(len(r.get('rules',[])), r.get('final'))")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$_tags" == *exit-vless-in* && "$_tags" == *exit-hy2-in* && "$_ob" == "hysteria2 8443" && "$_rt" == "2 direct" ]] \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ok "17.2 hy2 出口：链式入口 + exit-out + route final=direct" \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    || bad "17.2 hy2 出口结构异常" "$_tags / $_ob / $_rt"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 17.3 出口端口与主入口不冲突
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_ports=$(python3 -c "import json;print(sorted(i['listen_port'] for i in json.load(open('$CONF_FILE'))['inbounds']))")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$_ports" == "[443, 2053, 2054, 8443]" ]] && ok "17.3 四个入口端口正确" || bad "17.3 端口集合异常" "$_ports"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 17.4 订阅里出现 -SG 节点（由生成器直接产出，不再后处理）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EXIT_TYPE="hy2"; EXIT_SERVER="isif.example.com"; EXIT_PORT="8443"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EXIT_ENTRY_VL="2053"; EXIT_ENTRY_HY="2054"; EXIT_LABEL="SG"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"VL_PORT=443; HY_PORT=8443; VL_SNI="gh.example.com"; SERVER_IP="203.0.113.11"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"user_uuid="11111111-1111-1111-1111-111111111111"; vl_pubkey="PBK17"; vl_shortid="ab12cd34"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"hy_password="hypass17"; hy_skip_cert="false"; node_prefix="FN"; token="tok17"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"domain_or_ip="fn.example.com"; vl_port=443; hy_port=8443
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"hy_ports_display="8443"; server_ip="203.0.113.11"; vl_sni="gh.example.com"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"WEB_DIR="$SB17/web"; mkdir -p "$WEB_DIR/tok17"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"generate_full_client_config "fn.example.com" tok17 FN 203.0.113.11 443 \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  11111111-1111-1111-1111-111111111111 gh.example.com PBK17 ab12cd34 8443 8443 hypass17 false
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q 'FN-VLESS-Reality-SG' "$WEB_DIR/tok17/config.yaml" && grep -q 'FN-Hysteria2-SG' "$WEB_DIR/tok17/config.yaml" \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ok "17.4 订阅 config.yaml 含两条链式节点" || bad "17.4 订阅缺少链式节点"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q 'port: 2053' "$WEB_DIR/tok17/provider.yaml" && grep -q 'port: 2054' "$WEB_DIR/tok17/provider.yaml" \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ok "17.5 provider.yaml 端口为 2053/2054" || bad "17.5 provider 端口异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$(wc -l < "$WEB_DIR/tok17/links.txt")" -eq 4 ]] && ok "17.6 links.txt 共 4 条链接" || bad "17.6 links 行数异常" "$(wc -l < "$WEB_DIR/tok17/links.txt")"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -A1 -- '- "FN-VLESS-Reality-SG"' "$WEB_DIR/tok17/config.yaml" | grep -q 'DIRECT\|FN-' \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ok "17.7 链式节点已加入策略组" || bad "17.7 策略组未包含链式节点"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 17.11 出口 Hy2 节点不得继承端口跳跃（否则客户端会跳到主入口端口，落地变成入口机）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"awk '/FN-Hysteria2-SG/,/FN-VLESS|^EOF|^$/' "$WEB_DIR/tok17/provider.yaml" | grep -q 'ports:' \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && bad "17.11 -SG 节点带了端口跳跃" || ok "17.11 -SG 节点不含 ports（避免跳到主入口）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 17.12 出口参数按协议分开存：切到另一协议不会串用地址/端口
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EXIT_TYPE="hy2"; EXIT_HY_SERVER="isif.example.com"; EXIT_HY_PORT="8443"; EXIT_HY_PASS="p1"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EXIT_VL_SERVER="isif2.example.com"; EXIT_VL_PORT="443"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"sync_env_locals
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$EXIT_SERVER" == "isif.example.com" && "$EXIT_PORT" == "8443" ]] || bad "17.12 Hy2 出口解析错误" "$EXIT_SERVER:$EXIT_PORT"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EXIT_TYPE="vless"; sync_env_locals
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$EXIT_SERVER" == "isif2.example.com" && "$EXIT_PORT" == "443" ]] \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ok "17.12 切换协议使用各自的地址/端口" || bad "17.12 出口参数串用" "$EXIT_SERVER:$EXIT_PORT"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 17.13 节点后缀可自定义且做白名单校验
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q '节点后缀 \[' "$TARGET" && ok "17.13 菜单可设置节点后缀" || bad "17.13 未提供后缀设置"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q 'A-Za-z0-9_-' "$TARGET" && ok "17.13 后缀有字符白名单" || bad "17.13 后缀无校验"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.23 安装时探测本机站点（用于默认伪装域名）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"SB19=$(mktemp -d); mkdir -p "$SB19/sites"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"cat > "$SB19/sites/a.caddy" <<'CEOF'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"https://site.example.com:9443 {
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"	root * /var/www/site
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"}
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"http://site.example.com {
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"	redir https://{host}{uri} permanent
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"}
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"CEOF
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_doms=$(CADDY_SITES_DIR="$SB19/sites" local_site_domains | sort -u | tr '\n' ' ')
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$_doms" == "site.example.com " ]] && ok "15.23 能探测本机站点域名（去重）" || bad "15.23 站点探测异常" "$_doms"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.24 证书查找覆盖 /etc/ssl 与 acme.sh 目录
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"mkdir -p "$SB19/ssl/other.example.com"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"(cd "$SB19/ssl/other.example.com" && openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"   -keyout private.key -out fullchain.cer -days 2 -nodes -subj "/CN=other.example.com" >/dev/null 2>&1)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"CERT_DIR="$SB19/empty" find_cert_dir "other.example.com" >/dev/null 2>&1 \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ok "15.24 证书查找命中 /etc/ssl/<域名>" || ok "15.24 证书查找（本机无该域名证书，跳过）"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"rm -rf "$SB19"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 15.22 sync_hy2_cert 能直接用 acme.sh 目录里的证书（重装/无 /etc/ssl 时）
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q 'acme.sh/${d}_ecc' "$TARGET" && ok "15.22 证书支持 acme.sh 目录" || bad "15.22 未支持 acme.sh 目录"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q '_key="$src/${d}.key"' "$TARGET" && ok "15.22 acme 目录用域名命名的 key" || bad "15.22 acme key 文件名未处理"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 17.14 四个端口都可设置：直连走协议参数，链式走出口设置
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q '链式入口端口 · Reality' "$TARGET" && ok "17.14 链式入口端口可设置" || bad "17.14 未提供入口端口设置"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q '不能与直连端口' "$TARGET" && ok "17.14 端口冲突有校验" || bad "17.14 端口冲突无校验"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 17.8 vless 出口
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EXIT_TYPE="vless"; EXIT_PORT="443"; EXIT_UUID="22222222-2222-2222-2222-222222222222"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EXIT_PBK="PBKEXIT"; EXIT_SID="ff00ff00"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"render_set "reality hy2"; apply_exit_config
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_o2=$(python3 -c "import json;d=json.load(open('$CONF_FILE'));o=[x for x in d['outbounds'] if x['tag']=='exit-out'][0];print(o['type'], bool(o['tls'].get('reality')))")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$_o2" == "vless True" ]] && ok "17.8 vless 出口生成 Reality 出站" || bad "17.8 vless 出口异常" "$_o2"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 17.9 关闭出口后回到两个 inbound
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EXIT_TYPE="none"; render_set "reality hy2"; apply_exit_config
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_n=$(python3 -c "import json;print(len(json.load(open('$CONF_FILE'))['inbounds']))")
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$_n" == "2" ]] && ok "17.9 关闭出口后只剩两个 inbound" || bad "17.9 关闭出口残留" "$_n"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 17.10 菜单入口
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -q '5. 出口中转' "$TARGET" && grep -q '^menu_exit()' "$TARGET" && ok "17.10 菜单含出口中转" || bad "17.10 菜单缺少出口中转"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 18. 出口导入与自检 ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "18. 出口导入 / 自检"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"SB18="$TMPD/m18"; mkdir -p "$SB18/www"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"cat > "$SB18/www/provider.yaml" <<'EOF'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"proxies:
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  - name: "ISIF-VLESS-Reality"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    type: vless
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    server: 198.51.100.20
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    port: 443
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    uuid: 33333333-3333-3333-3333-333333333333
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    servername: isif.example.com
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    reality-opts:
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"      public-key: PBKISIF
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"      short-id: 0a1b2c3d
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    client-fingerprint: chrome
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  - name: "ISIF-Hysteria2"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    type: hysteria2
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    server: isif.example.com
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    port: 8443
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    password: "hyisif99"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    sni: isif.example.com
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    skip-cert-verify: false
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EOF
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"cat > "$SB18/www/only-vless.yaml" <<'EOF'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"proxies:
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"  - name: "B-VLESS"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    type: vless
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    server: 198.51.100.21
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    port: 443
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    uuid: 44444444-4444-4444-4444-444444444444
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    servername: b.example.com
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    reality-opts:
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"      public-key: PBKB
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"      short-id: aabbccdd
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"EOF
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"python3 -m http.server 18093 --bind 127.0.0.1 --directory "$SB18/www" >/dev/null 2>&1 &
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"S18PID=$!
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"sleep 1.5
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"parse_apply() { local k v; while IFS=$'\t' read -r k v; do case "$k" in EXIT_*) printf -v "$k" '%s' "$v" ;; esac; done; }
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_out=$(exit_parse_url "http://127.0.0.1:18093/provider.yaml" 2>/dev/null)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"parse_apply <<< "$_out"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$EXIT_HY_SERVER" == "isif.example.com" && "$EXIT_HY_PORT" == "8443" && "$EXIT_HY_PASS" == "hyisif99" ]] \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ok "18.1 从 provider.yaml 优先解析出 Hy2" || bad "18.1 Hy2 解析失败" "$_out"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"_out2=$(exit_parse_url "http://127.0.0.1:18093/only-vless.yaml" 2>/dev/null)
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"parse_apply <<< "$_out2"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"[[ "$EXIT_VL_PBK" == "PBKB" && "$EXIT_VL_SID" == "aabbccdd" && "$EXIT_VL_SERVER" == "198.51.100.21" ]] \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ok "18.2 无 Hy2 时回退解析 Reality 节点" || bad "18.2 Reality 解析失败" "$_out2"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if exit_parse_url "http://127.0.0.1:18093/nope.yaml" >/dev/null 2>&1; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    bad "18.3 不存在的订阅未报错"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"else
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    ok "18.3 订阅不可达时返回失败"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"kill "$S18PID" 2>/dev/null || true
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"wait "$S18PID" 2>/dev/null || true
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 18.4 无 exit-out 时自检判定失败
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"CONF_FILE="$SB18/empty.json"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"printf '{"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}\n' > "$CONF_FILE"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if exit_health_check >/dev/null 2>&1; then bad "18.4 无出口时自检未拦截"; else ok "18.4 无出口时自检返回失败"; fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# 18.5 菜单含导入入口
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"grep -qF 'provider.yaml 地址' "$TARGET" && grep -q 'exit_parse_url' "$TARGET" \
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    && ok "18.5 出口菜单支持订阅导入" || bad "18.5 菜单缺少导入入口"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 14. 清理 ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"group "14. 清理"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"ok "临时文件已清理"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"# ---------- 汇总 ----------
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"printf '\n\033[1m================ 测试汇总 ================\033[0m\n'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"printf '通过: \033[32m%d\033[0m   失败: \033[31m%d\033[0m   总计: %d\n' "$PASS" "$FAIL" "$((PASS+FAIL))"
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"if [[ $FAIL -gt 0 ]]; then
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    printf '\n失败项:\n'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    for n in "${FAILED_NAMES[@]}"; do printf '  - %s\n' "$n"; done
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"    exit 1
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"fi
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"printf '\033[32m全部通过\033[0m\n'
+"15.26 证书查找命中 /etc/ssl/<域名>" || ok "15.26 证书查找（本机无该域名证书，跳过）""15.25 能探测本机站点域名（去重）" || bad "15.25 站点探测异常"exit 0

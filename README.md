@@ -185,6 +185,7 @@ simbo
 * 直连节点：`FN-VLESS-Reality`、`FN-Hysteria2`
 * 中转节点：`FN-VLESS-Reality-SG`、`FN-Hysteria2-SG`
 * 后缀 `SG` 只是标签，可在菜单里改成 `JP`、`US`、`SG2` 等
+* 面板里的出站行显示**解析后的落地 IP**（每次刷新实时解析，不缓存），连接本身仍用域名——落地机换 IP 时只要改 DNS 就自动跟随
 
 ### 步骤一：准备落地机
 

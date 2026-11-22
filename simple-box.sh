@@ -2345,6 +2345,35 @@ sync_env_locals() {
     sub_proto="${SUB_PROTO:-https}"; sub_token="$SUB_TOKEN"
 }
 
+# 当前已在 config.json 里的协议集合（供菜单/出口重建使用）。
+# 注意：不能在「即将启用某协议」的路径里用，那一刻它还没写进配置。
+current_set() {
+    local set=""
+    set_has "vless-reality-in" && set="reality"
+    set_has "hy2-in" && set="${set:+$set }hy2"
+    printf '%s\n' "$set"
+}
+
+# 出口连通性自检 + 结果播报（三态）
+report_exit_health() {
+    exit_health_check
+    case $? in
+        0) echo -e "${GREEN}✓ 出口连通性正常${PLAIN}" ;;
+        1) echo -e "${RED}✗ 出口连不通${PLAIN}"
+           echo -e "${YELLOW}  检查落地机与端口放行${PLAIN}" ;;
+        2) echo -e "${YELLOW}⚠ 出口 IP 与落地机不一致（对方可能也在中转）${PLAIN}" ;;
+    esac
+}
+
+# 保存出口参数 → 重建配置 → 重载服务（菜单里三个入口共用）
+apply_exit_reload() {
+    sync_env_locals
+    write_env_config || return 1
+    render_set "$(current_set)" || return 1
+    sync_env_locals
+    render_and_reload
+}
+
 # 按启用集合写 config.json；集合来自 config.json 本身，不另设开关
 render_set() {
     local set=" $1 " vl_p="" hy_p=""
@@ -2415,7 +2444,9 @@ proto_enable_reality() {
     VL_PORT="$port"; VL_SNI="$sni"
     SITE_FILE="$site"; FLIP_HOST="${site:+$sni}"; FLIP_PORT="${FLIP_PORT:-9443}"
 
-    local set="reality"; set_has "hy2-in" && set="reality hy2"
+    # Reality 此刻还没写进 config.json，current_set 会漏掉自己，这里显式拼
+    local set="reality"
+    set_has "hy2-in" && set="reality hy2"
     render_set "$set" || return 1
     sync_env_locals; write_env_config || return 1
 
@@ -2922,16 +2953,9 @@ menu_exit() {
                     continue
                 fi
                 EXIT_TYPE="$target"
-                sync_env_locals; write_env_config
-                local set="reality"; set_has "hy2-in" && set="reality hy2"
-                if render_set "$set" && sync_env_locals && render_and_reload; then
+                if apply_exit_reload; then
                     echo -e "${GREEN}✓ 已切换到 ${other} 出口${PLAIN}"
-                    exit_health_check
-                    case $? in
-                        0) echo -e "${GREEN}✓ 出口连通性正常${PLAIN}" ;;
-                        1) echo -e "${RED}✗ 出口连不通${PLAIN}"; echo -e "${YELLOW}  检查落地机与端口放行${PLAIN}" ;;
-                        2) echo -e "${YELLOW}⚠ 出口 IP 与落地机不一致（对方可能也在中转）${PLAIN}" ;;
-                    esac
+                    report_exit_health
                 else
                     echo -e "${RED}✗ 切换失败${PLAIN}"
                 fi
@@ -3015,16 +3039,9 @@ menu_exit() {
                     fi
                     EXIT_VL_SNI="${EXIT_VL_SNI:-$srv}"
                 fi
-                sync_env_locals; write_env_config || { echo -e "${RED}写入 env 失败${PLAIN}"; continue; }
-                local set="reality"; set_has "hy2-in" && set="reality hy2"
-                if render_set "$set" && sync_env_locals && render_and_reload; then
+                if apply_exit_reload; then
                     echo -e "${GREEN}✓ 出口参数已保存${PLAIN}"
-                    exit_health_check
-                    case $? in
-                        0) echo -e "${GREEN}✓ 出口连通性正常${PLAIN}" ;;
-                        1) echo -e "${RED}✗ 出口连不通${PLAIN}"; echo -e "${YELLOW}  检查落地机与端口放行${PLAIN}" ;;
-                        2) echo -e "${YELLOW}⚠ 出口 IP 与落地机不一致（对方可能也在中转）${PLAIN}" ;;
-                    esac
+                    report_exit_health
                 else
                     echo -e "${RED}✗ 应用失败${PLAIN}"
                 fi
@@ -3032,10 +3049,7 @@ menu_exit() {
                 ;;
             4)
                 EXIT_TYPE="none"
-                sync_env_locals; write_env_config
-                local set="reality"; set_has "hy2-in" && set="reality hy2"
-                render_set "$set" && sync_env_locals && render_and_reload \
-                    && echo -e "${GREEN}✓ 出口已关闭，只保留直连${PLAIN}" \
+                apply_exit_reload && echo -e "${GREEN}✓ 出口已关闭，只保留直连${PLAIN}" \
                     || echo -e "${RED}✗ 应用失败${PLAIN}"
                 read -r -p "按回车返回..." _ || true
                 ;;

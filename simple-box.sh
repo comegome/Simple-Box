@@ -998,8 +998,13 @@ print_io_status() {
     if set_has "hy2-in"; then ep="${ep:+$ep / }UDP ${EXIT_ENTRY_HY:-2054}"; fi
     if [[ "${EXIT_TYPE:-none}" != "none" && -n "$ep" ]]; then
         [[ "$EXIT_TYPE" == "vless" ]] && en="Reality" || en="Hysteria2"
+        # 连接仍用域名（落地机换 IP 时自动跟随），面板显示解析结果，便于和实测出口 IP 对照。
+        # 不做缓存：解析失败就退回域名，避免出现「面板显示旧 IP」的假象。
+        local eshow="$EXIT_SERVER" _ip
+        _ip=$(timeout 2 getent ahostsv4 "$EXIT_SERVER" 2>/dev/null | awk '{print $1; exit}')
+        [[ -n "$_ip" ]] && eshow="$_ip"
         printf ' 出站 %-14s %s  %s  →  %s (%s)\n' "Relay" "${GREEN}[已启用]${PLAIN}" \
-            "$ep" "${EXIT_SERVER}" "$en"
+            "$ep" "$eshow" "$en"
     else
         printf ' 出站 %-14s %s\n' "Relay" "${GRAY}[已停用]${PLAIN}"
     fi
@@ -2937,8 +2942,9 @@ menu_exit() {
                 if [[ "$cur" == "none" ]]; then
                     echo -e " 出站: ${GRAY}[已停用]${PLAIN} 只保留直连"
                 else
-                    local _en="Hy2"; [[ "$cur" == "vless" ]] && _en="Reality"
-                    echo -e " 出站: ${CYAN}[${_en}]${PLAIN} → ${EXIT_SERVER}:${EXIT_PORT}"
+                    local _en="Hysteria2"; [[ "$cur" == "vless" ]] && _en="Reality"
+                    local _res; _res=$(timeout 2 getent ahostsv4 "$EXIT_SERVER" 2>/dev/null | awk '{print $1; exit}')
+                    echo -e " 出站: ${CYAN}[${_en}]${PLAIN} → ${EXIT_SERVER}:${EXIT_PORT}${_res:+  (${_res})}"
                     echo -e " 入口: Reality ${EXIT_ENTRY_VL:-—} / Hy2 ${EXIT_ENTRY_HY:-—}"
                     echo -e " 后缀: -${EXIT_LABEL:-SG}"
                 fi

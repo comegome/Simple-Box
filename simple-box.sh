@@ -2314,6 +2314,14 @@ probe_external_sni() {
         | grep -q "ALPN protocol: h2"
 }
 
+# 证书是否覆盖某个域名（含通配符）。没有 openssl 时不阻塞流程。
+cert_covers_host() {
+    local cert="$1" host="$2"
+    [[ -f "$cert" && -n "$host" ]] || return 1
+    command -v openssl >/dev/null 2>&1 || return 0
+    openssl x509 -in "$cert" -noout -checkhost "$host" 2>/dev/null | grep -q "does match"
+}
+
 sync_hy2_cert() {
     local d="$1" src=""
     # 证书目录可能是 /etc/ssl/<域名>，也可能是按站点起的短名（如 /etc/ssl/agisignal）
@@ -2322,9 +2330,14 @@ sync_hy2_cert() {
         [[ -n "$d" && -f "$src/fullchain.cer" ]] || { src=""; continue; }
         if [[ -f "$src/private.key" || -f "$src/${d}.key" ]]; then break; fi
         src=""
-        src=""
     done
     [[ -n "$src" ]] || return 1
+    # 证书必须覆盖目标域名：把 A 域的证书挂到 B 域上，Caddy 与 sing-box 都不会报错，
+    # 只有客户端会报证书错误，属于最难排查的一类静默故障。
+    if ! cert_covers_host "$src/fullchain.cer" "$d"; then
+        echo -e "${RED}证书与域名不匹配：${src}/fullchain.cer 不覆盖 ${d}${PLAIN}"
+        return 2
+    fi
     [[ "$src" == "$CERT_DIR" ]] && return 0   # 已就位，无需复制
     local _key="$src/private.key"
     [[ -f "$_key" ]] || _key="$src/${d}.key"      # acme.sh 目录里 key 以域名命名
@@ -2509,7 +2522,14 @@ proto_enable_hy2() {
 
     HY_DOMAIN="$domain"; HY_PORT="$port"; HY_RANGE="$range"
     [[ -z "${HY_PASS:-}" ]] && HY_PASS=$(/usr/local/bin/sing-box generate rand --base64 16)
-    if [[ -n "$domain" ]] && sync_hy2_cert "$domain"; then
+    local cert_rc=1
+    if [[ -n "$domain" ]]; then
+        sync_hy2_cert "$domain" || cert_rc=$?
+    fi
+    if [[ "$cert_rc" -eq 2 ]]; then
+        echo -e "${RED}证书与域名不匹配，已中止启用 Hysteria2（换证书或改域名后重试）${PLAIN}"
+        return 1
+    elif [[ "$cert_rc" -eq 0 ]]; then
         HY_SKIP_CERT="false"
         echo -e "${GREEN}✓ 已同步 ${domain} 的证书${PLAIN}"
     else

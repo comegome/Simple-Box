@@ -1017,6 +1017,32 @@ else
     bad "21.4 缺少 reset-failed 兜底"
 fi
 
+# ---------- 22. 证书与域名匹配 ----------
+group "22. 证书域名校验"
+if declare -F cert_covers_host >/dev/null 2>&1; then
+    ok "22.1 cert_covers_host 已定义"
+else
+    bad "22.1 缺少 cert_covers_host"
+fi
+CTD=$(mktemp -d)
+if openssl req -x509 -newkey rsa:2048 -nodes -keyout "$CTD/k" -out "$CTD/c" -days 2 \
+        -subj "/CN=test.example.com" -addext "subjectAltName=DNS:test.example.com" >/dev/null 2>&1; then
+    cert_covers_host "$CTD/c" "test.example.com" && ok "22.2 同域名判定为匹配" || bad "22.2 同域名未匹配"
+    cert_covers_host "$CTD/c" "other.example.com" && bad "22.3 异域名被误判为匹配" || ok "22.3 异域名判定为不匹配"
+else
+    printf '  \033[33m-\033[0m openssl 生成测试证书失败，跳过 22.2/22.3\n'
+fi
+if grep -q 'return 2' "$TARGET" && grep -q '已中止启用 Hysteria2' "$TARGET"; then
+    ok "22.4 证书不匹配时中止启用（不再静默沿用旧证书）"
+else
+    bad "22.4 缺少不匹配中止路径"
+fi
+if grep -q 'sync_hy2_cert "\$domain" || cert_rc=\$?' "$TARGET"; then
+    ok "22.5 退出码被显式捕获（set -e 下不会误退出）"
+else
+    bad "22.5 退出码未捕获，set -e 可能直接退出"
+fi
+
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
 ok "临时文件已清理"

@@ -614,7 +614,8 @@ grep -q '^proto_enable_reality()' "$TARGET" && grep -q '^proto_enable_hy2()' "$T
     && ok "15.17 新协议模块就位" || bad "15.17 新协议模块缺失"
 
 # 15.18 菜单文案
-grep -q '1. 启用 Reality' "$TARGET" && grep -q '3. 启用 Hysteria2' "$TARGET" && ok "15.18 菜单使用「启用」文案" || bad "15.18 菜单文案未更新"
+grep -q 'PROTOCOLS=' "$TARGET" && awk '/^menu_protocol\(\)/,/^}/' "$TARGET" | grep -q 'proto_human' \
+    && ok "15.18 菜单由协议注册表生成" || bad "15.18 菜单未遍历注册表"
 if grep -q '重建 Reality' "$TARGET"; then bad "15.19 菜单仍残留「重建 Reality」"; else ok "15.19 无「重建」残留"; fi
 
 # 15.20 翻转失败必须还原站点文件（真实 caddy validate）
@@ -797,18 +798,23 @@ _rt=$(python3 -c "import json;d=json.load(open('$CONF_FILE'));r=d.get('route',{}
 _ports=$(python3 -c "import json;print(sorted(i['listen_port'] for i in json.load(open('$CONF_FILE'))['inbounds']))")
 [[ "$_ports" == "[443, 2053, 2054, 8443]" ]] && ok "17.3 四个入口端口正确" || bad "17.3 端口集合异常" "$_ports"
 
-# 17.4 订阅追加两条 -SG 节点
-printf 'proxies:\n  - name: "FN-VLESS-Reality"\n    type: vless\nproxy-groups:\n  - name: "节点选择"\n    proxies:\n      - "FN-VLESS-Reality"\n      - "DIRECT"\n' > "$SB17/web/tok17/config.yaml"
-printf 'proxies:\n  - name: "FN-VLESS-Reality"\n    type: vless\n' > "$SB17/web/tok17/provider.yaml"
-: > "$SB17/web/tok17/links.txt"
-WEB_DIR="$SB17/web"
-append_exit_nodes tok17
-grep -q 'FN-VLESS-Reality-SG' "$SB17/web/tok17/config.yaml" && grep -q 'FN-Hysteria2-SG' "$SB17/web/tok17/config.yaml" \
-    && ok "17.4 订阅 config.yaml 追加两条链式节点" || bad "17.4 订阅未追加链式节点"
-grep -q 'port: 2053' "$SB17/web/tok17/provider.yaml" && grep -q 'port: 2054' "$SB17/web/tok17/provider.yaml" \
+# 17.4 订阅里出现 -SG 节点（由生成器直接产出，不再后处理）
+EXIT_TYPE="hy2"; EXIT_SERVER="isif.example.com"; EXIT_PORT="8443"
+EXIT_ENTRY_VL="2053"; EXIT_ENTRY_HY="2054"; EXIT_LABEL="SG"
+VL_PORT=443; HY_PORT=8443; VL_SNI="gh.example.com"; SERVER_IP="203.0.113.11"
+user_uuid="11111111-1111-1111-1111-111111111111"; vl_pubkey="PBK17"; vl_shortid="ab12cd34"
+hy_password="hypass17"; hy_skip_cert="false"; node_prefix="FN"; token="tok17"
+domain_or_ip="fn.example.com"; vl_port=443; hy_port=8443
+hy_ports_display="8443"; server_ip="203.0.113.11"; vl_sni="gh.example.com"
+WEB_DIR="$SB17/web"; mkdir -p "$WEB_DIR/tok17"
+generate_full_client_config "fn.example.com" tok17 FN 203.0.113.11 443 \
+  11111111-1111-1111-1111-111111111111 gh.example.com PBK17 ab12cd34 8443 8443 hypass17 false
+grep -q 'FN-VLESS-Reality-SG' "$WEB_DIR/tok17/config.yaml" && grep -q 'FN-Hysteria2-SG' "$WEB_DIR/tok17/config.yaml" \
+    && ok "17.4 订阅 config.yaml 含两条链式节点" || bad "17.4 订阅缺少链式节点"
+grep -q 'port: 2053' "$WEB_DIR/tok17/provider.yaml" && grep -q 'port: 2054' "$WEB_DIR/tok17/provider.yaml" \
     && ok "17.5 provider.yaml 端口为 2053/2054" || bad "17.5 provider 端口异常"
-[[ "$(wc -l < "$SB17/web/tok17/links.txt")" -eq 2 ]] && ok "17.6 links.txt 追加两条链接" || bad "17.6 links 行数异常"
-grep -q 'FN-VLESS-Reality-SG' "$SB17/web/tok17/config.yaml" && grep -A3 '\- "FN-VLESS-Reality-SG"' "$SB17/web/tok17/config.yaml" >/dev/null \
+[[ "$(wc -l < "$WEB_DIR/tok17/links.txt")" -eq 4 ]] && ok "17.6 links.txt 共 4 条链接" || bad "17.6 links 行数异常" "$(wc -l < "$WEB_DIR/tok17/links.txt")"
+grep -A1 -- '- "FN-VLESS-Reality-SG"' "$WEB_DIR/tok17/config.yaml" | grep -q 'DIRECT\|FN-' \
     && ok "17.7 链式节点已加入策略组" || bad "17.7 策略组未包含链式节点"
 
 # 17.8 vless 出口
@@ -825,6 +831,76 @@ _n=$(python3 -c "import json;print(len(json.load(open('$CONF_FILE'))['inbounds']
 
 # 17.10 菜单入口
 grep -q '5. 出口中转' "$TARGET" && grep -q '^menu_exit()' "$TARGET" && ok "17.10 菜单含出口中转" || bad "17.10 菜单缺少出口中转"
+
+
+# ---------- 18. 出口导入与自检 ----------
+group "18. 出口导入 / 自检"
+
+SB18="$TMPD/m18"; mkdir -p "$SB18/www"
+cat > "$SB18/www/provider.yaml" <<'EOF'
+proxies:
+  - name: "ISIF-VLESS-Reality"
+    type: vless
+    server: 198.51.100.20
+    port: 443
+    uuid: 33333333-3333-3333-3333-333333333333
+    servername: isif.example.com
+    reality-opts:
+      public-key: PBKISIF
+      short-id: 0a1b2c3d
+    client-fingerprint: chrome
+  - name: "ISIF-Hysteria2"
+    type: hysteria2
+    server: isif.example.com
+    port: 8443
+    password: "hyisif99"
+    sni: isif.example.com
+    skip-cert-verify: false
+EOF
+cat > "$SB18/www/only-vless.yaml" <<'EOF'
+proxies:
+  - name: "B-VLESS"
+    type: vless
+    server: 198.51.100.21
+    port: 443
+    uuid: 44444444-4444-4444-4444-444444444444
+    servername: b.example.com
+    reality-opts:
+      public-key: PBKB
+      short-id: aabbccdd
+EOF
+python3 -m http.server 18093 --bind 127.0.0.1 --directory "$SB18/www" >/dev/null 2>&1 &
+S18PID=$!
+sleep 1.5
+
+parse_apply() { local k v; while IFS=$'\t' read -r k v; do case "$k" in EXIT_*) printf -v "$k" '%s' "$v" ;; esac; done; }
+_out=$(exit_parse_url "http://127.0.0.1:18093/provider.yaml" 2>/dev/null)
+parse_apply <<< "$_out"
+[[ "$EXIT_TYPE" == "hy2" && "$EXIT_SERVER" == "isif.example.com" && "$EXIT_PORT" == "8443" && "$EXIT_PASS" == "hyisif99" ]] \
+    && ok "18.1 从 provider.yaml 优先解析出 Hy2" || bad "18.1 Hy2 解析失败" "$_out"
+
+_out2=$(exit_parse_url "http://127.0.0.1:18093/only-vless.yaml" 2>/dev/null)
+parse_apply <<< "$_out2"
+[[ "$EXIT_TYPE" == "vless" && "$EXIT_PBK" == "PBKB" && "$EXIT_SID" == "aabbccdd" ]] \
+    && ok "18.2 无 Hy2 时回退解析 Reality 节点" || bad "18.2 Reality 解析失败" "$_out2"
+
+if exit_parse_url "http://127.0.0.1:18093/nope.yaml" >/dev/null 2>&1; then
+    bad "18.3 不存在的订阅未报错"
+else
+    ok "18.3 订阅不可达时返回失败"
+fi
+
+kill "$S18PID" 2>/dev/null || true
+wait "$S18PID" 2>/dev/null || true
+
+# 18.4 无 exit-out 时自检判定失败
+CONF_FILE="$SB18/empty.json"
+printf '{"inbounds":[],"outbounds":[{"type":"direct","tag":"direct"}]}\n' > "$CONF_FILE"
+if exit_health_check >/dev/null 2>&1; then bad "18.4 无出口时自检未拦截"; else ok "18.4 无出口时自检返回失败"; fi
+
+# 18.5 菜单含导入入口
+grep -qF 'provider.yaml 地址' "$TARGET" && grep -q 'exit_parse_url' "$TARGET" \
+    && ok "18.5 出口菜单支持订阅导入" || bad "18.5 菜单缺少导入入口"
 
 
 # ---------- 14. 清理 ----------

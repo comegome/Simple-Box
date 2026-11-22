@@ -1056,6 +1056,66 @@ regen_subscription() {
 }
 
 # 组装客户端订阅与独立链接
+
+# ==================== 协议注册表 ====================
+# 加新协议：在 PROTOCOLS 里加名字，再补 proto_<name>_* 的四个小函数即可，
+# 订阅生成、菜单、启用/停用都从这里遍历，不需要再改别处。
+PROTOCOLS="reality hy2"
+
+proto_tag()   { case "$1" in reality) echo "vless-reality-in" ;; hy2) echo "hy2-in" ;; esac; }
+proto_human() { case "$1" in reality) echo "Reality" ;; hy2) echo "Hysteria2" ;; esac; }
+proto_label() { case "$1" in reality) echo "VLESS-Reality" ;; hy2) echo "Hysteria2" ;; esac; }
+
+# 订阅 YAML 片段：读调用方的小写局部变量（动态作用域）
+proto_proxy() {
+    local _p="$1" _name="$2" _port="$3"
+    case "$_p" in
+        reality) cat <<EOF
+  - name: "${_name}"
+    type: vless
+    server: ${server_ip}
+    port: ${_port}
+    uuid: ${user_uuid}
+    network: tcp
+    tls: true
+    udp: true
+    flow: xtls-rprx-vision
+    servername: ${vl_sni}
+    reality-opts:
+      public-key: ${vl_pubkey}
+      short-id: ${vl_shortid}
+    client-fingerprint: chrome
+EOF
+            ;;
+        hy2) cat <<EOF
+  - name: "${_name}"
+    type: hysteria2
+    server: ${domain_or_ip}
+    port: ${_port}
+${ports_line}
+    password: "${hy_password}"
+    sni: ${domain_or_ip}
+    skip-cert-verify: ${hy_skip_cert}
+EOF
+            ;;
+    esac
+}
+
+proto_link() {
+    local _p="$1" _name="$2" _port="$3"
+    case "$_p" in
+        reality)
+            echo "vless://${user_uuid}@${server_ip}:${_port}?security=reality&encryption=none&pbk=${vl_pubkey}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${vl_sni}&sid=${vl_shortid}#${_name}"
+            ;;
+        hy2)
+            local _ins="0"; [[ "${hy_skip_cert}" == "true" ]] && _ins="1"
+            local _mport=""
+            [[ -n "${hy_ports_display:-}" && "$hy_ports_display" == *,* ]] && _mport="&mport=${hy_ports_display}"
+            echo "hy2://${hy_password}@${domain_or_ip}:${_port}/?sni=${domain_or_ip}&insecure=${_ins}${_mport}#${_name}"
+            ;;
+    esac
+}
+
 generate_full_client_config() {
     local domain_or_ip="${1:-}"
     local token="${2:-}"
@@ -1148,36 +1208,20 @@ generate_full_client_config() {
 proxies:
 EOF
 
-    if [[ -n "$vl_port" ]]; then
-        cat >> "$full_config_file" <<EOF
-  - name: "${node_prefix}-VLESS-Reality"
-    type: vless
-    server: ${server_ip}
-    port: ${vl_port}
-    uuid: ${user_uuid}
-    network: tcp
-    tls: true
-    udp: true
-    flow: xtls-rprx-vision
-    servername: ${vl_sni}
-    reality-opts:
-      public-key: ${vl_pubkey}
-      short-id: ${vl_shortid}
-    client-fingerprint: chrome
-EOF
-    fi
+    local _p _port _name
+    for _p in $PROTOCOLS; do
+        case "$_p" in reality) _port="$vl_port" ;; hy2) _port="$hy_port" ;; esac
+        [[ -n "$_port" ]] || continue
+        proto_proxy "$_p" "${node_prefix}-$(proto_label "$_p")" "$_port" >> "$full_config_file"
+    done
 
-    if [[ -n "$hy_port" ]]; then
-        cat >> "$full_config_file" <<EOF
-  - name: "${node_prefix}-Hysteria2"
-    type: hysteria2
-    server: ${domain_or_ip}
-    port: ${hy_port}
-${ports_line}
-    password: "${hy_password}"
-    sni: ${domain_or_ip}
-    skip-cert-verify: ${hy_skip_cert}
-EOF
+    # 出口中转：同一套模板，加后缀与链式入口端口
+    if [[ "${EXIT_TYPE:-none}" != "none" && -n "${EXIT_SERVER:-}" ]]; then
+        for _p in $PROTOCOLS; do
+            case "$_p" in reality) _port="${EXIT_ENTRY_VL:-}" ;; hy2) _port="${EXIT_ENTRY_HY:-}" ;; esac
+            [[ -n "$_port" ]] || continue
+            proto_proxy "$_p" "${node_prefix}-$(proto_label "$_p")-${EXIT_LABEL:-SG}" "$_port" >> "$full_config_file"
+        done
     fi
 
     cat >> "$full_config_file" <<EOF
@@ -1188,63 +1232,49 @@ proxy-groups:
     proxies:
 EOF
 
-    [[ -n "$vl_port" ]] && printf '      - "%s-VLESS-Reality"\n' "$node_prefix" >> "$full_config_file"
-    [[ -n "$hy_port" ]] && printf '      - "%s-Hysteria2"\n' "$node_prefix" >> "$full_config_file"
+    for _p in $PROTOCOLS; do
+        case "$_p" in reality) _port="$vl_port" ;; hy2) _port="$hy_port" ;; esac
+        [[ -n "$_port" ]] && printf '      - "%s-%s"\n' "$node_prefix" "$(proto_label "$_p")" >> "$full_config_file"
+        if [[ "${EXIT_TYPE:-none}" != "none" && -n "${EXIT_SERVER:-}" ]]; then
+            case "$_p" in reality) _port="${EXIT_ENTRY_VL:-}" ;; hy2) _port="${EXIT_ENTRY_HY:-}" ;; esac
+            [[ -n "$_port" ]] && printf '      - "%s-%s-%s"\n' "$node_prefix" "$(proto_label "$_p")" "${EXIT_LABEL:-SG}" >> "$full_config_file"
+        fi
+    done
     printf '      - "DIRECT"\n' >> "$full_config_file"
 
     # 2. 组装纯 Provider 片段
     local provider_file="${WEB_DIR}/${token}/provider.yaml"
     printf 'proxies:\n' > "$provider_file"
 
-    if [[ -n "$vl_port" ]]; then
-        cat >> "$provider_file" <<EOF
-  - name: "${node_prefix}-VLESS-Reality"
-    type: vless
-    server: ${server_ip}
-    port: ${vl_port}
-    uuid: ${user_uuid}
-    network: tcp
-    tls: true
-    udp: true
-    flow: xtls-rprx-vision
-    servername: ${vl_sni}
-    reality-opts:
-      public-key: ${vl_pubkey}
-      short-id: ${vl_shortid}
-    client-fingerprint: chrome
-EOF
+    for _p in $PROTOCOLS; do
+        case "$_p" in reality) _port="$vl_port" ;; hy2) _port="$hy_port" ;; esac
+        [[ -n "$_port" ]] || continue
+        proto_proxy "$_p" "${node_prefix}-$(proto_label "$_p")" "$_port" >> "$provider_file"
+    done
+    if [[ "${EXIT_TYPE:-none}" != "none" && -n "${EXIT_SERVER:-}" ]]; then
+        for _p in $PROTOCOLS; do
+            case "$_p" in reality) _port="${EXIT_ENTRY_VL:-}" ;; hy2) _port="${EXIT_ENTRY_HY:-}" ;; esac
+            [[ -n "$_port" ]] || continue
+            proto_proxy "$_p" "${node_prefix}-$(proto_label "$_p")-${EXIT_LABEL:-SG}" "$_port" >> "$provider_file"
+        done
     fi
-
-    if [[ -n "$hy_port" ]]; then
-        cat >> "$provider_file" <<EOF
-  - name: "${node_prefix}-Hysteria2"
-    type: hysteria2
-    server: ${domain_or_ip}
-    port: ${hy_port}
-${ports_line}
-    password: "${hy_password}"
-    sni: ${domain_or_ip}
-    skip-cert-verify: ${hy_skip_cert}
-EOF
-    fi
-
 
     # 3. 组装原生分享链接
     local links_out="${WEB_DIR}/${token}/links.txt"
     : > "$links_out"
-    if [[ -n "$vl_port" ]]; then
-        local vless_link="vless://${user_uuid}@${server_ip}:${vl_port}?security=reality&encryption=none&pbk=${vl_pubkey}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${vl_sni}&sid=${vl_shortid}#${node_prefix}-VLESS-Reality"
-        echo "$vless_link" >> "$links_out"
+    for _p in $PROTOCOLS; do
+        case "$_p" in reality) _port="$vl_port" ;; hy2) _port="$hy_port" ;; esac
+        [[ -n "$_port" ]] || continue
+        proto_link "$_p" "${node_prefix}-$(proto_label "$_p")" "$_port" >> "$links_out"
+    done
+    if [[ "${EXIT_TYPE:-none}" != "none" && -n "${EXIT_SERVER:-}" ]]; then
+        for _p in $PROTOCOLS; do
+            case "$_p" in reality) _port="${EXIT_ENTRY_VL:-}" ;; hy2) _port="${EXIT_ENTRY_HY:-}" ;; esac
+            [[ -n "$_port" ]] || continue
+            proto_link "$_p" "${node_prefix}-$(proto_label "$_p")-${EXIT_LABEL:-SG}" "$_port" >> "$links_out"
+        done
     fi
 
-    local insecure_flag="0"
-    [[ "$hy_skip_cert" == "true" ]] && insecure_flag="1"
-    local mport_param=""
-    [[ -n "$hy_ports_display" && "$hy_ports_display" == *,* ]] && mport_param="&mport=${hy_ports_display}"
-    if [[ -n "$hy_port" ]]; then
-        local hy2_link="hy2://${hy_password}@${domain_or_ip}:${hy_port}/?sni=${domain_or_ip}&insecure=${insecure_flag}${mport_param}#${node_prefix}-Hysteria2"
-        echo "$hy2_link" >> "$links_out"
-    fi
 }
 
 # 注册全局 simbo 指令（兼容 bash <(curl ...) 管道执行）
@@ -1472,8 +1502,6 @@ DIRECT_SUFFIXES="${direct_suffixes}"
 FLIP_HOST="${FLIP_HOST:-}"
 SITE_FILE="${SITE_FILE:-}"
 FLIP_PORT="${FLIP_PORT:-9443}"
-VL_HANDSHAKE="${VL_HANDSHAKE:-}"
-VL_HANDSHAKE_PORT="${VL_HANDSHAKE_PORT:-}"
 EXIT_TYPE="${EXIT_TYPE:-none}"
 EXIT_SERVER="${EXIT_SERVER:-}"
 EXIT_PORT="${EXIT_PORT:-}"
@@ -1527,7 +1555,6 @@ render_and_reload() {
 
     # setup_caddy_subscription 末尾已经 reload 过一次 Caddy，这里不再重复调用，
     # 只补一次监听校验（热重载后端口偶尔要几百毫秒才起来）。
-    append_exit_nodes "$sub_token"
     setup_caddy_subscription "$target_host" "$sub_token" "$sub_port" "$CERT_MODE"
     verify_caddy_listening "$sub_port" || true
 }
@@ -2188,86 +2215,6 @@ json.dump(d, open(conf, "w"), ensure_ascii=False, indent=2)
 PY
 }
 
-# 订阅里追加链式节点（-SG 后缀）；none 时不动
-append_exit_nodes() {
-    [[ "${EXIT_TYPE:-none}" == "none" || -z "${EXIT_SERVER:-}" ]] && return 0
-    NODE_PREFIX="${NODE_PREFIX:-}" SERVER_IP="${SERVER_IP:-}" VL_UUID="${VL_UUID:-}" \
-    VL_SNI="${VL_SNI:-}" VL_PUBKEY="${VL_PUBKEY:-}" VL_SHORTID="${VL_SHORTID:-}" \
-    HY_PASS="${HY_PASS:-}" HY_DOMAIN="${HY_DOMAIN:-}" HY_SKIP_CERT="${HY_SKIP_CERT:-false}" \
-    TARGET_HOST="${TARGET_HOST:-}" EXIT_LABEL="${EXIT_LABEL:-SG}" \
-    EXIT_ENTRY_VL="${EXIT_ENTRY_VL:-}" EXIT_ENTRY_HY="${EXIT_ENTRY_HY:-}" \
-    python3 - "$WEB_DIR/${1:-$SUB_TOKEN}" <<'PY'
-import os, sys, pathlib
-web = pathlib.Path(sys.argv[1])
-prefix = os.environ.get("NODE_PREFIX", "")
-label = os.environ.get("EXIT_LABEL", "SG")
-vl_port = os.environ.get("EXIT_ENTRY_VL") or ""
-hy_port = os.environ.get("EXIT_ENTRY_HY") or ""
-blocks, names, links = [], [], []
-
-if vl_port:
-    name = prefix + "-VLESS-Reality-" + label
-    names.append(name)
-    blocks.append("\n".join([
-        '  - name: "%s"' % name,
-        '    type: vless',
-        '    server: %s' % os.environ.get("SERVER_IP"),
-        '    port: %s' % vl_port,
-        '    uuid: %s' % os.environ.get("VL_UUID"),
-        '    network: tcp', '    tls: true', '    udp: true',
-        '    flow: xtls-rprx-vision',
-        '    servername: %s' % os.environ.get("VL_SNI"),
-        '    reality-opts:',
-        '      public-key: %s' % os.environ.get("VL_PUBKEY"),
-        '      short-id: %s' % os.environ.get("VL_SHORTID"),
-        '    client-fingerprint: chrome']))
-    links.append("vless://%s@%s:%s?security=reality&encryption=none&pbk=%s&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=%s&sid=%s#%s" % (
-        os.environ.get("VL_UUID"), os.environ.get("SERVER_IP"), vl_port,
-        os.environ.get("VL_PUBKEY"), os.environ.get("VL_SNI"), os.environ.get("VL_SHORTID"), name))
-
-if hy_port:
-    name = prefix + "-Hysteria2-" + label
-    host = os.environ.get("TARGET_HOST") or os.environ.get("HY_DOMAIN") or os.environ.get("SERVER_IP")
-    names.append(name)
-    blocks.append("\n".join([
-        '  - name: "%s"' % name,
-        '    type: hysteria2',
-        '    server: %s' % host,
-        '    port: %s' % hy_port,
-        '    password: "%s"' % os.environ.get("HY_PASS"),
-        '    sni: %s' % host,
-        '    skip-cert-verify: %s' % os.environ.get("HY_SKIP_CERT", "false")]))
-    links.append("hy2://%s@%s:%s/?sni=%s&insecure=%s#%s" % (
-        os.environ.get("HY_PASS"), host, hy_port, host,
-        "1" if os.environ.get("HY_SKIP_CERT") == "true" else "0", name))
-
-if not blocks:
-    sys.exit(0)
-
-text = "\n".join(blocks) + "\n"
-
-cfg = web / "config.yaml"
-if cfg.exists():
-    c = cfg.read_text()
-    c = c.replace("\nproxy-groups:", "\n" + text + "\nproxy-groups:", 1)
-    for n in names:
-        c = c.replace('      - "DIRECT"', '      - "%s"\n      - "DIRECT"' % n, 1)
-    cfg.write_text(c)
-
-prov = web / "provider.yaml"
-if prov.exists():
-    q = prov.read_text()
-    if not q.endswith("\n"):
-        q += "\n"
-    prov.write_text(q + text)
-
-links_file = web / "links.txt"
-if links_file.exists():
-    with links_file.open("a") as f:
-        for l in links:
-            f.write(l + "\n")
-PY
-}
 
 # ---------------------------------------------------------------- 协议模块
 # enabled 的唯一事实来源：config.json 里的 inbound
@@ -2351,20 +2298,18 @@ sync_env_locals() {
 
 # 按启用集合写 config.json；集合来自 config.json 本身，不另设开关
 render_set() {
-    # 兜底：env 里没记翻转参数、但本机确实有该域名的站点时，按站点推导，
-    # 避免把 handshake 写成自己的域名:443（= 自环，Reality 直接不可用）
-    if [[ -z "${VL_HANDSHAKE:-}" && -n "${VL_SNI:-}" ]]; then
-        local _site
-        if _site=$(site_file_for "$VL_SNI" 2>/dev/null); then
-            SITE_FILE="$_site"; FLIP_HOST="$VL_SNI"
-            VL_HANDSHAKE="127.0.0.1"; VL_HANDSHAKE_PORT="${FLIP_PORT:-9443}"
-        fi
-    fi
     local set=" $1 " vl_p="" hy_p=""
     [[ "$set" == *" reality "* ]] && vl_p="$VL_PORT"
     [[ "$set" == *" hy2 "* ]] && hy_p="$HY_PORT"
+    # 翻转不落库：VL_SNI 在本机 Caddy 里有站点块 → 回落 127.0.0.1:FLIP_PORT，
+    # 否则直接用该域名（外部 SNI）。只有这一个判据。
+    local hs="${VL_SNI:-}" hsp="443"
+    if [[ -n "${VL_SNI:-}" ]] && site_file_for "$VL_SNI" >/dev/null 2>&1; then
+        hs="127.0.0.1"; hsp="${FLIP_PORT:-9443}"
+        SITE_FILE="$(site_file_for "$VL_SNI")"; FLIP_HOST="$VL_SNI"
+    fi
     write_singbox_config "$vl_p" "${VL_SNI:-}" "${VL_UUID:-}" "${VL_PRIVKEY:-}" "${VL_SHORTID:-}" \
-        "$hy_p" "${HY_PASS:-}" "${VL_HANDSHAKE:-}" "${VL_HANDSHAKE_PORT:-}"
+        "$hy_p" "${HY_PASS:-}" "$hs" "$hsp"
 }
 
 proto_enable_reality() {
@@ -2383,11 +2328,10 @@ proto_enable_reality() {
     validate_domain "$sni" || return 1
 
     # 检查点 B：这个域名在本机有没有站点
-    local site="" hs="" hsp=""
+    local site=""
     if site=$(site_file_for "$sni"); then
         echo -e "${GREEN}✓ 找到本机站点 ${site}${PLAIN}"
         echo -e "  Reality 占用 ${port}，站点回落到 127.0.0.1:${FLIP_PORT:-9443}"
-        hs="127.0.0.1"; hsp="${FLIP_PORT:-9443}"
     else
         echo -e "${YELLOW}本机没有 ${sni} 的站点，按外部伪装域名校验 TLS 1.3 + h2 ...${PLAIN}"
         if ! probe_external_sni "$sni"; then
@@ -2411,7 +2355,6 @@ proto_enable_reality() {
 
     VL_PORT="$port"; VL_SNI="$sni"
     SITE_FILE="$site"; FLIP_HOST="${site:+$sni}"; FLIP_PORT="${FLIP_PORT:-9443}"
-    VL_HANDSHAKE="$hs"; VL_HANDSHAKE_PORT="$hsp"
 
     local set="reality"; set_has "hy2-in" && set="reality hy2"
     render_set "$set" || return 1
@@ -2764,8 +2707,9 @@ PYEOF
 disable_protocol() {
     local which="$1"
     load_env || { echo -e "${RED}未检测到已安装的配置${PLAIN}"; return 1; }
-    local label="Hysteria2" tag="hy2-in" keep="reality"
-    [[ "$which" == "reality" ]] && { label="Reality"; tag="vless-reality-in"; keep="hy2"; }
+    local label tag keep
+    label="$(proto_human "$which")"; tag="$(proto_tag "$which")"
+    keep="hy2"; [[ "$which" == "hy2" ]] && keep="reality"
 
     if ! set_has "$tag"; then
         echo -e "${YELLOW}${label} 当前未启用${PLAIN}"
@@ -2773,12 +2717,15 @@ disable_protocol() {
     fi
 
     local set="$keep"
-    set_has "$([[ "$keep" == "hy2" ]] && echo "hy2-in" || echo "vless-reality-in")" || set=""
+    set_has "$(proto_tag "$keep")" || set=""
     render_set "$set" || return 1
     systemctl restart sing-box || return 1
 
-    # Reality 停用后 443 空出来，把站点搬回去；Hy2 不涉及站点
-    [[ "$which" == "reality" ]] && { flip_site_toggle off || return 1; }
+    # Reality 停用后 443 空出来，把站点搬回去；SITE_FILE 缺失时按域名重新发现
+    if [[ "$which" == "reality" ]]; then
+        [[ -z "${SITE_FILE:-}" && -n "${VL_SNI:-}" ]] && SITE_FILE="$(site_file_for "$VL_SNI" 2>/dev/null || true)"
+        [[ -n "${SITE_FILE:-}" ]] && { FLIP_HOST="${VL_SNI:-}"; flip_site_toggle off || return 1; }
+    fi
 
     local vp="$VL_PORT" hp="$HY_PORT"
     [[ "$which" == "reality" ]] && vp=""
@@ -2786,6 +2733,90 @@ disable_protocol() {
     regen_from_scope "$vp" "$hp"
     echo -e "${GREEN}✓ 已停用 ${label}${PLAIN}"
     echo -e "  恢复：simbo → 协议管理 → 启用 ${label}"
+}
+
+
+# 从订阅 URL（provider.yaml）导入出口参数；打印 KEY=VALUE 供 eval
+exit_parse_url() {
+    local url="${1:-}"
+    local body
+    body=$(curl -fsSk -m 20 "$url" 2>/dev/null) || return 1
+    local tmpf; tmpf=$(mktemp /tmp/exitimport.XXXXXX)
+    printf '%s' "$body" > "$tmpf"
+    python3 - "$tmpf" <<'PY'
+import sys
+lines = open(sys.argv[1]).read().splitlines()
+blocks, cur = [], None
+for ln in lines:
+    if ln.strip().startswith("- name:"):
+        if cur: blocks.append(cur)
+        cur = {"__name": ln.split(":", 1)[1].strip().strip('"')}
+        continue
+    if cur is None:
+        continue
+    st = ln.strip()
+    if st.startswith("reality-opts:"):
+        cur["__reality"] = True
+        continue
+    if ":" in st and not st.startswith("#"):
+        k, v = st.split(":", 1)
+        cur.setdefault(k.strip(), v.strip().strip('"'))
+if cur: blocks.append(cur)
+
+def pick(t):
+    for b in blocks:
+        if b.get("type") == t: return b
+    return None
+
+b = pick("hysteria2")
+if b:
+    for k, v in (("EXIT_TYPE", "hy2"), ("EXIT_SERVER", b.get("server", "")),
+                 ("EXIT_PORT", b.get("port", "")), ("EXIT_PASS", b.get("password", "")),
+                 ("EXIT_SNI", b.get("sni") or b.get("server", ""))):
+        print(f"{k}\t{v}")
+    sys.exit(0)
+b = pick("vless")
+if b:
+    for k, v in (("EXIT_TYPE", "vless"), ("EXIT_SERVER", b.get("server", "")),
+                 ("EXIT_PORT", b.get("port", "")), ("EXIT_UUID", b.get("uuid", "")),
+                 ("EXIT_PBK", b.get("public-key", "")), ("EXIT_SID", b.get("short-id", "")),
+                 ("EXIT_SNI", b.get("servername") or b.get("sni") or b.get("server", ""))):
+        print(f"{k}\t{v}")
+    sys.exit(0)
+sys.exit(1)
+PY
+    local rc=$?
+    rm -f "$tmpf"
+    return $rc
+}
+
+# 出口生效性自检：起临时 socks 走 exit-out，看出口 IP 是否符合预期
+# 返回 0=正常 1=连不通 2=IP 不符
+exit_health_check() {
+    local port=11080 tmp got want
+    tmp=$(mktemp /tmp/exitprobe.XXXXXX.json)
+    python3 - "$CONF_FILE" "$tmp" "$port" <<'PY' || { rm -f "$tmp"; return 1; }
+import json, sys
+d = json.load(open(sys.argv[1]))
+out = [o for o in d.get("outbounds", []) if o.get("tag") == "exit-out"]
+if not out:
+    sys.exit(1)
+cfg = {"log": {"level": "error"},
+       "inbounds": [{"type": "socks", "tag": "in", "listen": "127.0.0.1", "listen_port": int(sys.argv[3])}],
+       "outbounds": out}
+json.dump(cfg, open(sys.argv[2], "w"))
+PY
+    /usr/local/bin/sing-box run -c "$tmp" >/dev/null 2>&1 &
+    local pid=$!
+    sleep 2
+    got=$(curl -s -m 15 --socks5-hostname "127.0.0.1:${port}" https://api.ipify.org 2>/dev/null || true)
+    kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -f "$tmp"
+    [[ -n "$got" ]] || return 1
+    want=$(getent hosts "${EXIT_SERVER:-}" | awk '{print $1}' | head -1)
+    [[ -n "$want" ]] || return 0
+    [[ "$got" == "$want" ]] && return 0
+    printf '%s %s\n' "$got" "$want" > /tmp/exitprobe.result
+    return 2
 }
 
 menu_exit() {
@@ -2818,8 +2849,29 @@ menu_exit() {
                 read -r -p "按回车返回..." _ || true
                 ;;
             2)
+                local mode=""
+                ask "设置方式 [1=粘贴订阅地址导入 2=手动填写，默认 2]: " mode
+                if [[ "$mode" == "1" ]]; then
+                    local url
+                    ask "粘贴落地机的 provider.yaml 地址: " url
+                    local _imp="" _k="" _v=""
+                    if [[ -z "$url" ]] || ! _imp=$(exit_parse_url "$url"); then
+                        echo -e "${RED}✗ 导入失败：地址不可达，或对方没有可用的节点${PLAIN}"
+                        echo -e "${YELLOW}  先确认落地机已安装并启用了该协议。${PLAIN}"
+                        read -r -p "按回车返回..." _ || true
+                        continue
+                    fi
+                    # 只接受白名单字段，值原样赋给变量，不经过 shell 解释
+                    while IFS=$'\t' read -r _k _v; do
+                        case "$_k" in
+                            EXIT_TYPE|EXIT_SERVER|EXIT_PORT|EXIT_PASS|EXIT_SNI|EXIT_UUID|EXIT_PBK|EXIT_SID)
+                                printf -v "$_k" '%s' "$_v" ;;
+                        esac
+                    done <<< "$_imp"
+                    echo -e "${GREEN}✓ 已从订阅导入：${EXIT_TYPE} → ${EXIT_SERVER}:${EXIT_PORT}${PLAIN}"
+                fi
                 local typ srv prt
-                ask "出口协议 [hy2/reality，当前 ${cur}] : " typ
+                ask "出口协议 [hy2/reality，当前 ${cur}]: " typ
                 typ="${typ:-${cur}}"
                 case "$typ" in
                     hy2|h) typ="hy2" ;;
@@ -2853,9 +2905,20 @@ menu_exit() {
                 fi
                 sync_env_locals; write_env_config || { echo -e "${RED}写入 env 失败${PLAIN}"; continue; }
                 local set="reality"; set_has "hy2-in" && set="reality hy2"
-                render_set "$set" && sync_env_locals && render_and_reload \
-                    && echo -e "${GREEN}✓ 出口已设置：${desc}${PLAIN}" \
-                    || echo -e "${RED}✗ 应用失败，请查看上面的输出${PLAIN}"
+                if render_set "$set" && sync_env_locals && render_and_reload; then
+                    echo -e "${GREEN}✓ 出口已设置${PLAIN}"
+                    exit_health_check
+                    case $? in
+                        0) echo -e "${GREEN}✓ 出口连通性正常${PLAIN}" ;;
+                        1) echo -e "${RED}✗ 出口连不通${PLAIN}"
+                           echo -e "${YELLOW}  检查落地机是否安装、协议是否启用、端口是否放行${PLAIN}" ;;
+                        2) echo -e "${YELLOW}⚠ 出口可用，但出口 IP 与落地机不一致${PLAIN}"
+                           echo -e "  $(cat /tmp/exitprobe.result 2>/dev/null)（实际 / 预期）"
+                           echo -e "${YELLOW}  说明落地机自己也在中转，检查它的「出口中转」是否已关闭${PLAIN}" ;;
+                    esac
+                else
+                    echo -e "${RED}✗ 应用失败，请查看上面的输出${PLAIN}"
+                fi
                 read -r -p "按回车返回..." _ || true
                 ;;
             3)
@@ -2877,26 +2940,31 @@ menu_protocol() {
     while true; do
         [ -t 1 ] && clear
         echo -e "${GRAY}=================== 协议管理 ===================${PLAIN}"
-        echo " 1. 启用 Reality"
-        echo " 2. 停用 Reality"
-        echo " 3. 启用 Hysteria2"
-        echo " 4. 停用 Hysteria2"
+        local i=1 p names=()
+        for p in $PROTOCOLS; do
+            echo " $i. 启用 $(proto_human "$p")"
+            echo " $((i+1)). 停用 $(proto_human "$p")"
+            names+=("$p")
+            i=$((i+2))
+        done
         echo " 0. 返回主菜单"
         echo -e "${GRAY}================================================${PLAIN}"
-        local opt="" ok=""
-        ask "请输入选项 [0-4]: " opt
-        case "$opt" in
-            1) proto_enable_reality; read -r -p "按回车返回..." _ || true ;;
-            2) read -r -p "确认停用 Reality？[y/N]: " ok || ok=""
-               [[ "$ok" == [yY]* ]] && disable_protocol reality
-               read -r -p "按回车返回..." _ || true ;;
-            3) proto_enable_hy2; read -r -p "按回车返回..." _ || true ;;
-            4) read -r -p "确认停用 Hysteria2？[y/N]: " ok || ok=""
-               [[ "$ok" == [yY]* ]] && disable_protocol hy2
-               read -r -p "按回车返回..." _ || true ;;
-            0) break ;;
-            *) echo -e "${RED}无效选项${PLAIN}"; sleep 1 ;;
-        esac
+        local opt="" ok="" idx
+        ask "请输入选项 [0-$((i-1))]: " opt
+        if [[ "$opt" == "0" ]]; then break; fi
+        if [[ "$opt" =~ ^[0-9]+$ ]] && (( opt >= 1 && opt < i )); then
+            idx=$(( (opt-1)/2 ))
+            p="${names[$idx]}"
+            if (( (opt-1) % 2 == 0 )); then
+                "proto_enable_${p}"
+            else
+                read -r -p "确认停用 $(proto_human "$p")？[y/N]: " ok || ok=""
+                [[ "$ok" == [yY]* ]] && disable_protocol "$p"
+            fi
+            read -r -p "按回车返回..." _ || true
+        else
+            echo -e "${RED}无效选项${PLAIN}"; sleep 1
+        fi
     done
 }
 

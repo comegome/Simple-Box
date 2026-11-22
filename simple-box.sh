@@ -1987,51 +1987,39 @@ EOF
 
 # 展示单独节点链接与二维码
 show_links() {
-    # 每次都按 env.conf 现算一遍，不缓存：
-    # 曾经按 mtime 判断是否陈旧，但升级脚本后 links.txt 仍是旧格式（如 hysteria2://），
-    # 而它的 mtime 比 env.conf 新，于是永远不重算，用户看到的还是旧链接。
-    # 这里无网络开销、纯本地拼字符串，直接重算最稳。
     if [[ ! -f "$ENV_FILE" ]]; then
         echo -e "${RED}未找到节点环境配置，请先执行安装！${PLAIN}"
         return 1
     fi
     set +e; load_env; set -e
-    local hy_ports_display
-    hy_ports_display=$(fmt_hy_ports "${HY_PORT}" "${HY_RANGE:-}")
-    local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
-    local vless_link="vless://${VL_UUID}@${SERVER_IP}:${VL_PORT}?security=reality&encryption=none&pbk=${VL_PUBKEY}&headerType=none&fp=chrome&type=tcp&flow=xtls-rprx-vision&sni=${VL_SNI}&sid=${VL_SHORTID}#${NODE_PREFIX}-VLESS-Reality"
-    local insecure_flag="0"
-    [[ "${HY_SKIP_CERT:-false}" == "true" ]] && insecure_flag="1"
-    local mport_param=""
-    [[ -n "$hy_ports_display" && "$hy_ports_display" == *,* ]] && mport_param="&mport=${hy_ports_display}"
-    local hy2_link="hy2://${HY_PASS}@${host}:${HY_PORT}/?sni=${host}&insecure=${insecure_flag}${mport_param}#${NODE_PREFIX}-Hysteria2"
+    sync_env_locals
 
-    # 只写订阅对外提供的文件；本地不再维护副本（没有任何读取点）
+    # 链接不再手拼：直接重建订阅（生成器含链式节点），再展示 links.txt，
+    # 保证「菜单里看到的」= 「客户端拉到的」。
+    regen_subscription "${SUB_TOKEN:-}" >/dev/null 2>&1 || true
     local web_links="${WEB_DIR}/${SUB_TOKEN}/links.txt"
-    if [[ -d "${WEB_DIR}/${SUB_TOKEN}" ]]; then
-        printf '%s\n%s\n' "$vless_link" "$hy2_link" > "$web_links" 2>/dev/null || true
-        chmod 644 "$web_links" 2>/dev/null || true
+    if [[ ! -s "$web_links" ]]; then
+        echo -e "${RED}未生成链接文件，请先重建配置${PLAIN}"
+        return 1
     fi
 
-    local vless_url="$vless_link"
-    local hy2_url="$hy2_link"
-
-    echo -e "\n${GRAY}==================== vless / hy2 原生链接 ====================${PLAIN}"
-    echo -e " [1] vless 链接:"
-    echo -e " ${CYAN}${vless_url}${PLAIN}"
-    if command -v qrencode &>/dev/null; then
-        echo -e "\n [vless 二维码]:"
-        qrencode -t ANSIUTF8 "${vless_url}"
-    fi
-
-    if [[ -n "$hy2_url" ]]; then
-        echo -e "\n${GRAY}--------------------------------------------------------------${PLAIN}"
-        echo -e " [2] hy2 链接:"
-        echo -e " ${CYAN}${hy2_url}${PLAIN}"
+    echo -e "\n${GRAY}==================== 原生链接 ====================${PLAIN}"
+    local i=0 line name
+    while IFS= read -r line; do
+        [[ -z "$line" ]] && continue
+        i=$((i+1))
+        name="${line##*#}"
+        echo -e " [${i}] ${BOLD}${name}${PLAIN}"
+        echo -e " ${CYAN}${line}${PLAIN}"
         if command -v qrencode &>/dev/null; then
-            echo -e "\n [hy2 二维码]:"
-            qrencode -t ANSIUTF8 "${hy2_url}"
+            qrencode -t ANSIUTF8 "$line"
         fi
+        echo
+    done < "$web_links"
+    if [[ "${EXIT_TYPE:-none}" != "none" && -n "${EXIT_SERVER:-}" ]]; then
+        echo -e "${GRAY}共 ${i} 条（含中转节点 -${EXIT_LABEL:-SG}）${PLAIN}"
+    else
+        echo -e "${GRAY}共 ${i} 条${PLAIN}"
     fi
     echo -e "${GRAY}==============================================================${PLAIN}\n"
     show_clash_snippet || true
@@ -2320,8 +2308,18 @@ proto_enable_reality() {
     ensure_reality_creds || return 1
 
     if [[ "$interactive" == 1 ]]; then
-        ask_trim "请输入 Reality 监听端口 [默认: ${CYAN}${VL_PORT:-443}${PLAIN}]: " "${VL_PORT:-443}" port
-        ask_trim "请输入 Reality 伪装域名 [默认: ${CYAN}${VL_SNI:-www.icloud.com}${PLAIN}]: " "${VL_SNI:-www.icloud.com}" sni
+        if [[ -n "${VL_PORT:-}" && -n "${VL_SNI:-}" ]]; then
+            echo -e " 当前参数: 端口 ${CYAN}${VL_PORT}${PLAIN} / 伪装域名 ${CYAN}${VL_SNI}${PLAIN}"
+            local okp=""
+            ask "沿用这组参数？[Y/n]: " okp
+            if [[ "${okp,,}" == "n" ]]; then
+                ask_trim "请输入 Reality 监听端口 [默认: ${CYAN}${VL_PORT}${PLAIN}]: " "${VL_PORT}" port
+                ask_trim "请输入 Reality 伪装域名 [默认: ${CYAN}${VL_SNI}${PLAIN}]: " "${VL_SNI}" sni
+            fi
+        else
+            ask_trim "请输入 Reality 监听端口 [默认: ${CYAN}${VL_PORT:-443}${PLAIN}]: " "${VL_PORT:-443}" port
+            ask_trim "请输入 Reality 伪装域名 [默认: ${CYAN}${VL_SNI:-www.icloud.com}${PLAIN}]: " "${VL_SNI:-www.icloud.com}" sni
+        fi
     fi
     port="${port:-${VL_PORT:-443}}"; sni="${sni:-${VL_SNI:-www.icloud.com}}"
     validate_port "$port" || return 1
@@ -2375,9 +2373,14 @@ proto_enable_hy2() {
     load_env || { echo -e "${RED}未检测到已安装的配置${PLAIN}"; return 1; }
 
     if [[ "$interactive" == 1 ]]; then
-        ask_trim "请输入 Hysteria2 域名 [默认: ${CYAN}${HY_DOMAIN:-留空=IP自签}${PLAIN}]: " "${HY_DOMAIN:-}" domain
-        ask_trim "请输入 Hysteria2 端口 [默认: ${CYAN}${HY_PORT:-10443}${PLAIN}]: " "${HY_PORT:-10443}" port
-        ask_trim "请输入端口跳跃范围 [默认: ${CYAN}${HY_RANGE:-none}${PLAIN}] (none=不启用): " "${HY_RANGE:-none}" range
+        echo -e " 当前参数: 端口 ${CYAN}${HY_PORT:-—}${PLAIN} / 域名 ${CYAN}${HY_DOMAIN:-无}${PLAIN} / 跳跃 ${CYAN}${HY_RANGE:-无}${PLAIN}"
+        local okh=""
+        ask "沿用这组参数？[Y/n]: " okh
+        if [[ "${okh,,}" == "n" ]]; then
+            ask_trim "请输入 Hysteria2 域名 [默认: ${CYAN}${HY_DOMAIN:-留空=IP自签}${PLAIN}]: " "${HY_DOMAIN:-}" domain
+            ask_trim "请输入 Hysteria2 端口 [默认: ${CYAN}${HY_PORT:-10443}${PLAIN}]: " "${HY_PORT:-10443}" port
+            ask_trim "请输入端口跳跃范围 [默认: ${CYAN}${HY_RANGE:-none}${PLAIN}] (none=不启用): " "${HY_RANGE:-none}" range
+        fi
     fi
     port="${port:-${HY_PORT:-10443}}"; range="${range:-${HY_RANGE:-}}"
     [[ "$range" == "none" ]] && range=""
@@ -2832,12 +2835,13 @@ menu_exit() {
         echo -e "${GRAY}=================== 出口中转 ===================${PLAIN}"
         echo -e " 当前: ${CYAN}${desc}${PLAIN}"
         echo " 1. 查看出口详情"
-        echo " 2. 设置 / 切换出口协议"
-        echo " 3. 关闭出口（只留直连）"
+        echo -e " 2. 切换出口协议${GRAY}（$( [[ "$cur" == "hy2" ]] && echo "Hy2 → Reality" || echo "Reality → Hy2" )）${PLAIN}"
+        echo " 3. 设置出口参数（导入 / 手动）"
+        echo " 4. 关闭出口（只留直连）"
         echo " 0. 返回主菜单"
         echo -e "${GRAY}================================================${PLAIN}"
         local opt=""
-        ask "请输入选项 [0-3]: " opt
+        ask "请输入选项 [0-4]: " opt
         case "$opt" in
             1)
                 echo
@@ -2849,19 +2853,41 @@ menu_exit() {
                 read -r -p "按回车返回..." _ || true
                 ;;
             2)
+                local target other
+                if [[ "$cur" == "hy2" ]]; then target="vless"; other="Reality"; else target="hy2"; other="Hy2"; fi
+                if [[ "$target" == "hy2" && -z "${EXIT_PASS:-}" ]] || [[ "$target" == "vless" && -z "${EXIT_UUID:-}" ]]; then
+                    echo -e "${YELLOW}${other} 出口的参数还没配置，请先执行 3. 设置出口参数${PLAIN}"
+                    read -r -p "按回车返回..." _ || true
+                    continue
+                fi
+                EXIT_TYPE="$target"
+                sync_env_locals; write_env_config
+                local set="reality"; set_has "hy2-in" && set="reality hy2"
+                if render_set "$set" && sync_env_locals && render_and_reload; then
+                    echo -e "${GREEN}✓ 已切换到 ${other} 出口${PLAIN}"
+                    exit_health_check
+                    case $? in
+                        0) echo -e "${GREEN}✓ 出口连通性正常${PLAIN}" ;;
+                        1) echo -e "${RED}✗ 出口连不通${PLAIN}"; echo -e "${YELLOW}  检查落地机与端口放行${PLAIN}" ;;
+                        2) echo -e "${YELLOW}⚠ 出口 IP 与落地机不一致（对方可能也在中转）${PLAIN}" ;;
+                    esac
+                else
+                    echo -e "${RED}✗ 切换失败${PLAIN}"
+                fi
+                read -r -p "按回车返回..." _ || true
+                ;;
+            3)
                 local mode=""
                 ask "设置方式 [1=粘贴订阅地址导入 2=手动填写，默认 2]: " mode
                 if [[ "$mode" == "1" ]]; then
-                    local url
+                    local url="" _imp="" _k="" _v=""
                     ask "粘贴落地机的 provider.yaml 地址: " url
-                    local _imp="" _k="" _v=""
                     if [[ -z "$url" ]] || ! _imp=$(exit_parse_url "$url"); then
                         echo -e "${RED}✗ 导入失败：地址不可达，或对方没有可用的节点${PLAIN}"
                         echo -e "${YELLOW}  先确认落地机已安装并启用了该协议。${PLAIN}"
                         read -r -p "按回车返回..." _ || true
                         continue
                     fi
-                    # 只接受白名单字段，值原样赋给变量，不经过 shell 解释
                     while IFS=$'\t' read -r _k _v; do
                         case "$_k" in
                             EXIT_TYPE|EXIT_SERVER|EXIT_PORT|EXIT_PASS|EXIT_SNI|EXIT_UUID|EXIT_PBK|EXIT_SID)
@@ -2906,22 +2932,19 @@ menu_exit() {
                 sync_env_locals; write_env_config || { echo -e "${RED}写入 env 失败${PLAIN}"; continue; }
                 local set="reality"; set_has "hy2-in" && set="reality hy2"
                 if render_set "$set" && sync_env_locals && render_and_reload; then
-                    echo -e "${GREEN}✓ 出口已设置${PLAIN}"
+                    echo -e "${GREEN}✓ 出口参数已保存${PLAIN}"
                     exit_health_check
                     case $? in
                         0) echo -e "${GREEN}✓ 出口连通性正常${PLAIN}" ;;
-                        1) echo -e "${RED}✗ 出口连不通${PLAIN}"
-                           echo -e "${YELLOW}  检查落地机是否安装、协议是否启用、端口是否放行${PLAIN}" ;;
-                        2) echo -e "${YELLOW}⚠ 出口可用，但出口 IP 与落地机不一致${PLAIN}"
-                           echo -e "  $(cat /tmp/exitprobe.result 2>/dev/null)（实际 / 预期）"
-                           echo -e "${YELLOW}  说明落地机自己也在中转，检查它的「出口中转」是否已关闭${PLAIN}" ;;
+                        1) echo -e "${RED}✗ 出口连不通${PLAIN}"; echo -e "${YELLOW}  检查落地机与端口放行${PLAIN}" ;;
+                        2) echo -e "${YELLOW}⚠ 出口 IP 与落地机不一致（对方可能也在中转）${PLAIN}" ;;
                     esac
                 else
-                    echo -e "${RED}✗ 应用失败，请查看上面的输出${PLAIN}"
+                    echo -e "${RED}✗ 应用失败${PLAIN}"
                 fi
                 read -r -p "按回车返回..." _ || true
                 ;;
-            3)
+            4)
                 EXIT_TYPE="none"
                 sync_env_locals; write_env_config
                 local set="reality"; set_has "hy2-in" && set="reality hy2"
@@ -2940,26 +2963,24 @@ menu_protocol() {
     while true; do
         [ -t 1 ] && clear
         echo -e "${GRAY}=================== 协议管理 ===================${PLAIN}"
-        local i=1 p names=()
+        local i=1 p state
         for p in $PROTOCOLS; do
-            echo " $i. 启用 $(proto_human "$p")"
-            echo " $((i+1)). 停用 $(proto_human "$p")"
-            names+=("$p")
-            i=$((i+2))
+            if set_has "$(proto_tag "$p")"; then state="${GREEN}已启用${PLAIN}"; else state="${GRAY}已停用${PLAIN}"; fi
+            echo -e " $i. $(proto_human "$p")  ${state}"
+            i=$((i+1))
         done
         echo " 0. 返回主菜单"
         echo -e "${GRAY}================================================${PLAIN}"
-        local opt="" ok="" idx
+        local opt="" ok=""
         ask "请输入选项 [0-$((i-1))]: " opt
         if [[ "$opt" == "0" ]]; then break; fi
         if [[ "$opt" =~ ^[0-9]+$ ]] && (( opt >= 1 && opt < i )); then
-            idx=$(( (opt-1)/2 ))
-            p="${names[$idx]}"
-            if (( (opt-1) % 2 == 0 )); then
-                "proto_enable_${p}"
-            else
+            p=$(echo $PROTOCOLS | cut -d' ' -f"$opt")
+            if set_has "$(proto_tag "$p")"; then
                 read -r -p "确认停用 $(proto_human "$p")？[y/N]: " ok || ok=""
                 [[ "$ok" == [yY]* ]] && disable_protocol "$p"
+            else
+                "proto_enable_${p}"
             fi
             read -r -p "按回车返回..." _ || true
         else

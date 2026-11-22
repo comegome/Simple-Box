@@ -1001,7 +1001,7 @@ print_io_status() {
         printf ' 出站 %-14s %s  %s  →  %s (%s)\n' "Relay" "${GREEN}[已启用]${PLAIN}" \
             "$ep" "${EXIT_SERVER}" "$en"
     else
-        printf ' 出站 %-14s %s\n' "Relay" "${GRAY}[关闭]${PLAIN}"
+        printf ' 出站 %-14s %s\n' "Relay" "${GRAY}[已停用]${PLAIN}"
     fi
 }
 
@@ -2917,10 +2917,10 @@ menu_exit() {
         echo " 1. 查看出站详情"
         local _switch="Reality → Hy2"
         [[ "$cur" == "hy2" ]] && _switch="Hy2 → Reality"
-        [[ "$cur" == "none" ]] && _switch="当前关闭"
+        [[ "$cur" == "none" ]] && _switch="当前停用"
         echo -e " 2. 切换出站协议${GRAY}（${_switch}）${PLAIN}"
         echo " 3. 设置出站参数（导入 / 手动）"
-        echo " 4. 关闭出站中转（只留直连）"
+        echo " 4. 停用出站中转（只留直连）"
         echo " 0. 返回主菜单"
         echo -e "${GRAY}================================================${PLAIN}"
         local opt=""
@@ -2929,7 +2929,7 @@ menu_exit() {
             1)
                 echo
                 if [[ "$cur" == "none" ]]; then
-                    echo -e " 出站: ${GRAY}[关闭]${PLAIN} 只保留直连"
+                    echo -e " 出站: ${GRAY}[已停用]${PLAIN} 只保留直连"
                 else
                     local _en="Hy2"; [[ "$cur" == "vless" ]] && _en="Reality"
                     echo -e " 出站: ${CYAN}[${_en}]${PLAIN} → ${EXIT_SERVER}:${EXIT_PORT}"
@@ -3044,7 +3044,7 @@ menu_exit() {
                 ;;
             4)
                 EXIT_TYPE="none"
-                apply_exit_reload && echo -e "${GREEN}✓ 出站已关闭，只保留直连${PLAIN}" \
+                apply_exit_reload && echo -e "${GREEN}✓ 出站中转已停用，只保留直连${PLAIN}" \
                     || echo -e "${RED}✗ 应用失败${PLAIN}"
                 read -r -p "按回车返回..." _ || true
                 ;;

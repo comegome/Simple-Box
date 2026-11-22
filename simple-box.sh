@@ -3226,9 +3226,9 @@ menu() {
         echo -e "${GRAY}----------------------------------------------------${PLAIN}"
         echo -e " 1. 原始订阅信息"
         echo -e " 2. 入站管理"
-        echo -e " 3. 订阅地址配置"
-        echo -e " 4. sing-box 内核管理"
-        echo -e " 5. 出站管理"
+        echo -e " 3. 出站管理"
+        echo -e " 4. 订阅地址配置"
+        echo -e " 5. sing-box 内核管理"
         echo -e " 6. 脚本升级"
         echo -e " 7. 脚本卸载"
         echo -e " 0. 退出控制台"
@@ -3239,9 +3239,9 @@ menu() {
         case "$opt" in
             1) show_links || true ;;
             2) menu_protocol || true ;;
-            3) menu_sub_module || true ;;
-            4) menu_singbox_manage || true ;;
-            5) menu_exit || true ;;
+            3) menu_exit || true ;;
+            4) menu_sub_module || true ;;
+            5) menu_singbox_manage || true ;;
             6) reinstall_with_latest || true ;;
             7)
                 uninstall_all || true

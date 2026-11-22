@@ -908,7 +908,7 @@ _n=$(python3 -c "import json;print(len(json.load(open('$CONF_FILE'))['inbounds']
 [[ "$_n" == "2" ]] && ok "17.9 关闭出口后只剩两个 inbound" || bad "17.9 关闭出口残留" "$_n"
 
 # 17.10 菜单入口
-grep -q '5. 出站管理' "$TARGET" && grep -q '^menu_exit()' "$TARGET" && ok "17.10 菜单含出站管理" || bad "17.10 菜单缺少出站管理"
+grep -q '3. 出站管理' "$TARGET" && grep -q '^menu_exit()' "$TARGET" && ok "17.10 菜单含出站管理" || bad "17.10 菜单缺少出站管理"
 
 
 # ---------- 18. 出口导入与自检 ----------

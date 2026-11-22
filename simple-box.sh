@@ -288,7 +288,7 @@ check_port_conflict() {
         return 1
     fi
     if [[ -n "${HY_PORT:-}" && "$self" != "hy2" && "$port" == "$HY_PORT" ]]; then
-        echo -e "${RED}端口冲突: 该端口已分配给 Hysteria 2 (${HY_PORT})，不能共用！${PLAIN}"
+        echo -e "${RED}端口冲突: 该端口已分配给 Hysteria2 (${HY_PORT})，不能共用！${PLAIN}"
         return 1
     fi
     if [[ -n "${SUB_PORT:-}" && "$self" != "sub" && "$port" == "$SUB_PORT" ]]; then
@@ -301,7 +301,7 @@ check_port_conflict() {
     if [[ -n "$r" && "$r" == *:* ]]; then
         local r_start="${r%%:*}" r_end="${r##*:}"
         if (( port >= r_start && port <= r_end )); then
-            echo -e "${RED}范围冲突: 端口 ${port} 落在 Hysteria 2 跳跃范围 (${r}) 内，请调整！${PLAIN}"
+            echo -e "${RED}范围冲突: 端口 ${port} 落在 Hysteria2 跳跃范围 (${r}) 内，请调整！${PLAIN}"
             return 1
         fi
     fi
@@ -776,7 +776,7 @@ setup_port_hopping() {
     local hy_port="${1:-}"
     local range="${2:-}"
 
-    echo -e "配置 Hysteria 2 端口跳跃 (UDP ${range} -> ${hy_port})..."
+    echo -e "配置 Hysteria2 端口跳跃 (UDP ${range} -> ${hy_port})..."
     iptables -t nat -D PREROUTING -p udp --dport "$range" -j REDIRECT --to-ports "$hy_port" 2>/dev/null || true
     iptables -t nat -A PREROUTING -p udp --dport "$range" -j REDIRECT --to-ports "$hy_port"
 
@@ -845,7 +845,7 @@ setup_caddy_subscription() {
 
     if ! install_caddy; then
         echo -e "${RED}Caddy 不可用，订阅地址无法访问。${PLAIN}"
-        echo -e "${YELLOW}节点本身是好的：Reality / Hy2 照常可用，原生链接也不受影响，${PLAIN}"
+        echo -e "${YELLOW}节点本身是好的：Reality / Hysteria2 照常可用，原生链接也不受影响，${PLAIN}"
         echo -e "${YELLOW}只有 http://<地址>:${sub_port}/ 这个订阅端点不会响应。${PLAIN}"
         echo -e "${YELLOW}装好 Caddy 后重跑菜单 4「Clash 订阅地址配置」即可补上，不用重装节点。${PLAIN}"
         return 1
@@ -1705,7 +1705,7 @@ install_node() {
         break
     done
 
-    echo -e "\n${GRAY}──────── ${BOLD}[2/3] Hysteria 2${PLAIN}"
+    echo -e "\n${GRAY}──────── ${BOLD}[2/3] Hysteria2${PLAIN}"
     local hy_skip_cert="false"
     local cert_fell_back=""
 
@@ -1789,7 +1789,7 @@ install_node() {
     local hy_port="8443"
     local hy_range="39000:39999"
     while true; do
-        ask_trim "请输入 Hysteria 2 主监听 UDP 端口 [默认: ${CYAN}${old_hy_port:-8443}${PLAIN}]: " "${old_hy_port:-8443}" hy_port
+        ask_trim "请输入 Hysteria2 主监听 UDP 端口 [默认: ${CYAN}${old_hy_port:-8443}${PLAIN}]: " "${old_hy_port:-8443}" hy_port
         if ! validate_port "$hy_port"; then
             echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
         fi
@@ -1862,7 +1862,7 @@ install_node() {
         return 1
     fi
     if [[ -z "$hy_password" ]]; then
-        echo -e "${RED}Hysteria 2 密码生成失败，已中止安装。${PLAIN}"
+        echo -e "${RED}Hysteria2 密码生成失败，已中止安装。${PLAIN}"
         return 1
     fi
 
@@ -2945,7 +2945,7 @@ menu_exit() {
                     local _en="Hysteria2"; [[ "$cur" == "vless" ]] && _en="Reality"
                     local _res; _res=$(timeout 2 getent ahostsv4 "$EXIT_SERVER" 2>/dev/null | awk '{print $1; exit}')
                     echo -e " 出站: ${CYAN}[${_en}]${PLAIN} → ${EXIT_SERVER}:${EXIT_PORT}${_res:+  (${_res})}"
-                    echo -e " 入口: Reality ${EXIT_ENTRY_VL:-—} / Hy2 ${EXIT_ENTRY_HY:-—}"
+                    echo -e " 入口: Reality ${EXIT_ENTRY_VL:-—} / Hysteria2 ${EXIT_ENTRY_HY:-—}"
                     echo -e " 后缀: -${EXIT_LABEL:-SG}"
                 fi
                 echo
@@ -2992,10 +2992,11 @@ menu_exit() {
                     echo -e "${GREEN}✓ 已从订阅导入：${EXIT_TYPE} → ${EXIT_SERVER}:${EXIT_PORT}${PLAIN}"
                 fi
                 local typ srv prt
-                ask "出站协议 [hy2/reality，当前 ${cur}]: " typ
+                local _curh="Hysteria2"; [[ "$cur" == "vless" ]] && _curh="Reality"
+                ask "出站协议 [hysteria2/reality，当前 ${_curh}]，回车沿用: " typ
                 typ="${typ:-${cur}}"
                 case "$typ" in
-                    hy2|h) typ="hy2" ;;
+                    hy2|h|hysteria2|hy) typ="hy2" ;;
                     reality|vless|v|r) typ="vless" ;;
                     *) echo -e "${RED}无效协议${PLAIN}"; sleep 1; continue ;;
                 esac
@@ -3028,7 +3029,7 @@ menu_exit() {
                 if [[ "$typ" == "hy2" ]]; then
                     local pw
                     EXIT_HY_SERVER="$srv"; EXIT_HY_PORT="$prt"
-                    ask "出站 Hy2 密码 [回车沿用]: " pw
+                    ask "出站 Hysteria2 密码 [回车沿用]: " pw
                     EXIT_HY_PASS="${pw:-${EXIT_HY_PASS:-}}"
                     if [[ -z "$EXIT_HY_PASS" ]]; then echo -e "${RED}密码不能为空${PLAIN}"; sleep 1; continue; fi
                     EXIT_HY_SNI="${EXIT_HY_SNI:-$srv}"

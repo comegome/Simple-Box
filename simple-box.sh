@@ -2900,6 +2900,13 @@ menu_exit() {
                 if [[ -z "$srv" ]]; then echo -e "${RED}地址不能为空${PLAIN}"; sleep 1; continue; fi
                 ask "出口端口 [${EXIT_PORT:-$([[ "$typ" == hy2 ]] && echo 8443 || echo 443)}]: " prt
                 prt="${prt:-${EXIT_PORT:-$([[ "$typ" == hy2 ]] && echo 8443 || echo 443)}}"
+                local lbl=""
+                ask "节点后缀 [${EXIT_LABEL:-SG}，用于区分直连与中转]: " lbl
+                lbl="${lbl:-${EXIT_LABEL:-SG}}"
+                if [[ ! "$lbl" =~ ^[A-Za-z0-9_-]+$ ]]; then
+                    echo -e "${RED}后缀只能用字母、数字、- 和 _${PLAIN}"; sleep 1; continue
+                fi
+                EXIT_LABEL="$lbl"
                 EXIT_TYPE="$typ"
                 if [[ "$typ" == "hy2" ]]; then
                     local pw

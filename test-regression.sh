@@ -832,6 +832,10 @@ EXIT_TYPE="vless"; sync_env_locals
 [[ "$EXIT_SERVER" == "isif2.example.com" && "$EXIT_PORT" == "443" ]] \
     && ok "17.12 切换协议使用各自的地址/端口" || bad "17.12 出口参数串用" "$EXIT_SERVER:$EXIT_PORT"
 
+# 17.13 节点后缀可自定义且做白名单校验
+grep -q '节点后缀 \[' "$TARGET" && ok "17.13 菜单可设置节点后缀" || bad "17.13 未提供后缀设置"
+grep -q 'A-Za-z0-9_-' "$TARGET" && ok "17.13 后缀有字符白名单" || bad "17.13 后缀无校验"
+
 # 17.8 vless 出口
 EXIT_TYPE="vless"; EXIT_PORT="443"; EXIT_UUID="22222222-2222-2222-2222-222222222222"
 EXIT_PBK="PBKEXIT"; EXIT_SID="ff00ff00"

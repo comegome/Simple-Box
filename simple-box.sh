@@ -755,7 +755,7 @@ issue_self_signed_cert() {
 # 清理本脚本遗留的端口跳跃规则（按标记逐条删除，不触碰其它规则）
 clear_port_hopping() {
     local ranges
-    # iptables -S 输出形如: -A PREROUTING -p udp -m udp --dport 20000:40000 -j REDIRECT --to-ports 8443
+    # iptables -S 输出形如: -A PREROUTING -p udp -m udp --dport 39000:39999 -j REDIRECT --to-ports 8443
     ranges=$(iptables -t nat -S PREROUTING 2>/dev/null \
         | grep -oP -- '--dport \K[0-9]+:[0-9]+(?=.*REDIRECT --to-ports)' | sort -u || true)
     local r tport
@@ -1006,7 +1006,7 @@ print_io_status() {
 }
 
 # 组装端口跳跃展示串：主端口，有跳跃范围时追加 "起始-结束"
-# 例：8443 + 20000:40000 → "8443,20000-40000"；无跳跃 → "8443"
+# 例：8443 + 39000:39999 → "8443,39000-39999"；无跳跃 → "8443"
 # 客户端靠这个串判断要不要启用 mport（含逗号即启用），格式改这里一处即可。
 fmt_hy_ports() {
     local port="${1:-}" range="${2:-}"
@@ -1782,7 +1782,7 @@ install_node() {
     fi
 
     local hy_port="8443"
-    local hy_range="20000:40000"
+    local hy_range="39000:39999"
     while true; do
         ask_trim "请输入 Hysteria 2 主监听 UDP 端口 [默认: ${CYAN}${old_hy_port:-8443}${PLAIN}]: " "${old_hy_port:-8443}" hy_port
         if ! validate_port "$hy_port"; then
@@ -1793,10 +1793,10 @@ install_node() {
     HY_PORT="$hy_port"
 
     while true; do
-        ask_trim "请输入端口跳跃范围 [默认: ${CYAN}${old_hy_range:-20000:40000}${PLAIN}] (none=不启用): " "${old_hy_range:-20000:40000}" hy_range
+        ask_trim "请输入端口跳跃范围 [默认: ${CYAN}${old_hy_range:-39000:39999}${PLAIN}] (none=不启用): " "${old_hy_range:-39000:39999}" hy_range
         [[ "${hy_range,,}" == "none" ]] && { hy_range=""; break; }
         if ! validate_range "$hy_range"; then
-            echo -e "${RED}范围格式非法，应为 起始:结束（如 20000:40000）。${PLAIN}"; continue
+            echo -e "${RED}范围格式非法，应为 起始:结束（如 39000:39999）。${PLAIN}"; continue
         fi
         check_range_conflict "$hy_range" && break
     done
@@ -2487,6 +2487,10 @@ proto_enable_hy2() {
         [[ -n "$domain" ]] && echo -e "${YELLOW}未找到 ${domain} 的证书，沿用现有证书文件${PLAIN}"
     fi
 
+    # 端口跳跃规则跟着当前参数走：先清掉本脚本的旧规则，再按需重建
+    clear_port_hopping
+    [[ -n "$range" ]] && setup_port_hopping "$HY_PORT" "$HY_RANGE"
+
     local set="hy2"; set_has "vless-reality-in" && set="reality hy2"
     render_set "$set" || return 1
     sync_env_locals; write_env_config || return 1
@@ -2802,6 +2806,8 @@ disable_protocol() {
         echo -e "${YELLOW}${label} 当前未启用${PLAIN}"
         return 0
     fi
+
+    [[ "$which" == "hy2" ]] && clear_port_hopping
 
     local set="$keep"
     set_has "$(proto_tag "$keep")" || set=""

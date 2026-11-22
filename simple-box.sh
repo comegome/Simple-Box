@@ -171,8 +171,19 @@ trim_string() {
 }
 
 # 统一输入：ask 纯输入 / ask_trim 去空格+默认值 / confirm_yes 确认
-ask() { local _in=""; read -r -p "$1" _in || _in=""; printf -v "$2" '%s' "$_in"; }
-ask_trim() { local _in=""; read -r -p "$1" _in || _in=""; printf -v "$3" '%s' "$(trim_string "${_in:-$2}")"; }
+# 统一的单行输入。stdin 关闭（EOF）时置 ASK_EOF=1，菜单循环据此退出，
+# 否则 read 一直失败、选项一直为空，会变成死循环。
+ASK_EOF=0
+ask() {
+    local _in=""
+    if read -r -p "$1" _in; then ASK_EOF=0; else _in=""; ASK_EOF=1; fi
+    printf -v "$2" '%s' "$_in"
+}
+ask_trim() {
+    local _in=""
+    if read -r -p "$1" _in; then ASK_EOF=0; else _in=""; ASK_EOF=1; fi
+    printf -v "$3" '%s' "$(trim_string "${_in:-$2}")"
+}
 confirm_yes() { local _in=""; read -r -p "$1" _in || _in=""; [[ "${_in,,}" == y* ]]; }
 
 
@@ -2355,10 +2366,10 @@ current_set() {
 report_exit_health() {
     exit_health_check
     case $? in
-        0) echo -e "${GREEN}✓ 出口连通性正常${PLAIN}" ;;
-        1) echo -e "${RED}✗ 出口连不通${PLAIN}"
+        0) echo -e "${GREEN}✓ 出站连通性正常${PLAIN}" ;;
+        1) echo -e "${RED}✗ 出站连不通${PLAIN}"
            echo -e "${YELLOW}  检查落地机与端口放行${PLAIN}" ;;
-        2) echo -e "${YELLOW}⚠ 出口 IP 与落地机不一致（对方可能也在中转）${PLAIN}" ;;
+        2) echo -e "${YELLOW}⚠ 出站 IP 与落地机不一致（对方可能也在中转）${PLAIN}" ;;
     esac
 }
 
@@ -2523,6 +2534,8 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
         echo -e "${GRAY}======================================================${PLAIN}"
         local opt=""
         ask "请输入选项 [0-3]: " opt
+        [[ "$ASK_EOF" == "1" ]] && break
+        [[ "$ASK_EOF" == "1" ]] && break
         case "$opt" in
             1)
                 echo -e "\n${YELLOW}=== Clash 订阅地址参数 ===${PLAIN}"
@@ -2718,6 +2731,7 @@ menu_singbox_manage() {
         echo -e "${GRAY}==========================================================${PLAIN}"
         local opt=""
         ask "请输入选项 [0-3]: " opt
+        [[ "$ASK_EOF" == "1" ]] && break
         case "$opt" in
             1)
                 if systemctl is-active --quiet sing-box 2>/dev/null; then
@@ -2926,8 +2940,8 @@ menu_exit() {
         [ -t 1 ] && clear
         echo -e "${GRAY}=================== 出站管理 ===================${PLAIN}"
         echo " 1. 查看出站详情"
-        local _switch="Reality → Hy2"
-        [[ "$cur" == "hy2" ]] && _switch="Hy2 → Reality"
+        local _switch="Reality → Hysteria2"
+        [[ "$cur" == "hy2" ]] && _switch="Hysteria2 → Reality"
         [[ "$cur" == "none" ]] && _switch="当前停用"
         echo -e " 2. 切换出站协议${GRAY}（${_switch}）${PLAIN}"
         echo " 3. 设置出站参数（导入 / 手动）"
@@ -2936,6 +2950,7 @@ menu_exit() {
         echo -e "${GRAY}================================================${PLAIN}"
         local opt=""
         ask "请输入选项 [0-4]: " opt
+        [[ "$ASK_EOF" == "1" ]] && break
         case "$opt" in
             1)
                 echo
@@ -2953,7 +2968,7 @@ menu_exit() {
                 ;;
             2)
                 local target other
-                if [[ "$cur" == "hy2" ]]; then target="vless"; other="Reality"; else target="hy2"; other="Hy2"; fi
+                if [[ "$cur" == "hy2" ]]; then target="vless"; other="Reality"; else target="hy2"; other="Hysteria2"; fi
                 if [[ "$target" == "hy2" && -z "${EXIT_HY_PASS:-}" ]] || [[ "$target" == "vless" && -z "${EXIT_VL_UUID:-}" ]]; then
                     echo -e "${YELLOW}${other} 出站的参数还没配置，请先执行 3. 设置出站参数${PLAIN}"
                     read -r -p "按回车返回..." _ || true
@@ -2993,8 +3008,8 @@ menu_exit() {
                 fi
                 local typ srv prt
                 local _curh="Hysteria2"; [[ "$cur" == "vless" ]] && _curh="Reality"
-                ask "出站协议 [hysteria2/reality，当前 ${_curh}]，回车沿用: " typ
-                typ="${typ:-${cur}}"
+                ask "出站协议 [Hysteria2 / Reality，当前 ${_curh}]，回车沿用: " typ
+                typ="${typ:-${cur}}"; typ="${typ,,}"   # 输入大小写不敏感
                 case "$typ" in
                     hy2|h|hysteria2|hy) typ="hy2" ;;
                     reality|vless|v|r) typ="vless" ;;
@@ -3081,6 +3096,7 @@ menu_protocol() {
         echo -e "${GRAY}================================================${PLAIN}"
         local opt="" ok=""
         ask "请输入选项 [0-$((i-1))]: " opt
+        [[ "$ASK_EOF" == "1" ]] && break
         if [[ "$opt" == "0" ]]; then break; fi
         if [[ "$opt" =~ ^[0-9]+$ ]] && (( opt >= 1 && opt < i )); then
             p=$(echo $PROTOCOLS | cut -d' ' -f"$opt")

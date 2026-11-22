@@ -341,11 +341,11 @@ fi
 # 端口串只允许三处生成：regen_subscription 内（订阅）、show_links 内（原生链接）、
 # show_clash_snippet 内（Mihomo 片段）。新增消费者必须走同一函数，不得手拼。
 _fmt_calls=$(grep -c 'fmt_hy_ports "' "$TARGET" || true)
-# 原生链接改为读 links.txt 后不再自己拼端口串，消费者剩 2 处
-if [[ "${_fmt_calls:-0}" -eq 2 ]]; then
-    ok "fmt_hy_ports 调用点恰为 2 处（订阅 + Mihomo 片段）"
+# 原生链接与 Mihomo 片段都改为读生成器产物，端口串只在订阅里拼一次
+if [[ "${_fmt_calls:-0}" -eq 1 ]]; then
+    ok "fmt_hy_ports 调用点恰为 1 处（仅订阅生成）"
 else
-    bad "fmt_hy_ports 调用点数量异常" "共 ${_fmt_calls} 处，应为 2"
+    bad "fmt_hy_ports 调用点数量异常" "共 ${_fmt_calls} 处，应为 1"
 fi
 # 订阅只有一个生产者：generate_full_client_config 只能被 regen_subscription 调用。
 # 这是真正的不变式；下面那条计数只是「已知触发点没被悄悄删掉」的旁证。
@@ -361,11 +361,11 @@ fi
 _regen_calls=$(grep -cE '^\s+regen_subscription' "$TARGET" || true)
 # 4 = 重载后 / token 轮换 / 节点前缀 / 直连后缀；+1 = regen_from_scope（启用/停用共用）
 # 安装不再单独调用：它走 proto_enable_*，最终由 render_and_reload 内的重载触发
-# +1：show_links 改为「先重建再读 links.txt」，保证菜单与订阅一致
-if [[ "${_regen_calls:-0}" -eq 6 ]]; then
-    ok "regen_subscription 覆盖 6 个触发点"
+# 6 = show_links 重建 + show_clash_snippet 按需重建
+if [[ "${_regen_calls:-0}" -eq 7 ]]; then
+    ok "regen_subscription 覆盖 7 个触发点"
 else
-    bad "regen_subscription 调用点数量异常" "共 ${_regen_calls} 处，应为 6"
+    bad "regen_subscription 调用点数量异常" "共 ${_regen_calls} 处，应为 7"
 fi
 
 # ---------- 10. 全量回归：危险命令审计 ----------

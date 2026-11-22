@@ -1930,56 +1930,30 @@ show_clash_snippet() {
     # 子 shell 隔离：source env.conf 的变量不外泄到调用方作用域
     (
         set +e; load_env; set -e
-
-        local host="${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}"
-        local ports_display ports_line=""
-        ports_display=$(fmt_hy_ports "${HY_PORT}" "${HY_RANGE:-}")
-        if [[ -n "$ports_display" && "$ports_display" == *,* ]]; then
-            ports_line="    ports: \"${ports_display}\""
+        local prov="${WEB_DIR}/${SUB_TOKEN}/provider.yaml"
+        if [[ ! -s "$prov" ]]; then
+            regen_subscription "${SUB_TOKEN:-}" >/dev/null 2>&1 || true
+        fi
+        if [[ ! -s "$prov" ]]; then
+            echo -e "${RED}未生成订阅文件，请先重建配置${PLAIN}"
+            exit 1
         fi
 
         echo ""
         echo -e "${GRAY}================ Clash.Meta / Mihomo 片段 ================${PLAIN}"
         echo " 整段复制，粘到你配置的 proxies: 下面（缩进已对齐）"
         echo ""
-        cat <<EOF
-proxies:
-  - name: "${NODE_PREFIX}-VLESS-Reality"
-    type: vless
-    server: ${SERVER_IP}
-    port: ${VL_PORT}
-    uuid: ${VL_UUID}
-    network: tcp
-    tls: true
-    udp: true
-    flow: xtls-rprx-vision
-    servername: ${VL_SNI}
-    reality-opts:
-      public-key: ${VL_PUBKEY}
-      short-id: ${VL_SHORTID}
-    client-fingerprint: chrome
-
-  - name: "${NODE_PREFIX}-Hysteria2"
-    type: hysteria2
-    server: ${host}
-    port: ${HY_PORT}
-${ports_line}
-    password: "${HY_PASS}"
-    sni: ${host}
-    skip-cert-verify: ${HY_SKIP_CERT:-false}
-EOF
+        # 直接输出生成器的产物：直连与中转节点都在里面，不再手拼
+        cat "$prov"
         echo ""
-        echo -e "${GRAY}---------- 可选：把这两个节点挂进策略组 ----------${PLAIN}"
+        echo -e "${GRAY}---------- 可选：把这些节点挂进策略组 ----------${PLAIN}"
         echo ""
-        cat <<EOF
-proxy-groups:
-  - name: "节点选择"
-    type: select
-    proxies:
-      - "${NODE_PREFIX}-VLESS-Reality"
-      - "${NODE_PREFIX}-Hysteria2"
-      - "DIRECT"
-EOF
+        echo "proxy-groups:"
+        echo "  - name: \"节点选择\""
+        echo "    type: select"
+        echo "    proxies:"
+        grep -oE '^  - name: "[^"]+"' "$prov" | sed 's/^  - name: /      - /'
+        echo "      - \"DIRECT\""
         echo -e "${GRAY}==========================================================${PLAIN}"
         echo ""
     )

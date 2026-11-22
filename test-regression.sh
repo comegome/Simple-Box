@@ -819,9 +819,18 @@ grep -q 'FN-VLESS-Reality-SG' "$WEB_DIR/tok17/config.yaml" && grep -q 'FN-Hyster
     && ok "17.4 订阅 config.yaml 含两条链式节点" || bad "17.4 订阅缺少链式节点"
 grep -q 'port: 2053' "$WEB_DIR/tok17/provider.yaml" && grep -q 'port: 2054' "$WEB_DIR/tok17/provider.yaml" \
     && ok "17.5 provider.yaml 端口为 2053/2054" || bad "17.5 provider 端口异常"
-[[ "$(wc -l < "$WEB_DIR/tok17/links.txt")" -eq 4 ]] && ok "17.6 links.txt 共 4 条链接" || bad "17.6 links 行数异常" "$(wc -l < "$WEB_DIR/tok17/links.txt")"
+_nlinks=$(grep -c '://' "$WEB_DIR/tok17/links.txt")
+[[ "$_nlinks" -eq 4 ]] && ok "17.6 links.txt 共 4 条链接" || bad "17.6 链接条数异常" "$_nlinks"
 grep -A1 -- '- "FN-VLESS-Reality-SG"' "$WEB_DIR/tok17/config.yaml" | grep -q 'DIRECT\|FN-' \
     && ok "17.7 链式节点已加入策略组" || bad "17.7 策略组未包含链式节点"
+
+
+# 17.16 proxies 段空行规整：块间一个空行，块内无空行
+_blank_inside=$(awk '/^proxies:/{f=1;next} f&&/^[a-z-]+:/{f=0} f&&/^$/{print}' "$WEB_DIR/tok17/provider.yaml" | wc -l)
+_blank_between=$(awk '/^  - name:/{c++} END{print c-1}' "$WEB_DIR/tok17/provider.yaml")
+[[ "$_blank_inside" -eq "$_blank_between" ]] \
+    && ok "17.16 节点之间恰好一个空行，块内无空行" \
+    || bad "17.16 空行规整异常" "块内 $_blank_inside / 块间应有 $_blank_between"
 
 # 17.11 出口 Hy2 节点不得继承端口跳跃（否则客户端会跳到主入口端口，落地变成入口机）
 awk '/FN-Hysteria2-SG/,/FN-VLESS|^EOF|^$/' "$WEB_DIR/tok17/provider.yaml" | grep -q 'ports:' \
@@ -899,7 +908,7 @@ _n=$(python3 -c "import json;print(len(json.load(open('$CONF_FILE'))['inbounds']
 [[ "$_n" == "2" ]] && ok "17.9 关闭出口后只剩两个 inbound" || bad "17.9 关闭出口残留" "$_n"
 
 # 17.10 菜单入口
-grep -q '5. 出口中转' "$TARGET" && grep -q '^menu_exit()' "$TARGET" && ok "17.10 菜单含出口中转" || bad "17.10 菜单缺少出口中转"
+grep -q '5. 出站管理' "$TARGET" && grep -q '^menu_exit()' "$TARGET" && ok "17.10 菜单含出站管理" || bad "17.10 菜单缺少出站管理"
 
 
 # ---------- 18. 出口导入与自检 ----------

@@ -1060,6 +1060,10 @@ fmt_hy_ports() {
 #   $1 可选：指定 token（token 轮换时传新值），缺省用调用方的 $sub_token
 regen_subscription() {
     local _token="${1:-${sub_token:-}}"
+    # 端口存在 ≠ 协议启用：以 config.json 里的 inbound 为准，
+    # 否则停用协议后任何一次重建都会把它又写回订阅。
+    set_has "vless-reality-in" || vl_port=""
+    set_has "hy2-in" || hy_port=""
     local _ports
     _ports=$(fmt_hy_ports "${hy_port:-}" "${hy_range:-}")
     generate_full_client_config \
@@ -1082,8 +1086,14 @@ proto_label() { case "$1" in reality) echo "VLESS-Reality" ;; hy2) echo "Hysteri
 # 订阅 YAML 片段：读调用方的小写局部变量（动态作用域）
 proto_proxy() {
     local _p="$1" _name="$2" _port="$3" _ports_override="${4-__default__}"
-    local _ports_line="${ports_line:-}"
-    [[ "$_ports_override" != "__default__" ]] && _ports_line="$_ports_override"
+    local _ports_line=""
+    if [[ "$_ports_override" == "__default__" ]]; then
+        # ports_line 由调用方拼好（含 "    ports:" 前缀），这里只补换行
+        [[ -n "${ports_line:-}" ]] && _ports_line=$'\n'"${ports_line}"
+    else
+        # 显式覆盖：传裸端口串；空串 = 不要端口跳跃（出口节点）
+        [[ -n "$_ports_override" ]] && _ports_line=$'\n    ports: "'"$_ports_override"'"'
+    fi
     case "$_p" in
         reality) cat <<EOF
   - name: "${_name}"
@@ -1106,8 +1116,7 @@ EOF
   - name: "${_name}"
     type: hysteria2
     server: ${domain_or_ip}
-    port: ${_port}
-${_ports_line}
+    port: ${_port}${_ports_line}
     password: "${hy_password}"
     sni: ${domain_or_ip}
     skip-cert-verify: ${hy_skip_cert}
@@ -1129,6 +1138,43 @@ proto_link() {
             echo "hy2://${hy_password}@${domain_or_ip}:${_port}/?sni=${domain_or_ip}&insecure=${_ins}${_mport}#${_name}"
             ;;
     esac
+}
+
+
+# 规整 proxies 段的空行：块内不留空行，块与块之间恰好一个空行
+tidy_proxies() {
+    local f="${1:-}"
+    [[ -s "$f" ]] || return 0
+    python3 - "$f" <<'PY'
+import re, sys
+p = sys.argv[1]
+out, in_px, first = [], False, True
+for line in open(p).read().splitlines():
+    if line.startswith("proxies:"):
+        in_px = True; out.append(line); continue
+    if in_px and re.match(r"^[A-Za-z_-]+:", line):
+        in_px = False
+        if out and out[-1].strip():
+            out.append("")
+    if in_px:
+        if not line.strip():
+            continue                      # 段内空行一律丢弃，稍后按块补
+        if line.startswith("  - name:"):
+            if not first and out and out[-1].strip():
+                out.append("")
+            first = False
+        out.append(line)
+    else:
+        out.append(line)
+open(p, "w").write("\n".join(out).rstrip("\n") + "\n")
+PY
+}
+
+# 原生链接：一条一行，条与条之间空一行
+tidy_links() {
+    local f="${1:-}"
+    [[ -s "$f" ]] || return 0
+    awk 'NF{ if (n++) print ""; print }' "$f" > "${f}.tmp" && mv -f "${f}.tmp" "$f"
 }
 
 generate_full_client_config() {
@@ -1233,7 +1279,10 @@ EOF
     # 出口中转：同一套模板，加后缀与链式入口端口
     if [[ "${EXIT_TYPE:-none}" != "none" && -n "${EXIT_SERVER:-}" ]]; then
         for _p in $PROTOCOLS; do
-            case "$_p" in reality) _port="${EXIT_ENTRY_VL:-}" ;; hy2) _port="${EXIT_ENTRY_HY:-}" ;; esac
+            case "$_p" in
+                reality) [[ -n "$vl_port" ]] || continue; _port="${EXIT_ENTRY_VL:-}" ;;
+                hy2)     [[ -n "$hy_port" ]] || continue; _port="${EXIT_ENTRY_HY:-}" ;;
+            esac
             [[ -n "$_port" ]] || continue
             proto_proxy "$_p" "${node_prefix}-$(proto_label "$_p")-${EXIT_LABEL:-SG}" "$_port" "" >> "$full_config_file"
         done
@@ -1251,7 +1300,10 @@ EOF
         case "$_p" in reality) _port="$vl_port" ;; hy2) _port="$hy_port" ;; esac
         [[ -n "$_port" ]] && printf '      - "%s-%s"\n' "$node_prefix" "$(proto_label "$_p")" >> "$full_config_file"
         if [[ "${EXIT_TYPE:-none}" != "none" && -n "${EXIT_SERVER:-}" ]]; then
-            case "$_p" in reality) _port="${EXIT_ENTRY_VL:-}" ;; hy2) _port="${EXIT_ENTRY_HY:-}" ;; esac
+            case "$_p" in
+                reality) [[ -n "$vl_port" ]] || continue; _port="${EXIT_ENTRY_VL:-}" ;;
+                hy2)     [[ -n "$hy_port" ]] || continue; _port="${EXIT_ENTRY_HY:-}" ;;
+            esac
             [[ -n "$_port" ]] && printf '      - "%s-%s-%s"\n' "$node_prefix" "$(proto_label "$_p")" "${EXIT_LABEL:-SG}" >> "$full_config_file"
         fi
     done
@@ -1268,7 +1320,10 @@ EOF
     done
     if [[ "${EXIT_TYPE:-none}" != "none" && -n "${EXIT_SERVER:-}" ]]; then
         for _p in $PROTOCOLS; do
-            case "$_p" in reality) _port="${EXIT_ENTRY_VL:-}" ;; hy2) _port="${EXIT_ENTRY_HY:-}" ;; esac
+            case "$_p" in
+                reality) [[ -n "$vl_port" ]] || continue; _port="${EXIT_ENTRY_VL:-}" ;;
+                hy2)     [[ -n "$hy_port" ]] || continue; _port="${EXIT_ENTRY_HY:-}" ;;
+            esac
             [[ -n "$_port" ]] || continue
             proto_proxy "$_p" "${node_prefix}-$(proto_label "$_p")-${EXIT_LABEL:-SG}" "$_port" "" >> "$provider_file"
         done
@@ -1284,12 +1339,18 @@ EOF
     done
     if [[ "${EXIT_TYPE:-none}" != "none" && -n "${EXIT_SERVER:-}" ]]; then
         for _p in $PROTOCOLS; do
-            case "$_p" in reality) _port="${EXIT_ENTRY_VL:-}" ;; hy2) _port="${EXIT_ENTRY_HY:-}" ;; esac
+            case "$_p" in
+                reality) [[ -n "$vl_port" ]] || continue; _port="${EXIT_ENTRY_VL:-}" ;;
+                hy2)     [[ -n "$hy_port" ]] || continue; _port="${EXIT_ENTRY_HY:-}" ;;
+            esac
             [[ -n "$_port" ]] || continue
             proto_link "$_p" "${node_prefix}-$(proto_label "$_p")-${EXIT_LABEL:-SG}" "$_port" >> "$links_out"
         done
     fi
 
+    tidy_proxies "$full_config_file"
+    tidy_proxies "$provider_file"
+    tidy_links "$links_out"
 }
 
 # 注册全局 simbo 指令（兼容 bash <(curl ...) 管道执行）
@@ -1997,6 +2058,9 @@ show_links() {
         return 1
     fi
 
+    # 片段在前、链接在后：片段是「贴进配置」的动作，链接是「复制/扫码」的动作
+    show_clash_snippet || true
+
     echo -e "\n${GRAY}==================== 原生链接 ====================${PLAIN}"
     local i=0 line name
     while IFS= read -r line; do
@@ -2016,7 +2080,6 @@ show_links() {
         echo -e "${GRAY}共 ${i} 条${PLAIN}"
     fi
     echo -e "${GRAY}==============================================================${PLAIN}\n"
-    show_clash_snippet || true
     read -r -p "按回车键返回主菜单..." dummy || true
 }
 
@@ -2900,12 +2963,12 @@ menu_exit() {
             *)     desc="未启用（只有直连）" ;;
         esac
         [ -t 1 ] && clear
-        echo -e "${GRAY}=================== 出口中转 ===================${PLAIN}"
-        echo -e " 当前: ${CYAN}${desc}${PLAIN}"
-        echo " 1. 查看出口详情"
-        echo -e " 2. 切换出口协议${GRAY}（$( [[ "$cur" == "hy2" ]] && echo "Hy2 → Reality" || echo "Reality → Hy2" )）${PLAIN}"
-        echo " 3. 设置出口参数（导入 / 手动）"
-        echo " 4. 关闭出口（只留直连）"
+        echo -e "${GRAY}=================== 出站管理 ===================${PLAIN}"
+        echo -e " 当前出站: ${CYAN}${desc}${PLAIN}"
+        echo " 1. 查看出站详情"
+        echo -e " 2. 切换出站协议${GRAY}（$( [[ "$cur" == "hy2" ]] && echo "Hy2 → Reality" || echo "Reality → Hy2" )）${PLAIN}"
+        echo " 3. 设置出站参数（导入 / 手动）"
+        echo " 4. 关闭出站中转（只留直连）"
         echo " 0. 返回主菜单"
         echo -e "${GRAY}================================================${PLAIN}"
         local opt=""
@@ -2913,8 +2976,8 @@ menu_exit() {
         case "$opt" in
             1)
                 echo
-                echo -e " 出口类型: ${cur}"
-                echo -e " 出口地址: ${EXIT_SERVER:-—}:${EXIT_PORT:-—}"
+                echo -e " 出站类型: ${cur}"
+                echo -e " 出站地址: ${EXIT_SERVER:-—}:${EXIT_PORT:-—}"
                 echo -e " 链式入口: Reality ${EXIT_ENTRY_VL:-—} / Hy2 ${EXIT_ENTRY_HY:-—}"
                 echo -e " 订阅后缀: -${EXIT_LABEL:-SG}"
                 echo
@@ -2924,13 +2987,13 @@ menu_exit() {
                 local target other
                 if [[ "$cur" == "hy2" ]]; then target="vless"; other="Reality"; else target="hy2"; other="Hy2"; fi
                 if [[ "$target" == "hy2" && -z "${EXIT_HY_PASS:-}" ]] || [[ "$target" == "vless" && -z "${EXIT_VL_UUID:-}" ]]; then
-                    echo -e "${YELLOW}${other} 出口的参数还没配置，请先执行 3. 设置出口参数${PLAIN}"
+                    echo -e "${YELLOW}${other} 出站的参数还没配置，请先执行 3. 设置出站参数${PLAIN}"
                     read -r -p "按回车返回..." _ || true
                     continue
                 fi
                 EXIT_TYPE="$target"
                 if apply_exit_reload; then
-                    echo -e "${GREEN}✓ 已切换到 ${other} 出口${PLAIN}"
+                    echo -e "${GREEN}✓ 已切换到 ${other} 出站${PLAIN}"
                     report_exit_health
                 else
                     echo -e "${RED}✗ 切换失败${PLAIN}"
@@ -2961,17 +3024,17 @@ menu_exit() {
                     echo -e "${GREEN}✓ 已从订阅导入：${EXIT_TYPE} → ${EXIT_SERVER}:${EXIT_PORT}${PLAIN}"
                 fi
                 local typ srv prt
-                ask "出口协议 [hy2/reality，当前 ${cur}]: " typ
+                ask "出站协议 [hy2/reality，当前 ${cur}]: " typ
                 typ="${typ:-${cur}}"
                 case "$typ" in
                     hy2|h) typ="hy2" ;;
                     reality|vless|v|r) typ="vless" ;;
                     *) echo -e "${RED}无效协议${PLAIN}"; sleep 1; continue ;;
                 esac
-                ask "出口地址 [${EXIT_SERVER:-必填}]: " srv
+                ask "出站地址 [${EXIT_SERVER:-必填}]: " srv
                 srv="${srv:-$EXIT_SERVER}"
                 if [[ -z "$srv" ]]; then echo -e "${RED}地址不能为空${PLAIN}"; sleep 1; continue; fi
-                ask "出口端口 [${EXIT_PORT:-$([[ "$typ" == hy2 ]] && echo 8443 || echo 443)}]: " prt
+                ask "出站端口 [${EXIT_PORT:-$([[ "$typ" == hy2 ]] && echo 8443 || echo 443)}]: " prt
                 prt="${prt:-${EXIT_PORT:-$([[ "$typ" == hy2 ]] && echo 8443 || echo 443)}}"
                 local lbl=""
                 ask "节点后缀 [${EXIT_LABEL:-SG}，用于区分直连与中转]: " lbl
@@ -2997,18 +3060,18 @@ menu_exit() {
                 if [[ "$typ" == "hy2" ]]; then
                     local pw
                     EXIT_HY_SERVER="$srv"; EXIT_HY_PORT="$prt"
-                    ask "出口 Hy2 密码 [回车沿用]: " pw
+                    ask "出站 Hy2 密码 [回车沿用]: " pw
                     EXIT_HY_PASS="${pw:-${EXIT_HY_PASS:-}}"
                     if [[ -z "$EXIT_HY_PASS" ]]; then echo -e "${RED}密码不能为空${PLAIN}"; sleep 1; continue; fi
                     EXIT_HY_SNI="${EXIT_HY_SNI:-$srv}"
                 else
                     local u k sid
                     EXIT_VL_SERVER="$srv"; EXIT_VL_PORT="$prt"
-                    ask "出口 Reality UUID [回车沿用]: " u
+                    ask "出站 Reality UUID [回车沿用]: " u
                     EXIT_VL_UUID="${u:-${EXIT_VL_UUID:-}}"
-                    ask "出口 Reality 公钥 [回车沿用]: " k
+                    ask "出站 Reality 公钥 [回车沿用]: " k
                     EXIT_VL_PBK="${k:-${EXIT_VL_PBK:-}}"
-                    ask "出口 Reality short-id [回车沿用]: " sid
+                    ask "出站 Reality short-id [回车沿用]: " sid
                     EXIT_VL_SID="${sid:-${EXIT_VL_SID:-}}"
                     if [[ -z "$EXIT_VL_UUID" || -z "$EXIT_VL_PBK" || -z "$EXIT_VL_SID" ]]; then
                         echo -e "${RED}UUID / 公钥 / short-id 都不能为空${PLAIN}"; sleep 1; continue
@@ -3016,7 +3079,7 @@ menu_exit() {
                     EXIT_VL_SNI="${EXIT_VL_SNI:-$srv}"
                 fi
                 if apply_exit_reload; then
-                    echo -e "${GREEN}✓ 出口参数已保存${PLAIN}"
+                    echo -e "${GREEN}✓ 出站参数已保存${PLAIN}"
                     report_exit_health
                 else
                     echo -e "${RED}✗ 应用失败${PLAIN}"
@@ -3025,7 +3088,7 @@ menu_exit() {
                 ;;
             4)
                 EXIT_TYPE="none"
-                apply_exit_reload && echo -e "${GREEN}✓ 出口已关闭，只保留直连${PLAIN}" \
+                apply_exit_reload && echo -e "${GREEN}✓ 出站已关闭，只保留直连${PLAIN}" \
                     || echo -e "${RED}✗ 应用失败${PLAIN}"
                 read -r -p "按回车返回..." _ || true
                 ;;
@@ -3038,11 +3101,11 @@ menu_exit() {
 menu_protocol() {
     while true; do
         [ -t 1 ] && clear
-        echo -e "${GRAY}=================== 协议管理 ===================${PLAIN}"
+        echo -e "${GRAY}=================== 入站管理 ===================${PLAIN}"
         local i=1 p state
         for p in $PROTOCOLS; do
-            if set_has "$(proto_tag "$p")"; then state="${GREEN}已启用${PLAIN}"; else state="${GRAY}已停用${PLAIN}"; fi
-            echo -e " $i. $(proto_human "$p")  ${state}"
+            if set_has "$(proto_tag "$p")"; then state="${GREEN}当前启用${PLAIN}"; else state="${GRAY}当前停用${PLAIN}"; fi
+            echo -e " $i. 启用/停用 $(proto_human "$p")  ${state}"
             i=$((i+1))
         done
         echo " 0. 返回主菜单"
@@ -3167,13 +3230,13 @@ menu() {
         fi
 
         echo -e "${GRAY}----------------------------------------------------${PLAIN}"
-        echo -e " 1. 原生链接查看"
-        echo -e " 2. 协议管理"
+        echo -e " 1. 原始订阅信息"
+        echo -e " 2. 入站管理"
         echo -e " 3. 订阅地址配置"
         echo -e " 4. sing-box 内核管理"
-        echo -e " 5. 出口中转"
-        echo -e " 6. Simple-Box 脚本升级"
-        echo -e " 7. Simple-Box 脚本卸载"
+        echo -e " 5. 出站管理"
+        echo -e " 6. 脚本升级"
+        echo -e " 7. 脚本卸载"
         echo -e " 0. 退出控制台"
         echo -e "${GRAY}====================================================${PLAIN}"
         

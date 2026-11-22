@@ -963,11 +963,17 @@ CADDYEOF
 
     if [[ "$cert_mode" == "domain" ]]; then
         echo -e "配置 Caddy HTTPS 域名证书 (端口 ${sub_port})..."
+        # 优先用站点证书目录（/etc/ssl/<域名>）；CERT_DIR 是 sing-box 的副本，
+        # 某些环境下 caddy 读它会在握手阶段报 internal error
+        local tls_dir="$CERT_DIR" _c
+        for _c in "/etc/ssl/${HY_DOMAIN:-}" "/etc/ssl/${HY_DOMAIN%%.*}"; do
+            [[ -n "${HY_DOMAIN:-}" && -f "$_c/fullchain.cer" && -f "$_c/private.key" ]] && { tls_dir="$_c"; break; }
+        done
         cat > "/etc/caddy/sites/simple-box-sub.caddy" <<EOF
 # Simple-Box HTTPS 域名证书
 :${sub_port} {
     bind tcp4/0.0.0.0
-    tls ${CERT_DIR}/fullchain.cer ${CERT_DIR}/private.key
+    tls ${tls_dir}/fullchain.cer ${tls_dir}/private.key
 
     @sub path /${token}/config.yaml /${token}/provider.yaml /${token}/links.txt
     handle @sub {

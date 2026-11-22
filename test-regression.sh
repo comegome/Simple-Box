@@ -981,6 +981,19 @@ grep -qF 'provider.yaml 地址' "$TARGET" && grep -q 'exit_parse_url' "$TARGET" 
     && ok "18.5 出口菜单支持订阅导入" || bad "18.5 菜单缺少导入入口"
 
 
+
+# ---------- 20. 面板与 IPv6 清理 ----------
+group "20. 面板与 IPv6"
+_n_ipv6=$(grep -ci 'ipv6' "$TARGET" || true)
+[[ "$_n_ipv6" -eq 0 ]] && ok "20.1 脚本内已无 IPv6 代码" || bad "20.1 仍残留 IPv6" "$_n_ipv6 处"
+
+grep -q 'print_io_status' "$TARGET" && ok "20.2 面板使用入站/出站状态块" || bad "20.2 面板未使用状态块"
+_missing=""
+for _kw in '[已启用]' '[未启用]' '[未安装]' '[直连]' '[中转]' '[关闭]'; do
+    grep -qF "$_kw" "$TARGET" || _missing+=" $_kw"
+done
+[[ -z "$_missing" ]] && ok "20.3 六种状态词齐全" || bad "20.3 缺少状态词" "$_missing"
+
 # ---------- 14. 清理 ----------
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null

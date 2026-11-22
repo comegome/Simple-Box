@@ -401,55 +401,7 @@ install_deps() {
     return 0
 }
 
-# IPv6 连通性检查（安装时执行一次）
-# 背景：VPS 常见「有全局 IPv6 地址、有默认路由，但实际不通」。此时 curl 和
-# sing-box 用的 Go dialer 都会先试 IPv6，等 200-300ms 无响应才回退 IPv4，
-# 每个双栈目标都白等一次（实测某节点 TCP 握手 203ms，禁用后 2ms）。
-# 只在「有地址但连不通」时禁用；IPv6 正常的主机不受影响。
-check_ipv6() {
-    if [[ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" == "1" ]]; then
-        IPV6_STATUS="已禁用"
-        return 0
-    fi
-    if ! ip -6 addr show scope global 2>/dev/null | grep -q "inet6"; then
-        IPV6_STATUS="未启用"
-        return 0
-    fi
-    # 有地址：实测能不能出去。cloudflare 的 trace 端点回包小、不跳转。
-    if curl -6 -s -o /dev/null --max-time 4 https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null; then
-        IPV6_STATUS="正常"
-        return 0
-    fi
-    # 已有他人配置就不覆盖（与 BBR 同一套归属约定）
-    if [[ -f "$IPV6_CONF" ]] && ! grep -q "^${BBR_MARK}" "$IPV6_CONF"; then
-        IPV6_STATUS="未处理（${IPV6_CONF} 非本脚本创建）"
-        echo -e "${YELLOW}检测到 ${IPV6_CONF} 已存在且非本脚本创建，保留不覆盖。${PLAIN}"
-        return 0
-    fi
-    mkdir -p /etc/sysctl.d
-    cat > "$IPV6_CONF" <<EOF
-${BBR_MARK}
-net.ipv6.conf.all.disable_ipv6 = 1
-net.ipv6.conf.default.disable_ipv6 = 1
-net.ipv6.conf.lo.disable_ipv6 = 1
-EOF
-    sysctl --system >/dev/null 2>&1 || true
-    IPV6_STATUS="已禁用（有地址但不通）"
-    echo -e "${YELLOW}检测到 IPv6 地址但实际不通，已禁用 IPv6。${PLAIN}"
-    echo -e "${GRAY}原因: 不通的 IPv6 会让每个双栈连接先等 200-300ms 再回退 IPv4。${PLAIN}"
-    return 0
-}
 
-# 菜单显示用：只读本地状态，不发网络请求（面板每次刷新都会调用）
-ipv6_summary() {
-    if [[ "$(sysctl -n net.ipv6.conf.all.disable_ipv6 2>/dev/null)" == "1" ]]; then
-        echo "已禁用"
-    elif ip -6 addr show scope global 2>/dev/null | grep -q "inet6"; then
-        echo "已启用"
-    else
-        echo "未启用"
-    fi
-}
 
 # 检查并自动安装 Caddy（证书管理）
 # 支持范围内（Ubuntu 24.04+ / Debian 12+）的发行版仓库自带 caddy，无需第三方源。
@@ -492,7 +444,6 @@ install_caddy() {
 # 卸载时只删带标记的，绝不覆盖或误删别人的 sysctl 配置。
 BBR_CONF="/etc/sysctl.d/99-bbr.conf"
 BBR_MARK="# managed-by: simple-box"
-IPV6_CONF="/etc/sysctl.d/99-disable-ipv6.conf"
 
 # 开启 BBR（安装时调用，无交互）
 # 三种情况分别处理：已开启则跳过；已有他人配置则不动；否则写入并打标记
@@ -536,19 +487,6 @@ disable_bbr() {
     [[ -f "$BBR_CONF" ]] && grep -q "^${BBR_MARK}" "$BBR_CONF" && rm -f "$BBR_CONF" || true
 }
 
-# 卸载时调用：只删除本脚本创建的 IPv6 禁用文件
-# 与 BBR 不同，这里连运行时状态一起切回启用：IPv6 只有开/关两种状态，
-# 「装之前是什么」是确定的（启用），不像拥塞算法那样可能被用户改过。
-# 地址由 DHCP/RA 下发，切回后不会立刻恢复，重启或重新获取即可。
-disable_ipv6_managed() {
-    if [[ -f "$IPV6_CONF" ]] && grep -q "^${BBR_MARK}" "$IPV6_CONF"; then
-        rm -f "$IPV6_CONF"
-        sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null 2>&1 || true
-        sysctl -w net.ipv6.conf.default.disable_ipv6=0 >/dev/null 2>&1 || true
-        echo -e "${GRAY}已移除本脚本创建的 IPv6 禁用配置。${PLAIN}"
-    fi
-    return 0
-}
 
 # 获取并升级官方 sing-box 内核（带精准版本校验）
 update_singbox_core() {
@@ -828,19 +766,6 @@ clear_port_hopping() {
             iptables -t nat -D PREROUTING -p udp --dport "$r" -j REDIRECT --to-ports "$tport" 2>/dev/null || true
         fi
     done
-    # 清理历史版本遗留的 IPv6 跳跃规则（本脚本已不支持 IPv6，只删不加）
-    if command -v ip6tables &>/dev/null; then
-        local r6
-        for r6 in $(ip6tables -t nat -S PREROUTING 2>/dev/null \
-            | grep -oP -- '--dport \K[0-9]+:[0-9]+(?=.*REDIRECT --to-ports)' | sort -u || true); do
-            local t6
-            t6=$(ip6tables -t nat -S PREROUTING 2>/dev/null \
-                | grep -F -- "--dport $r6 " | grep -oP -- '--to-ports \K[0-9]+' | head -1 || true)
-            [[ -n "$t6" ]] && ip6tables -t nat -D PREROUTING -p udp --dport "$r6" \
-                -j REDIRECT --to-ports "$t6" 2>/dev/null || true
-        done
-    fi
-
     if command -v netfilter-persistent &>/dev/null; then
         netfilter-persistent save >/dev/null 2>&1 || true
     fi
@@ -1039,6 +964,47 @@ EOF
     else
         echo -e "${YELLOW}订阅端点自检未通过 (HTTP ${_code})${PLAIN}"
         echo -e "${YELLOW}节点本身可用，但客户端拉订阅会失败。排查: systemctl status caddy; ss -ltn | grep :${sub_port}${PLAIN}"
+    fi
+}
+
+
+# 面板：入站/出站固定四行（槽位不随状态跳动）
+print_io_status() {
+    local st
+    sync_env_locals   # env 存分协议字段，这里解析成当前生效的一组
+    # ---- 入站 ----
+    for _p in $PROTOCOLS; do
+        local tag; tag=$(proto_tag "$_p")
+        local name; name=$(proto_human "$_p")
+        local cred=""
+        case "$_p" in reality) cred="${VL_UUID:-}" ;; hy2) cred="${HY_PASS:-}" ;; esac
+        if set_has "$tag"; then
+            st="${GREEN}[已启用]${PLAIN}"
+            case "$_p" in
+                reality) printf ' 入站 %-12s %s TCP %s   %s\n' "$name" "$st" "${VL_PORT:-443}" "${VL_SNI:-}";;
+                hy2)     printf ' 入站 %-12s %s UDP %s  %s%s\n' "$name" "$st" "${HY_PORT:-8443}" \
+                            "${HY_DOMAIN:-$SERVER_IP}" "${HY_RANGE:+ · 跳跃 $HY_RANGE}";;
+            esac
+        elif [[ -n "$cred" ]]; then
+            printf ' 入站 %-12s %s\n' "$name" "${YELLOW}[未启用]${PLAIN}"
+        else
+            printf ' 入站 %-12s %s\n' "$name" "${GRAY}[未安装]${PLAIN}"
+        fi
+    done
+
+    # ---- 出站 ----
+    printf ' 出站 %-12s %s   本机 %s\n' "Direct" "${CYAN}[直连]${PLAIN}" "$SERVER_IP"
+    if [[ "${EXIT_TYPE:-none}" == "none" ]]; then
+        printf ' 出站 %-12s %s\n' "Relay" "${GRAY}[关闭]${PLAIN}"
+    else
+        local _ep="$EXIT_PORT" _en="Hy2"
+        [[ "$EXIT_TYPE" == "vless" ]] && _en="Reality"
+        local entries=""
+        set_has "vless-reality-in" && entries+="${EXIT_ENTRY_VL:-2053}/"
+        set_has "hy2-in" && entries+="${EXIT_ENTRY_HY:-2054}/"
+        entries="${entries%/}"
+        printf ' 出站 %-12s %s   入口 %s → %s:%s (%s)  后缀 -%s\n' "Relay" "${CYAN}[中转]${PLAIN}" \
+            "$entries" "$EXIT_SERVER" "$_ep" "$_en" "${EXIT_LABEL:-SG}"
     fi
 }
 
@@ -1656,9 +1622,7 @@ install_node() {
         return 1
     fi
 
-    # 在装内核之前处理：坏 IPv6 会让后续所有出站拨号（含 Reality 握手取证书）
     # 每个连接多等 200-300ms，装完再修就白测一轮。
-    check_ipv6
 
     if [[ ! -f /usr/local/bin/sing-box ]]; then
         update_singbox_core "force" || { echo -e "${RED}内核安装失败，无法继续。${PLAIN}"; return 1; }
@@ -1996,7 +1960,6 @@ EOF
     echo -e "\n${GRAY}====================================================${PLAIN}"
     echo -e " ${GREEN}✓${PLAIN} ${BOLD}Simple-Box 安装就绪！${PLAIN}"
     echo -e " 随时在终端输入 ${CYAN}simbo${PLAIN} 即可打开控制台。"
-    echo -e " IPv6 状态: ${IPV6_STATUS:-$(ipv6_summary)}"
     echo -e "${GRAY}====================================================${PLAIN}\n"
 }
 
@@ -2102,10 +2065,6 @@ uninstall_all() {
         if [[ -n "${HY_RANGE:-}" && -n "${HY_PORT:-}" ]]; then
             echo -e "精准清理端口跳跃规则..."
             iptables -t nat -D PREROUTING -p udp --dport "$HY_RANGE" -j REDIRECT --to-ports "$HY_PORT" 2>/dev/null || true
-            # 清理历史版本可能遗留的 IPv6 规则
-            if command -v ip6tables &>/dev/null; then
-                ip6tables -t nat -D PREROUTING -p udp --dport "$HY_RANGE" -j REDIRECT --to-ports "$HY_PORT" 2>/dev/null || true
-            fi
             if command -v netfilter-persistent &>/dev/null; then
                 netfilter-persistent save >/dev/null 2>&1 || true
             fi
@@ -2200,7 +2159,6 @@ uninstall_all() {
     echo -e "${YELLOW}本脚本自身的入口 (simbo) 也已删除，控制台即将退出。${PLAIN}"
     echo -e "${YELLOW}如需重装，请重新执行一键安装命令。${PLAIN}"
     disable_bbr
-    disable_ipv6_managed
     # 卸载后目录与入口都已不存在，继续停留在菜单毫无意义（面板还会读到已删除的配置）
     UNINSTALL_DONE=true
 }
@@ -2960,7 +2918,10 @@ menu_exit() {
         [ -t 1 ] && clear
         echo -e "${GRAY}=================== 出站管理 ===================${PLAIN}"
         echo " 1. 查看出站详情"
-        echo -e " 2. 切换出站协议${GRAY}（$( [[ "$cur" == "hy2" ]] && echo "Hy2 → Reality" || echo "Reality → Hy2" )）${PLAIN}"
+        local _switch="Reality → Hy2"
+        [[ "$cur" == "hy2" ]] && _switch="Hy2 → Reality"
+        [[ "$cur" == "none" ]] && _switch="当前关闭"
+        echo -e " 2. 切换出站协议${GRAY}（${_switch}）${PLAIN}"
         echo " 3. 设置出站参数（导入 / 手动）"
         echo " 4. 关闭出站中转（只留直连）"
         echo " 0. 返回主菜单"
@@ -2970,10 +2931,14 @@ menu_exit() {
         case "$opt" in
             1)
                 echo
-                echo -e " 出站类型: ${cur}"
-                echo -e " 出站地址: ${EXIT_SERVER:-—}:${EXIT_PORT:-—}"
-                echo -e " 链式入口: Reality ${EXIT_ENTRY_VL:-—} / Hy2 ${EXIT_ENTRY_HY:-—}"
-                echo -e " 订阅后缀: -${EXIT_LABEL:-SG}"
+                if [[ "$cur" == "none" ]]; then
+                    echo -e " 出站: ${GRAY}[关闭]${PLAIN} 只保留直连"
+                else
+                    local _en="Hy2"; [[ "$cur" == "vless" ]] && _en="Reality"
+                    echo -e " 出站: ${CYAN}[${_en}]${PLAIN} → ${EXIT_SERVER}:${EXIT_PORT}"
+                    echo -e " 入口: Reality ${EXIT_ENTRY_VL:-—} / Hy2 ${EXIT_ENTRY_HY:-—}"
+                    echo -e " 后缀: -${EXIT_LABEL:-SG}"
+                fi
                 echo
                 read -r -p "按回车返回..." _ || true
                 ;;
@@ -3192,23 +3157,12 @@ menu() {
         echo -e " 公网地址: ${cur_ip}"
         echo -e " TLS 证书: ${cert_display}"
         echo -e " TCP 加速: ${bbr_status}"
-        local ipv6_st ipv6_display
-        ipv6_st=$(ipv6_summary)
-        case "$ipv6_st" in
-            已禁用) ipv6_display="${YELLOW}${ipv6_st}${PLAIN}" ;;
-            未启用) ipv6_display="${GRAY}${ipv6_st}${PLAIN}" ;;
-            *)      ipv6_display="${GREEN}${ipv6_st}${PLAIN}" ;;
-        esac
-        echo -e " IPv6 状态: ${ipv6_display}"
         echo -e " 证书管理: ${caddy_status}"
         echo -e " 代理服务: ${sb_status}"
         
         if [[ -f "$ENV_FILE" ]]; then
-            local hy_sni="${HY_DOMAIN:-$SERVER_IP}"
-            local hy_ports="${HY_RANGE:-无}"
             echo -e "${GRAY}----------------------------------------------------${PLAIN}"
-            echo -e " VLESS-Reality | TCP: ${CYAN}${VL_PORT:-443}${PLAIN}  | ServerName: ${CYAN}${VL_SNI:-www.icloud.com}${PLAIN}"
-            echo -e " Hysteria 2    | UDP: ${CYAN}${HY_PORT:-8443}${PLAIN} | SNI: ${CYAN}${hy_sni}${PLAIN} | Ports: ${CYAN}${hy_ports}${PLAIN}"
+            print_io_status
             
             local proto=${SUB_PROTO:-http}
             local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}

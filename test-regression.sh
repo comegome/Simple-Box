@@ -836,6 +836,10 @@ EXIT_TYPE="vless"; sync_env_locals
 grep -q '节点后缀 \[' "$TARGET" && ok "17.13 菜单可设置节点后缀" || bad "17.13 未提供后缀设置"
 grep -q 'A-Za-z0-9_-' "$TARGET" && ok "17.13 后缀有字符白名单" || bad "17.13 后缀无校验"
 
+# 15.22 sync_hy2_cert 能直接用 acme.sh 目录里的证书（重装/无 /etc/ssl 时）
+grep -q 'acme.sh/${d}_ecc' "$TARGET" && ok "15.22 证书支持 acme.sh 目录" || bad "15.22 未支持 acme.sh 目录"
+grep -q '_key="$src/${d}.key"' "$TARGET" && ok "15.22 acme 目录用域名命名的 key" || bad "15.22 acme key 文件名未处理"
+
 # 17.14 四个端口都可设置：直连走协议参数，链式走出口设置
 grep -q '链式入口端口 · Reality' "$TARGET" && ok "17.14 链式入口端口可设置" || bad "17.14 未提供入口端口设置"
 grep -q '不能与直连端口' "$TARGET" && ok "17.14 端口冲突有校验" || bad "17.14 端口冲突无校验"

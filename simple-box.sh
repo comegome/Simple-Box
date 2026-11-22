@@ -2227,15 +2227,20 @@ probe_external_sni() {
 sync_hy2_cert() {
     local d="$1" src=""
     # 证书目录可能是 /etc/ssl/<域名>，也可能是按站点起的短名（如 /etc/ssl/agisignal）
-    for src in "/etc/ssl/$d" "/etc/ssl/${d%%.*}" "$CERT_DIR"; do
-        [[ -n "$d" && -f "$src/fullchain.cer" && -f "$src/private.key" ]] && break
+    # 依次找：/etc/ssl/<域名>、短名目录、acme.sh 默认目录、已就位的 CERT_DIR
+    for src in "/etc/ssl/$d" "/etc/ssl/${d%%.*}" "/root/.acme.sh/${d}_ecc" "$CERT_DIR"; do
+        [[ -n "$d" && -f "$src/fullchain.cer" ]] || { src=""; continue; }
+        if [[ -f "$src/private.key" || -f "$src/${d}.key" ]]; then break; fi
+        src=""
         src=""
     done
     [[ -n "$src" ]] || return 1
     [[ "$src" == "$CERT_DIR" ]] && return 0   # 已就位，无需复制
+    local _key="$src/private.key"
+    [[ -f "$_key" ]] || _key="$src/${d}.key"      # acme.sh 目录里 key 以域名命名
     install -m 644 "$src/fullchain.cer" "$CERT_DIR/fullchain.cer" || return 1
-    install -m 640 -g caddy "$src/private.key" "$CERT_DIR/private.key" 2>/dev/null \
-        || install -m 600 "$src/private.key" "$CERT_DIR/private.key" || return 1
+    install -m 640 -g caddy "$_key" "$CERT_DIR/private.key" 2>/dev/null \
+        || install -m 600 "$_key" "$CERT_DIR/private.key" || return 1
 }
 
 ensure_reality_creds() {

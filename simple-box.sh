@@ -2956,15 +2956,9 @@ menu_exit() {
         load_env
         # env 里存的是分协议字段（EXIT_HY_* / EXIT_VL_*），必须解析成当前生效的一组
         sync_env_locals
-        local cur="${EXIT_TYPE:-none}" desc
-        case "$cur" in
-            hy2)   desc="Hy2 → ${EXIT_SERVER}:${EXIT_PORT}" ;;
-            vless) desc="Reality → ${EXIT_SERVER}:${EXIT_PORT}" ;;
-            *)     desc="未启用（只有直连）" ;;
-        esac
+        local cur="${EXIT_TYPE:-none}"
         [ -t 1 ] && clear
         echo -e "${GRAY}=================== 出站管理 ===================${PLAIN}"
-        echo -e " 当前出站: ${CYAN}${desc}${PLAIN}"
         echo " 1. 查看出站详情"
         echo -e " 2. 切换出站协议${GRAY}（$( [[ "$cur" == "hy2" ]] && echo "Hy2 → Reality" || echo "Reality → Hy2" )）${PLAIN}"
         echo " 3. 设置出站参数（导入 / 手动）"

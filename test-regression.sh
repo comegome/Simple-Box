@@ -994,7 +994,29 @@ for _kw in '[已启用]' '[未启用]' '[未安装]' '[已停用]'; do
 done
 [[ -z "$_missing" ]] && ok "20.3 状态词齐全" || bad "20.3 缺少状态词" "$_missing"
 
-# ---------- 14. 清理 ----------
+# ---------- 21. Caddy 重载稳定性 ----------
+group "21. Caddy 重载稳定性（轮询 + fallback）"
+if declare -F wait_service_active >/dev/null 2>&1; then
+    ok "21.1 wait_service_active 已定义"
+else
+    bad "21.1 缺少 wait_service_active"
+fi
+if [[ "$(grep -c 'wait_service_active caddy 10' "$TARGET")" -ge 2 ]]; then
+    ok "21.2 reload 与 restart 两条路径都轮询 active"
+else
+    bad "21.2 轮询未覆盖两条路径" "$(grep -n 'wait_service_active' "$TARGET" | head -5)"
+fi
+if grep -A3 'systemctl reload caddy 2>/dev/null; then' "$TARGET" | grep -q 'wait_service_active'; then
+    ok "21.3 reload 返回 0 后不再直接判定成功"
+else
+    bad "21.3 reload 成功分支缺少 active 校验（重载卡死会被误判成功）"
+fi
+if grep -q 'reset-failed caddy' "$TARGET"; then
+    ok "21.4 保留 systemd 限流解除"
+else
+    bad "21.4 缺少 reset-failed 兜底"
+fi
+
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
 ok "临时文件已清理"

@@ -801,8 +801,20 @@ setup_port_hopping() {
     fi
 }
 
-# 安全重载 Caddy：先校验配置，优先 reload，失败才 restart，并解除 systemd 限流
+# 等待 systemd 单元回到 active（reload / restart 之后用）
+# reload 会立刻返回 0，但新增/变更监听（例如 Caddy 的 UDP/HTTP3）时进程可能卡在 reloading，
+# 只凭退出码会漏掉「重载成功但没生效」。
+wait_service_active() {
+    local unit="$1" secs="${2:-10}" i
+    for ((i = 1; i <= secs; i++)); do
+        [[ "$(systemctl is-active "$unit" 2>/dev/null)" == "active" ]] && return 0
+        sleep 1
+    done
+    return 1
+}
+
 reload_caddy_safe() {
+    # 先校验配置，优先 reload，失败才 restart，并解除 systemd 限流
     if ! command -v caddy &>/dev/null; then
         echo -e "${YELLOW}未安装 Caddy，跳过订阅地址重载。${PLAIN}"
         return 1
@@ -821,15 +833,17 @@ reload_caddy_safe() {
     # 2. 运行中优先热重载，避免反复 restart 触发 systemd start-limit-hit
     if systemctl is-active --quiet caddy; then
         if systemctl reload caddy 2>/dev/null; then
-            return 0
+            wait_service_active caddy 10 && return 0
+            echo -e "${YELLOW}Caddy 重载后 10 秒内未回到 active，改为重启...${PLAIN}"
+        else
+            echo -e "${YELLOW}Caddy 热重载未生效，改为重启...${PLAIN}"
         fi
-        echo -e "${YELLOW}Caddy 热重载未生效，改为重启...${PLAIN}"
     else
         # 3. 未运行（或曾被限流）时先清除失败计数，再启动
         systemctl reset-failed caddy 2>/dev/null || true
     fi
 
-    systemctl restart caddy 2>/dev/null && return 0
+    systemctl restart caddy 2>/dev/null && wait_service_active caddy 10 && return 0
     echo -e "${RED}Caddy 启动失败，请查看: journalctl -u caddy -n 30${PLAIN}"
     return 1
 }

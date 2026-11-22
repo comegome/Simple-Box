@@ -2907,6 +2907,19 @@ menu_exit() {
                     echo -e "${RED}后缀只能用字母、数字、- 和 _${PLAIN}"; sleep 1; continue
                 fi
                 EXIT_LABEL="$lbl"
+                local evl ehy
+                ask "链式入口端口 · Reality [${EXIT_ENTRY_VL:-2053}]: " evl
+                evl="${evl:-${EXIT_ENTRY_VL:-2053}}"
+                ask "链式入口端口 · Hysteria2 [${EXIT_ENTRY_HY:-2054}]: " ehy
+                ehy="${ehy:-${EXIT_ENTRY_HY:-2054}}"
+                if ! validate_port "$evl" || ! validate_port "$ehy"; then
+                    echo -e "${RED}端口必须是 1-65535${PLAIN}"; sleep 1; continue
+                fi
+                if [[ "$evl" == "$ehy" ]] || [[ "$evl" == "${VL_PORT:-}" || "$evl" == "${HY_PORT:-}" ]] \
+                   || [[ "$ehy" == "${VL_PORT:-}" || "$ehy" == "${HY_PORT:-}" ]]; then
+                    echo -e "${RED}入口端口不能与直连端口（${VL_PORT:-—}/${HY_PORT:-—}）或彼此重复${PLAIN}"; sleep 1; continue
+                fi
+                EXIT_ENTRY_VL="$evl"; EXIT_ENTRY_HY="$ehy"
                 EXIT_TYPE="$typ"
                 if [[ "$typ" == "hy2" ]]; then
                     local pw

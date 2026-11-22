@@ -836,6 +836,10 @@ EXIT_TYPE="vless"; sync_env_locals
 grep -q '节点后缀 \[' "$TARGET" && ok "17.13 菜单可设置节点后缀" || bad "17.13 未提供后缀设置"
 grep -q 'A-Za-z0-9_-' "$TARGET" && ok "17.13 后缀有字符白名单" || bad "17.13 后缀无校验"
 
+# 17.14 四个端口都可设置：直连走协议参数，链式走出口设置
+grep -q '链式入口端口 · Reality' "$TARGET" && ok "17.14 链式入口端口可设置" || bad "17.14 未提供入口端口设置"
+grep -q '不能与直连端口' "$TARGET" && ok "17.14 端口冲突有校验" || bad "17.14 端口冲突无校验"
+
 # 17.8 vless 出口
 EXIT_TYPE="vless"; EXIT_PORT="443"; EXIT_UUID="22222222-2222-2222-2222-222222222222"
 EXIT_PBK="PBKEXIT"; EXIT_SID="ff00ff00"

@@ -2891,6 +2891,8 @@ PY
 menu_exit() {
     while true; do
         load_env
+        # env 里存的是分协议字段（EXIT_HY_* / EXIT_VL_*），必须解析成当前生效的一组
+        sync_env_locals
         local cur="${EXIT_TYPE:-none}" desc
         case "$cur" in
             hy2)   desc="Hy2 → ${EXIT_SERVER}:${EXIT_PORT}" ;;

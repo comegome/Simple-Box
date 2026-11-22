@@ -874,6 +874,14 @@ rm -rf "$SB19"
 grep -q 'acme.sh/${d}_ecc' "$TARGET" && ok "15.22 证书支持 acme.sh 目录" || bad "15.22 未支持 acme.sh 目录"
 grep -q '_key="$src/${d}.key"' "$TARGET" && ok "15.22 acme 目录用域名命名的 key" || bad "15.22 acme key 文件名未处理"
 
+# 17.15 出口菜单进循环必须先解析分协议字段，否则显示成 "Hy2 → :"
+_body=$(awk '/^menu_exit\(\) \{/,/^\}/' "$TARGET")
+if grep -q 'sync_env_locals' <<<"$_body"; then
+    ok "17.15 出口菜单进入前解析出口字段"
+else
+    bad "17.15 出口菜单未解析字段（地址会显示为空）"
+fi
+
 # 17.14 四个端口都可设置：直连走协议参数，链式走出口设置
 grep -q '链式入口端口 · Reality' "$TARGET" && ok "17.14 链式入口端口可设置" || bad "17.14 未提供入口端口设置"
 grep -q '不能与直连端口' "$TARGET" && ok "17.14 端口冲突有校验" || bad "17.14 端口冲突无校验"

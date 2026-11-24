@@ -2965,6 +2965,160 @@ PY
     return 2
 }
 
+# ==================== 8. 伪装站点（BYO 静态站） ====================
+# 让 Reality 的回落目标从「借来的外部站点」变成「本机真实存在的小站」：
+# 证书、域名、内容、IP 四者自洽，探测者看到的是一个正常运营的垂直小站。
+# 站点由 camo-site.py 生成：纯静态、无 JS、无外部字体、无图片、全站 noindex。
+
+CAMO_ROOT="${CAMO_ROOT:-/var/www}"
+CAMO_PY="${CAMO_PY:-/usr/local/share/simple-box/camo-site.py}"
+CAMO_URL="${CAMO_URL:-${SCRIPT_URL%/*}/camo/camo-site.py}"
+
+# 纯函数：Caddy 站点块（test-regression.sh 覆盖）
+camo_caddy_block() {
+    local domain="${1:-}" root="${2:-}" cert="${3:-}"
+    [[ -n "$domain" && -n "$root" ]] || return 1
+    printf '# 伪装站点（simbo 生成，全站 noindex）\n'
+    printf '%s {\n' "$domain"
+    printf '\troot * %s\n' "$root"
+    if [[ -n "$cert" ]]; then
+        printf '\ttls %s/fullchain.cer %s/private.key\n' "$cert" "$cert"
+    fi
+    printf '\tencode gzip\n'
+    printf '\theader {\n\t\tX-Robots-Tag "noindex, nofollow"\n\t\t-Server\n\t}\n'
+    printf '\thandle_errors {\n\t\trewrite * /404.html\n\t\tfile_server\n\t}\n'
+    printf '\tfile_server\n}\n'
+}
+
+# 生成器落地：优先用已安装版本，否则从仓库拉一份并做语法校验
+ensure_camo_generator() {
+    if [[ -s "$CAMO_PY" ]]; then printf '%s\n' "$CAMO_PY"; return 0; fi
+    mkdir -p "$(dirname "$CAMO_PY")" 2>/dev/null || true
+    local tmp="${CAMO_PY}.dl.$$"
+    if curl -fsSL --max-time 25 "$CAMO_URL" -o "$tmp" 2>/dev/null \
+        && [[ -s "$tmp" ]] \
+        && python3 -c 'import ast,sys;ast.parse(open(sys.argv[1]).read())' "$tmp" 2>/dev/null; then
+        mv -f "$tmp" "$CAMO_PY"
+        chmod 755 "$CAMO_PY"
+        printf '%s\n' "$CAMO_PY"
+        return 0
+    fi
+    rm -f "$tmp"
+    return 1
+}
+
+# 生成 / 重建站点，并挂到 Caddy；Reality 在跑就同步翻转成 127.0.0.1:FLIP_PORT
+build_camo_site() {
+    local domain="$1" source="$2" style="${3:-}"
+    local gen dir caddy_file cert
+    gen=$(ensure_camo_generator) || {
+        echo -e "${RED}✗ 无法获取站点生成器（${CAMO_URL}）${PLAIN}"
+        echo -e "${YELLOW}  节点本身不受影响，可稍后重试${PLAIN}"
+        return 1
+    }
+    cert=$(find_cert_dir "$domain" 2>/dev/null || true)
+    if [[ -z "$cert" ]]; then
+        echo -e "${RED}✗ 找不到 ${domain} 的证书${PLAIN}"
+        echo -e "${YELLOW}  先执行菜单 4「订阅地址配置」签发 ${HY_DOMAIN:-该域名} 的证书，再回来生成站点${PLAIN}"
+        return 1
+    fi
+
+    dir="${CAMO_ROOT}/${domain}"
+    mkdir -p "$dir" || return 1
+    local -a args=(--source "$source" --node "$(hostname -s)" --output "$dir")
+    [[ -n "$style" ]] && args+=(--style "$style")
+    echo -e "生成站点内容（${source}）..."
+    if ! python3 "$gen" "${args[@]}"; then
+        echo -e "${RED}✗ 站点生成失败（源站不可达或合格文章不足）${PLAIN}"
+        return 1
+    fi
+    chmod -R a+rX "$dir" 2>/dev/null || true
+
+    caddy_file="/etc/caddy/sites/camo-${domain}.caddy"
+    mkdir -p /etc/caddy/sites
+    camo_caddy_block "$domain" "$dir" "$cert" > "$caddy_file" || return 1
+
+    if [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in"; then
+        SITE_FILE="$caddy_file"
+        FLIP_HOST="$domain"
+        FLIP_PORT="${FLIP_PORT:-9443}"
+        flip_site_toggle on || { echo -e "${RED}✗ Caddy 重载失败${PLAIN}"; return 1; }
+    else
+        reload_caddy_safe || { echo -e "${RED}✗ Caddy 重载失败${PLAIN}"; return 1; }
+    fi
+
+    # 自检：真的取到页面才算成功（配置写错 / 端口被占 都表现为「服务在跑但 404」）
+    local port="${FLIP_PORT:-9443}" code="000"
+    sleep 1
+    code=$(curl -s -o /dev/null -k -m 8 -w '%{http_code}' --resolve "${domain}:${port}:127.0.0.1" \
+        "https://${domain}:${port}/" 2>/dev/null || echo 000)
+    if [[ "$code" == "200" ]]; then
+        echo -e "${GREEN}✓ 伪装站点已上线：https://${domain}/（回落端口 ${port}）${PLAIN}"
+        echo -e "  目录: ${dir}   配置: ${caddy_file}"
+    else
+        echo -e "${YELLOW}⚠ 站点已生成但自检返回 HTTP ${code}${PLAIN}"
+        echo -e "  排查: systemctl status caddy; ss -ltnp | grep :${port}"
+        return 1
+    fi
+}
+
+menu_camo() {
+    local domain source style choice
+    while true; do
+        load_env
+        [ -t 1 ] && clear
+        echo -e "${GRAY}=================== 伪装站点 ===================${PLAIN}"
+        echo -e "Reality 的回落目标用本机静态站（证书/域名/内容自洽），比借用外部站点更干净。"
+        echo -e "${GRAY}------------------------------------------------${PLAIN}"
+        local sites
+        sites=$(find "$CAMO_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | head -6 || true)
+        if [[ -n "$sites" ]]; then
+            echo -e "已生成："
+            printf '%s\n' "$sites" | sed 's/^/  /'
+            echo -e "${GRAY}------------------------------------------------${PLAIN}"
+        fi
+        echo -e " 1. 生成 / 重建站点"
+        echo -e " 2. 删除站点"
+        echo -e " 0. 返回主菜单"
+        echo -e "${GRAY}------------------------------------------------${PLAIN}"
+        read -r -p "请选择 [0-2]: " choice || return 0
+        case "$choice" in
+            1)
+                read -r -p "域名 [${HY_DOMAIN:-}]: " domain || return 0
+                domain="$(trim_string "${domain:-${HY_DOMAIN:-}}")"
+                [[ -n "$domain" ]] || { echo -e "${RED}域名不能为空${PLAIN}"; continue; }
+                validate_domain "$domain" || { echo -e "${RED}域名格式不合法${PLAIN}"; continue; }
+                echo -e " 内容源: 1) ESO 天文  2) Wikimedia 开放知识  3) W3C 标准  4) BHL 自然史"
+                read -r -p "内容源 [1-4]: " source || return 0
+                case "$source" in
+                    1) source=eso ;; 2) source=wikimedia ;; 3) source=w3c ;; 4) source=bhl ;;
+                    *) echo -e "${RED}无效选项${PLAIN}"; continue ;;
+                esac
+                read -r -p "版式 0-7（回车=自动）: " style || return 0
+                [[ "$style" =~ ^[0-7]$ ]] || style=""
+                build_camo_site "$domain" "$source" "$style" || true
+                read -r -p "按回车键继续..." _ || true
+                ;;
+            2)
+                read -r -p "要删除的域名: " domain || return 0
+                domain="$(trim_string "${domain:-}")"
+                [[ -n "$domain" ]] || continue
+                local d="${CAMO_ROOT}/${domain}" f="/etc/caddy/sites/camo-${domain}.caddy"
+                rm -f "$f"
+                rm -rf "$d"
+                if [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in" && [[ "${VL_SNI:-}" == "$domain" ]]; then
+                    echo -e "${YELLOW}注意：Reality 的 SNI 仍指向 ${domain}，请在「协议管理」里改成别的站点${PLAIN}"
+                fi
+                reload_caddy_safe || true
+                echo -e "${GREEN}✓ 已删除 ${domain} 的站点${PLAIN}"
+                read -r -p "按回车键继续..." _ || true
+                ;;
+            0) return 0 ;;
+            *) echo -e "${RED}无效选项${PLAIN}"; sleep 1 ;;
+        esac
+    done
+}
+
 menu_exit() {
     while true; do
         load_env
@@ -3245,11 +3399,12 @@ menu() {
         echo -e " 5. sing-box 内核管理"
         echo -e " 6. 脚本升级"
         echo -e " 7. 脚本卸载"
+        echo -e " 8. 伪装站点"
         echo -e " 0. 退出控制台"
         echo -e "${GRAY}====================================================${PLAIN}"
         
         local opt=""
-        read -r -p "请输入选项 [0-7]: " opt || opt="0"
+        read -r -p "请输入选项 [0-8]: " opt || opt="0"
         case "$opt" in
             1) show_links || true ;;
             2) menu_protocol || true ;;
@@ -3264,6 +3419,7 @@ menu() {
                     exit 0
                 fi
                 ;;
+            8) menu_camo || true ;;
             0) echo -e "${GREEN}已退出。随时输入 simbo 即可重新打开面板。${PLAIN}"; exit 0 ;;
             *) echo -e "${RED}无效选项！${PLAIN}"; sleep 1 ;;
         esac

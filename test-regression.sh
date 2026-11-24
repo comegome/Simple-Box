@@ -308,10 +308,10 @@ grep -q 'caddy_installed_by_script' "$TARGET" && ok "Caddy 配置带归属标记
 
 # 10.1 Caddy reload 只在 setup_caddy_subscription 内部做一次，调用方不得重复
 _setup_reload=$(grep -c 'reload_caddy_safe' "$TARGET")
-if [[ "$_setup_reload" -eq 2 ]]; then
-    ok "Caddy reload 只有定义处与 setup 内部两处（无重复调用）"
+if [[ "$_setup_reload" -eq 4 ]]; then
+    ok "Caddy reload 只在四个既定位置（定义 + 订阅 setup + 伪装站点生成/删除）"
 else
-    bad "Caddy reload 调用点异常" "共 ${_setup_reload} 处，应为 2（定义 + setup 内部）"
+    bad "Caddy reload 调用点异常" "共 ${_setup_reload} 处，应为 4"
 fi
 
 # 10.2 发布订阅的动作序列：render_and_reload 自己生成；install_node 委托给协议模块
@@ -1042,6 +1042,21 @@ if grep -q 'sync_hy2_cert "\$domain" || cert_rc=\$?' "$TARGET"; then
 else
     bad "22.5 退出码未捕获，set -e 可能直接退出"
 fi
+
+group "23. 伪装站点（camo）"
+_blk=$(camo_caddy_block "cam.example.com" "/var/www/cam.example.com" "/etc/ssl/cam.example.com" 2>/dev/null)
+if printf '%s' "$_blk" | grep -q '^cam\.example\.com {'; then ok "23.1 站点块以域名开头"; else bad "23.1 站点块缺少域名行"; fi
+if printf '%s' "$_blk" | grep -q 'root \* /var/www/cam.example.com'; then ok "23.2 站点根目录正确"; else bad "23.2 站点根目录缺失"; fi
+if printf '%s' "$_blk" | grep -q 'tls /etc/ssl/cam.example.com/fullchain.cer'; then ok "23.3 证书路径写入"; else bad "23.3 证书路径缺失"; fi
+if printf '%s' "$_blk" | grep -q 'noindex, nofollow'; then ok "23.4 带 noindex 响应头"; else bad "23.4 缺少 noindex"; fi
+if printf '%s' "$_blk" | grep -q 'rewrite \* /404.html'; then ok "23.5 404 走自定义页"; else bad "23.5 404 未接管"; fi
+if camo_caddy_block "" "/tmp" "" >/dev/null 2>&1; then bad "23.6 空域名应当报错"; else ok "23.6 空域名返回非 0"; fi
+if python3 -c 'import ast,sys;ast.parse(open(sys.argv[1]).read())' "${SCRIPT_DIR}/camo/camo-site.py" 2>/dev/null; then
+    ok "23.7 生成器随仓库分发且可解析"
+else
+    bad "23.7 生成器缺失或语法错误"
+fi
+if grep -q 'menu_camo' "$TARGET" && grep -q '8. 伪装站点' "$TARGET"; then ok "23.8 主菜单已挂载伪装站点入口"; else bad "23.8 菜单入口缺失"; fi
 
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null

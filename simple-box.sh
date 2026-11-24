@@ -2614,6 +2614,20 @@ site_file_for() {
     printf '%s\n' "${hits[0]}"
 }
 
+# 站点块里显式 tls 指向的证书是否可用。返回 0 = 没写 tls（Caddy 自管，无法判断）或可用；
+# 返回 1 并把原因打到 stdout。站点是 Reality 的回落目标，证书坏了等于所有客户端握手失败。
+site_cert_problem() {
+    local file="${1:-}" domain="${2:-}" crt="" key=""
+    [[ -f "$file" && -n "$domain" ]] || return 0
+    read -r crt key < <(awk '/^[[:space:]]*tls[[:space:]]/{print $2, $3; exit}' "$file")
+    [[ -n "${crt:-}" ]] || return 0
+    [[ -f "$crt" && -n "${key:-}" && -f "$key" ]] || { printf '证书或私钥文件缺失: %s\n' "$crt"; return 1; }
+    cert_covers_host "$crt" "$domain" || { printf '证书不覆盖 %s\n' "$domain"; return 1; }
+    cert_pair_ok "$crt" "$key" || { printf '证书与私钥不配对: %s\n' "$crt"; return 1; }
+    openssl x509 -in "$crt" -noout -checkend 0 >/dev/null 2>&1 || { printf '证书已过期: %s\n' "$crt"; return 1; }
+    return 0
+}
+
 # 有站点块直接引用 CERT_DIR 的证书（翻转后的伪装站、接入域站点）。
 # 这些站点一旦被 IP 自签覆盖就会当场失效，所以证书降级前必须先问一句。
 sites_using_cert_dir() {
@@ -2762,6 +2776,15 @@ proto_enable_reality() {
     local site=""
     if site=$(site_file_for "$sni"); then
         echo -e "${GREEN}✓ 找到本机站点 ${site}${PLAIN}"
+        # 站点是 Reality 的回落目标：它出示的证书坏了，所有客户端握手都会失败，
+        # 而配置、进程、订阅看起来全绿。显式 tls 的站点能在启用前就判掉。
+        local _cert_why
+        if ! _cert_why=$(site_cert_problem "$site" "$sni"); then
+            echo -e "${RED}✗ 本机站点 ${site} 的证书不可用：${_cert_why}${PLAIN}"
+            echo -e "${YELLOW}  站点是 Reality 的回落目标，证书坏了会让所有客户端握手失败，已中止${PLAIN}"
+            echo -e "${YELLOW}  续期或重签该域名的证书后重试（simbo → 8. 伪装站点 / 证书签发）${PLAIN}"
+            return 1
+        fi
         echo -e "  Reality 占用 ${port}，站点回落到 127.0.0.1:${FLIP_PORT:-9443}"
     else
         # 域名解析到本机 = 这是自己的域名：可以现场建一个伪装站，比借外部站更自洽
@@ -2870,8 +2893,16 @@ proto_enable_hy2() {
         HY_SKIP_CERT="false"
         echo -e "${GREEN}✓ 已同步 ${domain} 的证书${PLAIN}"
     else
-        HY_SKIP_CERT="${HY_SKIP_CERT:-false}"
-        [[ -n "$domain" ]] && echo -e "${YELLOW}未找到 ${domain} 的证书，沿用现有证书文件${PLAIN}"
+        # 域名有值却找不到该域名的证书：CERT_DIR 里躺的是别的证书（旧域名 / IP 自签），
+        # 继续启用只会得到「[已启用] 但客户端 x509 域名不匹配」。只有已明确 skip 的
+        # 存量节点才放行（否则会打断一台本来能用的机器），其余一律中止。
+        if [[ "${HY_SKIP_CERT:-false}" == "true" ]]; then
+            echo -e "${YELLOW}未找到 ${domain} 的证书，沿用现有证书并保持 skip-cert-verify=true${PLAIN}"
+        else
+            echo -e "${RED}✗ 没有 ${domain} 的可用证书，已中止启用 Hysteria2${PLAIN}"
+            echo -e "${YELLOW}  先签发该域名的证书（simbo → 4. 订阅地址配置 里填 CF Token），或把域名留空改用 IP 自签${PLAIN}"
+            return 1
+        fi
     fi
 
     # 端口跳跃规则跟着当前参数走：先清掉本脚本的旧规则，再按需重建

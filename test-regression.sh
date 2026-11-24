@@ -790,6 +790,23 @@ else
     bad "16.2 安装未走协议模块"
 fi
 
+# 16.3c 站点证书不覆盖域名时必须中止（否则回落握手全挂，而配置看起来全对）
+_bc="$SB16/badcert"; mkdir -p "$_bc"
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$_bc/k.pem" -out "$_bc/c.pem" -days 2 \
+    -subj "/CN=wrong.example.com" >/dev/null 2>&1
+printf 'bad.example.com {\n\ttls %s/c.pem %s/k.pem\n\troot * /var/www/bad\n}\n' "$_bc" "$_bc" > "$SB16/sites/badcert.caddy"
+_cfg_before=$(md5sum "$SB16/config.json" | cut -d' ' -f1)
+if proto_enable_reality 443 bad.example.com < /dev/null > "$SB16/o1c" 2>&1; then
+    bad "16.3c 站点证书不覆盖域名时仍启用 Reality"
+else
+    if grep -q '证书不可用' "$SB16/o1c" && [[ "$(md5sum "$SB16/config.json" | cut -d' ' -f1)" == "$_cfg_before" ]]; then
+        ok "16.3c 站点证书不可用时中止且不写配置"
+    else
+        bad "16.3c 中止原因或副作用不对" "$(tail -2 "$SB16/o1c")"
+    fi
+fi
+rm -f "$SB16/sites/badcert.caddy"
+
 # 16.3b 有本机站点时，非 443 端口必须拒绝（否则站点被搬到回环、公网 443 空着）
 if proto_enable_reality 8443 site.example.com < /dev/null > "$SB16/o1b" 2>&1; then
     bad "16.3b 有站点时非 443 端口未被拒绝"
@@ -815,12 +832,28 @@ fi
 grep -q '^SITE_FILE="/tmp' "$SB16/env.conf" 2>/dev/null || grep -q "^SITE_FILE=\"$SB16/sites/site.caddy\"" "$SB16/env.conf" \
     && ok "16.4 env 记录翻转站点路径" || bad "16.4 SITE_FILE 未写入" "$(grep '^SITE_FILE' "$SB16/env.conf")"
 
+# 16.5b 域名有值但没有该域名的证书时必须中止（否则 [已启用] 但客户端 x509 失败）
+if proto_enable_hy2 20443 "nocert.example.com" "" < /dev/null > "$SB16/o2b" 2>&1; then
+    bad "16.5b 缺证书时仍启用 Hysteria2"
+else
+    grep -q '没有 nocert.example.com 的可用证书' "$SB16/o2b" \
+        && ok "16.5b 缺证书时中止启用 Hysteria2" || bad "16.5b 中止原因不明确" "$(tail -2 "$SB16/o2b")"
+fi
+
 # 16.5 非交互启用 Hy2：两个 inbound 共存
 if proto_enable_hy2 10443 "" "" < /dev/null > "$SB16/o2" 2>&1; then
     n=$(python3 -c "import json;print(len(json.load(open('$SB16/config.json'))['inbounds']))")
     [[ "$n" == "2" ]] && ok "16.5 启用 Hy2 后两个 inbound 共存" || bad "16.5 inbound 数量异常" "$n"
 else
     bad "16.5 非交互启用 Hy2 失败" "$(tail -3 "$SB16/o2")"
+fi
+
+# 16.5c 已明确 skip=true 的存量节点不得被中止（否则会打断一台本来能用的机器）
+_ph16=$(awk '/^proto_enable_hy2\(\) \{/,/^}/' "$TARGET")
+if grep -q 'skip-cert-verify=true' <<<"$_ph16"; then
+    ok "16.5c 已有 skip=true 时沿用而不是中止"
+else
+    bad "16.5c skip=true 的存量节点被一刀切中止"
 fi
 
 # 16.6 停用 Hy2 只摘自己

@@ -44,10 +44,10 @@ source "$TARGET" 2>/dev/null
 RC=$?
 if [[ $RC -eq 0 ]]; then ok "source 成功（入口守卫已跳过）"; else bad "source 失败 rc=$RC"; fi
 
-for fn in trim_string validate_port validate_range validate_domain ver_ge \
+for fn in trim_string validate_port validate_domain ver_ge \
           cert_covers_domain harden_private_key issue_cert_bundle issue_self_signed_cert \
           fetch_latest_script reinstall_with_latest write_singbox_config \
-          verify_cloudflare_token prompt_cf_token; do
+          verify_cloudflare_token prompt_cf_token cleanup_legacy_port_hopping; do
     if declare -F "$fn" >/dev/null 2>&1; then ok "函数已定义: $fn"; else bad "函数缺失: $fn"; fi
 done
 
@@ -209,13 +209,22 @@ for p in "" 0 65536 abc -1 "80 " 1.5; do
     validate_port "$p" && bad "validate_port 误收 '$p'" || ok "validate_port 拒绝 '$p'"
 done
 
-# validate_range
-for r in "20000:40000" "1:65535" "1000:2000"; do
-    validate_range "$r" && ok "validate_range 接受 $r" || bad "validate_range 误拒 $r"
-done
-for r in "" "20000" "40000:20000" "0:100" "20000:40000:50000" "a:b"; do
-    validate_range "$r" && bad "validate_range 误收 '$r'" || ok "validate_range 拒绝 '$r'"
-done
+# 端口跳跃已移除：不得再有任何 REDIRECT 规则的创建，只保留一次性清理
+if declare -F validate_range >/dev/null 2>&1; then
+    bad "validate_range 仍存在（端口跳跃残留）"
+else
+    ok "validate_range 已随端口跳跃移除"
+fi
+if grep -q -- '-A PREROUTING .*REDIRECT' "$TARGET"; then
+    bad "脚本仍在创建 iptables REDIRECT 规则"
+else
+    ok "不再创建端口跳跃规则（只清理旧版遗留）"
+fi
+if declare -F setup_port_hopping >/dev/null 2>&1; then
+    bad "setup_port_hopping 仍存在"
+else
+    ok "setup_port_hopping 已移除"
+fi
 
 # validate_domain
 for d in "example.com" "sub.example.com" "a-b.example.co.uk" "x1.y2.io"; do
@@ -358,21 +367,11 @@ else
     bad "install_node 未委托协议模块" "reality=$(grep -c proto_enable_reality <<<"$_ibody") hy2=$(grep -c proto_enable_hy2 <<<"$_ibody")"
 fi
 
-# 10.2 端口跳跃展示串必须由 fmt_hy_ports 统一生成（禁止各处手拼）
-_manual_ports=$(grep -c 'hy_ports_display="\${[A-Za-z_]*},\${' "$TARGET" || true)
-if [[ "${_manual_ports:-0}" -eq 0 ]]; then
-    ok "端口跳跃串无手拼残留（统一走 fmt_hy_ports）"
+# 10.2 端口跳跃已整体移除：订阅里不得再出现 ports / mport
+if grep -qE 'ports:|mport=' "$TARGET"; then
+    bad "订阅生成里仍有端口跳跃字段（ports / mport）"
 else
-    bad "仍有 ${_manual_ports} 处手拼 hy_ports_display" "格式变更时会漏改"
-fi
-# 端口串只允许三处生成：regen_subscription 内（订阅）、show_links 内（原生链接）、
-# show_clash_snippet 内（Mihomo 片段）。新增消费者必须走同一函数，不得手拼。
-_fmt_calls=$(grep -c 'fmt_hy_ports "' "$TARGET" || true)
-# 原生链接与 Mihomo 片段都改为读生成器产物，端口串只在订阅里拼一次
-if [[ "${_fmt_calls:-0}" -eq 1 ]]; then
-    ok "fmt_hy_ports 调用点恰为 1 处（仅订阅生成）"
-else
-    bad "fmt_hy_ports 调用点数量异常" "共 ${_fmt_calls} 处，应为 1"
+    ok "订阅里已无 ports / mport（端口跳跃移除）"
 fi
 # 订阅只有一个生产者：generate_full_client_config 只能被 regen_subscription 调用。
 # 这是真正的不变式；下面那条计数只是「已知触发点没被悄悄删掉」的旁证。
@@ -753,7 +752,6 @@ VL_SHORTID="abcd1234"
 HY_DOMAIN=""
 TARGET_HOST="203.0.113.10"
 HY_PORT="10443"
-HY_RANGE=""
 HY_PASS="hy16pass"
 HY_SKIP_CERT="false"
 SUB_PORT="8444"
@@ -902,8 +900,8 @@ apply_exit_config
     && ok "17.1 EXIT_TYPE=none 配置字节不变" || bad "17.1 none 仍改动了配置"
 
 # 17.2 hy2 出口：4 个 inbound + exit-out + route
-EXIT_TYPE="hy2"; EXIT_SERVER="isif.example.com"; EXIT_PORT="8443"; EXIT_PASS="exitpass17"
-EXIT_SNI="isif.example.com"; EXIT_ENTRY_VL="2053"; EXIT_ENTRY_HY="2054"
+EXIT_TYPE="hy2"; EXIT_HY_SERVER="isif.example.com"; EXIT_HY_PORT="8443"; EXIT_HY_PASS="exitpass17"
+EXIT_HY_SNI="isif.example.com"; EXIT_ENTRY_VL="2053"; EXIT_ENTRY_HY="2054"
 apply_exit_config
 _tags=$(python3 -c "import json;print(' '.join(i['tag'] for i in json.load(open('$CONF_FILE'))['inbounds']))")
 _ob=$(python3 -c "import json;d=json.load(open('$CONF_FILE'));o=[x for x in d['outbounds'] if x['tag']=='exit-out'][0];print(o['type'],o['server_port'])")
@@ -917,7 +915,7 @@ _ports=$(python3 -c "import json;print(sorted(i['listen_port'] for i in json.loa
 [[ "$_ports" == "[443, 2053, 2054, 8443]" ]] && ok "17.3 四个入口端口正确" || bad "17.3 端口集合异常" "$_ports"
 
 # 17.4 订阅里出现 -SG 节点（由生成器直接产出，不再后处理）
-EXIT_TYPE="hy2"; EXIT_SERVER="isif.example.com"; EXIT_PORT="8443"
+EXIT_TYPE="hy2"; EXIT_HY_SERVER="isif.example.com"; EXIT_HY_PORT="8443"
 EXIT_ENTRY_VL="2053"; EXIT_ENTRY_HY="2054"; EXIT_LABEL="SG"
 VL_PORT=443; HY_PORT=8443; VL_SNI="gh.example.com"; SERVER_IP="203.0.113.11"
 user_uuid="11111111-1111-1111-1111-111111111111"; vl_pubkey="PBK17"; vl_shortid="ab12cd34"
@@ -948,14 +946,12 @@ _blank_between=$(awk '/^  - name:/{c++} END{print c-1}' "$WEB_DIR/tok17/provider
 awk '/FN-Hysteria2-SG/,/FN-VLESS|^EOF|^$/' "$WEB_DIR/tok17/provider.yaml" | grep -q 'ports:' \
     && bad "17.11 -SG 节点带了端口跳跃" || ok "17.11 -SG 节点不含 ports（避免跳到主入口）"
 
-# 17.12 出口参数按协议分开存：切到另一协议不会串用地址/端口
-EXIT_TYPE="hy2"; EXIT_HY_SERVER="isif.example.com"; EXIT_HY_PORT="8443"; EXIT_HY_PASS="p1"
-EXIT_VL_SERVER="isif2.example.com"; EXIT_VL_PORT="443"
-sync_env_locals
-[[ "$EXIT_SERVER" == "isif.example.com" && "$EXIT_PORT" == "8443" ]] || bad "17.12 Hy2 出口解析错误" "$EXIT_SERVER:$EXIT_PORT"
-EXIT_TYPE="vless"; sync_env_locals
-[[ "$EXIT_SERVER" == "isif2.example.com" && "$EXIT_PORT" == "443" ]] \
-    && ok "17.12 切换协议使用各自的地址/端口" || bad "17.12 出口参数串用" "$EXIT_SERVER:$EXIT_PORT"
+# 17.12 旧版分协议字段（EXIT_VL_*）已彻底移除
+if grep -q 'EXIT_VL_' "$TARGET"; then
+    bad "17.12 仍残留 EXIT_VL_* 字段"
+else
+    ok "17.12 EXIT_VL_* 字段已全部移除"
+fi
 
 # 17.13 节点后缀可自定义且做白名单校验
 grep -q '节点后缀 \[' "$TARGET" && ok "17.13 菜单可设置节点后缀" || bad "17.13 未提供后缀设置"
@@ -1014,12 +1010,11 @@ fi
 grep -q '链式入口端口 · Reality' "$TARGET" && ok "17.14 链式入口端口可设置" || bad "17.14 未提供入口端口设置"
 grep -q '不能与直连' "$TARGET" && ok "17.14 端口冲突有校验" || bad "17.14 端口冲突无校验"
 
-# 17.8 vless 出口
-EXIT_TYPE="vless"; EXIT_PORT="443"; EXIT_UUID="22222222-2222-2222-2222-222222222222"
-EXIT_PBK="PBKEXIT"; EXIT_SID="ff00ff00"
+# 17.8 旧版 vless 出口已移除：EXIT_TYPE=vless 视为无出口，不生成中转
+EXIT_TYPE="vless"; EXIT_HY_SERVER=""; EXIT_HY_PORT=""
 render_set "reality hy2"; apply_exit_config
-_o2=$(python3 -c "import json;d=json.load(open('$CONF_FILE'));o=[x for x in d['outbounds'] if x['tag']=='exit-out'][0];print(o['type'], bool(o['tls'].get('reality')))")
-[[ "$_o2" == "vless True" ]] && ok "17.8 vless 出口生成 Reality 出站" || bad "17.8 vless 出口异常" "$_o2"
+_o2=$(python3 -c "import json;d=json.load(open('$CONF_FILE'));print(' '.join(o['tag'] for o in d['outbounds']))")
+[[ "$_o2" == "direct" ]] && ok "17.8 EXIT_TYPE=vless 不再生成中转单元" || bad "17.8 仍生成 vless 出口" "$_o2"
 
 # 17.9 关闭出口后回到两个 inbound
 EXIT_TYPE="none"; render_set "reality hy2"; apply_exit_config
@@ -1076,10 +1071,11 @@ parse_apply <<< "$_out"
 [[ "$EXIT_HY_SERVER" == "isif.example.com" && "$EXIT_HY_PORT" == "8443" && "$EXIT_HY_PASS" == "hyisif99" ]] \
     && ok "18.1 从 provider.yaml 优先解析出 Hy2" || bad "18.1 Hy2 解析失败" "$_out"
 
-_out2=$(exit_parse_url "http://127.0.0.1:18093/only-vless.yaml" 2>/dev/null)
-parse_apply <<< "$_out2"
-[[ "$EXIT_VL_PBK" == "PBKB" && "$EXIT_VL_SID" == "aabbccdd" && "$EXIT_VL_SERVER" == "198.51.100.21" ]] \
-    && ok "18.2 无 Hy2 时回退解析 Reality 节点" || bad "18.2 Reality 解析失败" "$_out2"
+if exit_parse_url "http://127.0.0.1:18093/only-vless.yaml" >/dev/null 2>&1; then
+    bad "18.2 只有 Reality 节点的订阅仍被导入（出口只支持 Hysteria2）"
+else
+    ok "18.2 无 Hy2 节点的订阅导入失败"
+fi
 
 if exit_parse_url "http://127.0.0.1:18093/nope.yaml" >/dev/null 2>&1; then
     bad "18.3 不存在的订阅未报错"
@@ -1354,7 +1350,7 @@ fi
 
 group "27. 协议启用复用不丢域"
 _h2=$(awk '/^proto_enable_hy2\(\) \{/,/^}/' "$TARGET")
-if grep -q 'port="\${HY_PORT:-}"; domain="\${HY_DOMAIN:-}"; range="\${HY_RANGE:-}"' <<<"$_h2"; then
+if grep -q 'port="\${HY_PORT:-}"; domain="\${HY_DOMAIN:-}"' <<<"$_h2"; then
     ok "27.1 Hy2 交互复用前从 env 取回 port/domain/range"
 else
     bad "27.1 Hy2 复用路径没有回填 domain（会静默降级 IP 自签）"
@@ -1500,7 +1496,7 @@ _a=$(grep -n 'apply_exit_config' <<<"$_rr" | head -1 | cut -d: -f1)
 
 # 30.7 槽位上限常量存在且本版锁死为 1
 _max=$(grep -oP '^EXIT_SLOTS_MAX=\K[0-9]+' "$TARGET" | head -1)
-[[ "$_max" == "2" ]] && ok "30.7 EXIT_SLOTS_MAX=2（槽 1 + 槽 2）" \
+[[ "$_max" == "4" ]] && ok "30.7 EXIT_SLOTS_MAX=4（槽 1..4）" \
     || bad "30.7 EXIT_SLOTS_MAX 取值异常" "=${_max:-未定义}"
 
 group "31. 第二出口（hy2-only）与菜单"
@@ -1586,7 +1582,7 @@ _slots_active=$( (unset EXIT_SERVER EXIT_PORT EXIT_PASS EXIT_SNI EXIT_UUID EXIT_
   EXIT2_SERVER=""; EXIT2_PORT=""; EXIT2_PASS=""
   exit_active_slots | tr '\n' ' ') )
 [[ "$_s1" == "vless-reality-in hy2-in exit-vless-in exit-hy2-in" && "$_s1o" == "direct exit-out" \
-   && "$_max31" == "2" && "$_slots_active" == "1 " ]] \
+   && "$_max31" == "4" && "$_slots_active" == "1 " ]] \
     && ok "31.3 槽 2 为空时只生成槽 1 的中转单元（槽 2 结构存在但不生效）" \
     || bad "31.3 槽 2 为空仍产生多余结构" "$_s1 / $_s1o"
 
@@ -1614,6 +1610,39 @@ if [[ ! -f "$SB31/env3.conf" ]]; then
     ok "31.4 槽 2 参数不完整时拒绝写入 env（不留半套出口）"
 else
     bad "31.4 槽 2 不完整仍写入了 env"
+fi
+
+# 31.4b 槽 3 / 槽 4 也写进 env（上限 4，落点字段按槽循环写出）
+(
+  ENV_FILE="$SB31/env4.conf"
+  node_prefix=SB; server_ip=203.0.113.11; vl_port=443; vl_sni=gh.example.com
+  user_uuid="11111111-1111-1111-1111-111111111111"; vl_privkey=K; vl_pubkey=P; vl_shortid=ab
+  hy_port=8443; hy_password=pw; sub_port=8444; sub_token=tok31
+  EXIT3_SERVER="tw1.example.com"; EXIT3_PORT=8443; EXIT3_PASS="p3"; EXIT3_SNI="tw1.example.com"
+  EXIT3_LABEL="TW1"; EXIT3_ENTRY_VL=2087; EXIT3_ENTRY_HY=2088
+  write_env_config 2>/dev/null || true
+)
+_n3=$(grep -c '^EXIT3_' "$SB31/env4.conf" 2>/dev/null || true)
+if [[ "$_n3" == "8" ]] && grep -q '^EXIT4_SERVER=""' "$SB31/env4.conf" 2>/dev/null; then
+    ok "31.4b 槽 3 写回 8 个字段、槽 4 以空值占位（上限 4）"
+else
+    bad "31.4b 槽 3/4 字段写回异常" "EXIT3 共 ${_n3:-0} 个"
+fi
+
+# 31.4c apply_exit_config 幂等：同一份配置连跑两次不得出现重复 tag
+(
+  CONF_FILE="$SB31/cfg.json"
+  unset EXIT_SERVER EXIT_PORT EXIT_PASS EXIT_SNI
+  EXIT_TYPE="hy2"; EXIT_HY_SERVER="isif.example.com"; EXIT_HY_PORT="8443"; EXIT_HY_PASS="p1"
+  EXIT_HY_SNI="isif.example.com"; EXIT_LABEL="ISIF"; EXIT_ENTRY_VL="2053"; EXIT_ENTRY_HY="2054"
+  mk31cfg "$CONF_FILE"
+  apply_exit_config; apply_exit_config
+  python3 -c "import json,collections;d=json.load(open('$SB31/cfg.json'));c=collections.Counter(i['tag'] for i in d['inbounds']);print(' '.join(k for k,v in c.items() if v>1))" > "$SB31/dup"
+)
+if [[ -z "$(cat "$SB31/dup" 2>/dev/null)" ]]; then
+    ok "31.4c apply_exit_config 连跑两次无重复 tag（幂等）"
+else
+    bad "31.4c 重复应用产生了重复 inbound tag" "$(cat "$SB31/dup")"
 fi
 
 # 31.5 删除槽 2：订阅回到 4 条节点（2 直连 + 2 槽 1 出口）
@@ -1686,12 +1715,13 @@ else
     bad "31.7 exit_slot_default_ports 未定义"
 fi
 
-# 31.8 槽 1 不再接受 Reality 出站
+# 31.8 旧版 Reality 出口已移除：菜单只提示重配，编辑流程不再有 vless 分支
 _ee31=$(awk '/^exit_edit\(\) \{/,/^}/' "$TARGET")
-if grep -q '只支持 Hysteria2' <<<"$_ee31"; then
-    ok "31.8 槽 1 编辑时提示只支持 Hysteria2（重配）"
+_me31b=$(awk '/^menu_exit\(\) \{/,/^}/' "$TARGET")
+if ! grep -q 'SE_TYPE" == "vless"' <<<"$_ee31" && grep -q '旧版 Reality 出口已不再支持' <<<"$_me31b"; then
+    ok "31.8 编辑流程无 vless 分支，菜单对旧出口给出重配提示"
 else
-    bad "31.8 槽 1 仍可能配置成 Reality 出口"
+    bad "31.8 vless 出口仍残留在编辑流程里"
 fi
 
 # 31.9 订阅：两个出口的节点名与策略组同源

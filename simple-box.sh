@@ -68,9 +68,9 @@ require_arch() {
 # 收缩到这个范围是为了让所有依赖都直接用发行版仓库，无需第三方 apt 源：
 #   - caddy 自 Ubuntu noble / Debian bookworm 起才进发行版仓库（22.04 jammy 没有这个包）
 #   - 两者仓库里的 2.6.2 已实测能完整承载本脚本的订阅地址配置
-#   - 两者共用 apt + systemd + iptables-persistent，脚本的系统调用完全同构
+#   - 两者共用 apt + systemd，脚本的系统调用完全同构
 # 已知版本下限（供后续新增依赖时对照）：
-#   caddy 2.6.2 | openssl 3.0 | iptables 1.8.10 | qrencode 4.1.1
+#   caddy 2.6.2 | openssl 3.0 | qrencode 4.1.1
 MIN_UBUNTU_VERSION="24.04"
 MIN_DEBIAN_VERSION="12"
 
@@ -114,13 +114,6 @@ validate_port() {
     local p="${1:-}"
     [[ "$p" =~ ^[0-9]{1,5}$ ]] || return 1
     (( p >= 1 && p <= 65535 ))
-}
-
-validate_range() {
-    local r="${1:-}"
-    [[ "$r" =~ ^([0-9]{1,5}):([0-9]{1,5})$ ]] || return 1
-    local s="${BASH_REMATCH[1]}" e="${BASH_REMATCH[2]}"
-    (( s >= 1 && e <= 65535 && e > s ))
 }
 
 validate_domain() {
@@ -287,7 +280,7 @@ prompt_cf_token() {
 # $1=待校验端口 $2=tcp|udp $3=当前正在配置的服务名（跳过与自身的比较）
 # 冲突时打印原因并返回 1
 check_port_conflict() {
-    local port="${1:-}" proto="${2:-tcp}" self="${3:-}" range="${4:-}"
+    local port="${1:-}" proto="${2:-tcp}" self="${3:-}"
     local label
     [[ "$proto" == "udp" ]] && label="UDP" || label="TCP"
 
@@ -304,39 +297,9 @@ check_port_conflict() {
         return 1
     fi
 
-    # 端口落在 Hysteria 2 跳跃范围内也不行（UDP 段会被 iptables 整段转发）
-    local r="${range:-${HY_RANGE:-}}"
-    if [[ -n "$r" && "$r" == *:* ]]; then
-        local r_start="${r%%:*}" r_end="${r##*:}"
-        if (( port >= r_start && port <= r_end )); then
-            echo -e "${RED}范围冲突: 端口 ${port} 落在 Hysteria2 跳跃范围 (${r}) 内，请调整！${PLAIN}"
-            return 1
-        fi
-    fi
-
     check_port_occupied "$port" "$proto" && return 0
     echo -e "${YELLOW}请更换其他未占用的 ${label} 端口！${PLAIN}"
     return 1
-}
-
-# 校验端口跳跃范围是否与已分配的端口冲突
-# $1=范围(起始:结束)
-# 注意：Hy2 主端口落在跳跃范围内必须拒绝。iptables 会对整段 UDP 做 DNAT，
-# 主端口若在段内会和跳跃端口抢同一批包，客户端握手随机失败。
-# 不要为「主端口是本次新选的值」而加 skip 参数放行 —— 那正是该拦的情况。
-check_range_conflict() {
-    local r="${1:-}"
-    local r_start="${r%%:*}" r_end="${r##*:}"
-    local p
-    for p in "${VL_PORT:-}:VLESS-Reality" "${SUB_PORT:-}:Caddy 订阅" "${HY_PORT:-}:Hysteria 2 主端口"; do
-        local val="${p%%:*}" name="${p#*:}"
-        [[ -z "$val" ]] && continue
-        if (( val >= r_start && val <= r_end )); then
-            echo -e "${RED}范围冲突: 跳跃范围包含 ${name} 端口 (${val})，请调整！${PLAIN}"
-            return 1
-        fi
-    done
-    return 0
 }
 
 # 端口冲突检测
@@ -379,26 +342,21 @@ check_port_occupied() {
 # 支持范围内的系统必然是 apt + systemd，直接 apt 安装，无需分支。
 install_deps() {
     local missing=()
-    for cmd in curl tar openssl iptables qrencode; do
+    for cmd in curl tar openssl python3 qrencode; do
         command -v "$cmd" &>/dev/null || missing+=("$cmd")
     done
-    # netfilter-persistent 由 iptables-persistent 提供，是端口跳跃规则持久化的前提。
-    # 必须单独判定：iptables 在而持久化包缺失时，只看 missing 会漏装。
-    command -v netfilter-persistent &>/dev/null || missing+=(iptables-persistent)
 
     if [ ${#missing[@]} -gt 0 ]; then
         echo -e "安装必要基础组件: ${missing[*]}..."
         export DEBIAN_FRONTEND=noninteractive
-        echo "iptables-persistent iptables-persistent/autosave_v4 boolean true" | debconf-set-selections 2>/dev/null || true
-        echo "iptables-persistent iptables-persistent/autosave_v6 boolean true" | debconf-set-selections 2>/dev/null || true
         apt-get -o DPkg::Lock::Timeout=180 update -qq || echo -e "${YELLOW}apt-get update 失败，尝试直接安装。${PLAIN}"
         apt-get -o DPkg::Lock::Timeout=180 install -y -qq "${missing[@]}" \
             || echo -e "${YELLOW}部分依赖安装失败，将尝试继续（缺少 qrencode 仅影响二维码显示）。${PLAIN}"
     fi
 
-    # 关键依赖缺失时给出明确警告（iptables 缺失会导致端口跳跃静默失效）
+    # 关键依赖缺失时给出明确警告（python3 缺失会让配置生成整条链路失效）
     local critical_missing=()
-    for cmd in curl tar openssl iptables; do
+    for cmd in curl tar openssl python3; do
         command -v "$cmd" &>/dev/null || critical_missing+=("$cmd")
     done
     if [ ${#critical_missing[@]} -gt 0 ]; then
@@ -816,41 +774,22 @@ issue_self_signed_cert() {
     return 0
 }
 
-# 清理本脚本遗留的端口跳跃规则（按标记逐条删除，不触碰其它规则）
-clear_port_hopping() {
-    local ranges
-    # iptables -S 输出形如: -A PREROUTING -p udp -m udp --dport 39000:39999 -j REDIRECT --to-ports 8443
-    ranges=$(iptables -t nat -S PREROUTING 2>/dev/null \
-        | grep -oP -- '--dport \K[0-9]+:[0-9]+(?=.*REDIRECT --to-ports)' | sort -u || true)
-    local r tport
-    for r in $ranges; do
-        tport=$(iptables -t nat -S PREROUTING 2>/dev/null \
-            | grep -F -- "--dport $r " | grep -oP -- '--to-ports \K[0-9]+' | head -1 || true)
-        if [[ -n "$tport" ]]; then
-            iptables -t nat -D PREROUTING -p udp --dport "$r" -j REDIRECT --to-ports "$tport" 2>/dev/null || true
-        fi
-    done
+# 清理旧版（4.0 之前）遗留的端口跳跃规则。
+# 4.0 起不再使用端口跳跃；升降级时那条 REDIRECT 会一直留在 PREROUTING 里，
+# 把整段 UDP 继续重定向到旧端口，所以安装与卸载各清理一次。
+# 只删「-p udp --dport 起:止 -j REDIRECT --to-ports N」这一种形态，不碰其它规则。
+cleanup_legacy_port_hopping() {
+    command -v iptables &>/dev/null || return 0
+    local line
+    while IFS= read -r line; do
+        [[ -n "$line" ]] || continue
+        # shellcheck disable=SC2086
+        iptables -t nat -D PREROUTING $line 2>/dev/null || true
+    done < <(iptables -t nat -S PREROUTING 2>/dev/null \
+        | sed -n 's/^-A PREROUTING //p' \
+        | grep -E '^-p udp -m udp --dport [0-9]+:[0-9]+ -j REDIRECT --to-ports [0-9]+$' || true)
     if command -v netfilter-persistent &>/dev/null; then
         netfilter-persistent save >/dev/null 2>&1 || true
-    fi
-}
-
-# 端口跳跃 iptables 规则配置
-setup_port_hopping() {
-    local hy_port="${1:-}"
-    local range="${2:-}"
-
-    echo -e "配置 Hysteria2 端口跳跃 (UDP ${range} -> ${hy_port})..."
-    iptables -t nat -D PREROUTING -p udp --dport "$range" -j REDIRECT --to-ports "$hy_port" 2>/dev/null || true
-    iptables -t nat -A PREROUTING -p udp --dport "$range" -j REDIRECT --to-ports "$hy_port"
-
-    if command -v netfilter-persistent &>/dev/null; then
-        netfilter-persistent save >/dev/null 2>&1 || true
-    fi
-
-    if command -v ufw &>/dev/null && ufw status | grep -qw "active"; then
-        ufw allow "$hy_port/udp" >/dev/null 2>&1 || true
-        ufw allow "${range/:/-}/udp" >/dev/null 2>&1 || true
     fi
 }
 
@@ -1049,10 +988,6 @@ http://:${sub_port} {
 EOF
     fi
 
-    if command -v ufw &>/dev/null && ufw status | grep -qw "active"; then
-        ufw allow "${sub_port}/tcp" >/dev/null 2>&1 || true
-    fi
-
     chmod 755 "$WEB_DIR" 2>/dev/null || true
     if ! command -v caddy &>/dev/null; then
         echo -e "${RED}Caddy 未安装成功，在线订阅不可用。${PLAIN}"
@@ -1092,8 +1027,8 @@ print_io_status() {
             st="${GREEN}[已启用]${PLAIN}"
             case "$_p" in
                 reality) printf ' 入站 %-14s %s  TCP %s   %s\n' "$name" "$st" "${VL_PORT:-443}" "${VL_SNI:-}";;
-                hy2)     printf ' 入站 %-14s %s  UDP %s  %s%s\n' "$name" "$st" "${HY_PORT:-8443}" \
-                            "${HY_DOMAIN:-$SERVER_IP}" "${HY_RANGE:+ $HY_RANGE}";;
+                hy2)     printf ' 入站 %-14s %s  UDP %s  %s\n' "$name" "$st" "${HY_PORT:-8443}" \
+                            "${HY_DOMAIN:-$SERVER_IP}";;
             esac
         elif [[ -n "$cred" ]]; then
             printf ' 入站 %-14s %s\n' "$name" "${YELLOW}[未启用]${PLAIN}"
@@ -1115,7 +1050,7 @@ print_io_status() {
         [[ -n "$_hyp" ]] && set_has "hy2-in" && ep="${ep:+$ep / }UDP $_hyp"
         [[ -n "$ep" ]] || continue
         _any=1
-        [[ "$SE_TYPE" == "vless" ]] && en="Reality" || en="Hysteria2"
+        en="Hysteria2"
         # 连接仍用域名（落地机换 IP 时自动跟随），面板显示解析结果，便于和实测出口 IP 对照。
         # 不做缓存：解析失败就退回域名，避免出现「面板显示旧 IP」的假象。
         eshow="$SE_SERVER"
@@ -1126,18 +1061,6 @@ print_io_status() {
             "$ep" "$eshow" "$en"
     done
     [[ "$_any" == "1" ]] || printf ' 出站 %-14s %s\n' "Relay" "${GRAY}[已停用]${PLAIN}"
-}
-
-# 组装端口跳跃展示串：主端口，有跳跃范围时追加 "起始-结束"
-# 例：8443 + 39000:39999 → "8443,39000-39999"；无跳跃 → "8443"
-# 客户端靠这个串判断要不要启用 mport（含逗号即启用），格式改这里一处即可。
-fmt_hy_ports() {
-    local port="${1:-}" range="${2:-}"
-    if [[ -n "$range" ]]; then
-        printf '%s,%s' "$port" "${range/:/-}"
-    else
-        printf '%s' "$port"
-    fi
 }
 
 # 订阅协议由证书模式唯一决定：domain → https，其余（含自签）→ http。
@@ -1170,12 +1093,10 @@ regen_subscription() {
     # 否则停用协议后任何一次重建都会把它又写回订阅。
     set_has "vless-reality-in" || vl_port=""
     set_has "hy2-in" || hy_port=""
-    local _ports
-    _ports=$(fmt_hy_ports "${hy_port:-}" "${hy_range:-}")
     generate_full_client_config \
         "${target_host:-}" "$_token" "${node_prefix:-}" "${server_ip:-}" \
         "${vl_port:-}" "${user_uuid:-}" "${vl_sni:-}" "${vl_pubkey:-}" "${vl_shortid:-}" \
-        "${hy_port:-}" "$_ports" "${hy_password:-}" "${hy_skip_cert:-}"
+        "${hy_port:-}" "${hy_password:-}" "${hy_skip_cert:-}"
 }
 
 # 组装客户端订阅与独立链接
@@ -1209,7 +1130,7 @@ node_port() {
     printf '%s' "$_port"
 }
 
-# 按顺序把节点交给回调：先直连协议，再逐槽的出口协议（出口节点不带端口跳跃）。
+# 按顺序把节点交给回调：先直连协议，再逐槽的出口协议。
 # 用法: emit_nodes <proto_proxy|proto_link> <输出文件>
 emit_nodes() {
     local cb="$1" out="$2" _p _port n _label
@@ -1224,22 +1145,14 @@ emit_nodes() {
         for _p in $PROTOCOLS; do
             _port=$(node_port "$_p" exit "$n")
             [[ -n "$_port" ]] || continue
-            "$cb" "$_p" "${node_prefix}-$(proto_label "$_p")-${_label}" "$_port" "" >> "$out"
+            "$cb" "$_p" "${node_prefix}-$(proto_label "$_p")-${_label}" "$_port" >> "$out"
         done
     done
 }
 
 # 订阅 YAML 片段：读调用方的小写局部变量（动态作用域）
 proto_proxy() {
-    local _p="$1" _name="$2" _port="$3" _ports_override="${4-__default__}"
-    local _ports_line=""
-    if [[ "$_ports_override" == "__default__" ]]; then
-        # ports_line 由调用方拼好（含 "    ports:" 前缀），这里只补换行
-        [[ -n "${ports_line:-}" ]] && _ports_line=$'\n'"${ports_line}"
-    else
-        # 显式覆盖：传裸端口串；空串 = 不要端口跳跃（出口节点）
-        [[ -n "$_ports_override" ]] && _ports_line=$'\n    ports: "'"$_ports_override"'"'
-    fi
+    local _p="$1" _name="$2" _port="$3"
     case "$_p" in
         reality) cat <<EOF
   - name: "${_name}"
@@ -1262,7 +1175,7 @@ EOF
   - name: "${_name}"
     type: hysteria2
     server: ${domain_or_ip}
-    port: ${_port}${_ports_line}
+    port: ${_port}
     password: "${hy_password}"
     sni: ${domain_or_ip}
     skip-cert-verify: ${hy_skip_cert}
@@ -1279,9 +1192,7 @@ proto_link() {
             ;;
         hy2)
             local _ins="0"; [[ "${hy_skip_cert}" == "true" ]] && _ins="1"
-            local _mport=""
-            [[ -n "${hy_ports_display:-}" && "$hy_ports_display" == *,* ]] && _mport="&mport=${hy_ports_display}"
-            echo "hy2://${hy_password}@${domain_or_ip}:${_port}/?sni=${domain_or_ip}&insecure=${_ins}${_mport}#${_name}"
+            echo "hy2://${hy_password}@${domain_or_ip}:${_port}/?sni=${domain_or_ip}&insecure=${_ins}#${_name}"
             ;;
     esac
 }
@@ -1334,9 +1245,8 @@ generate_full_client_config() {
     local vl_pubkey="${8:-}"
     local vl_shortid="${9:-}"
     local hy_port="${10}"
-    local hy_ports_display="${11}"
-    local hy_password="${12}"
-    local hy_skip_cert="${13}"
+    local hy_password="${11}"
+    local hy_skip_cert="${12}"
 
     # 入参校验：这些字段任一为空都会生成一份「看起来正常但连不上」的订阅，
     # 且 mihomo -t 照样通过（空 server / 空 uuid 都是合法 YAML）。必须显式拦截。
@@ -1405,9 +1315,6 @@ generate_full_client_config() {
     else
         printf 'rules:\n%s\n' "$direct_rule" >> "$full_config_file"
     fi
-
-    local ports_line=""
-    [[ -n "$hy_ports_display" && "$hy_ports_display" == *,* ]] && ports_line="    ports: \"${hy_ports_display}\""
 
     cat >> "$full_config_file" <<EOF
 
@@ -1645,7 +1552,6 @@ set_env_scene() {
     hy_domain="${HY_DOMAIN:-}"
     target_host="${TARGET_HOST:-$server_ip}"
     hy_port="${HY_PORT:-8443}"
-    hy_range="${HY_RANGE:-}"
     hy_password="${HY_PASS:-}"
     hy_skip_cert="${HY_SKIP_CERT:-true}"
     sub_port="${SUB_PORT:-8444}"
@@ -1670,15 +1576,20 @@ write_env_config() {
 
     # 槽 n>1 的桥接断言：入口端口写了就必须有完整落点，否则配置里会出现
     # 一个连向空地址的出口（sing-box check 能过，客户端连上就断）。
-    local _e2
-    if [[ -n "${EXIT2_ENTRY_HY:-}" || -n "${EXIT2_ENTRY_VL:-}" ]]; then
-        for _e2 in EXIT2_SERVER EXIT2_PORT EXIT2_PASS; do
-            if [[ -z "${!_e2:-}" ]]; then
-                echo -e "${RED}内部错误: ${_e2} 为空，槽 2 参数不完整，已中止写入 ${ENV_FILE}。${PLAIN}" >&2
+    local _n _f _v
+    for ((_n = 2; _n <= EXIT_SLOTS_MAX; _n++)); do
+        _v="EXIT${_n}_ENTRY_HY"; local _ehy="${!_v:-}"
+        _v="EXIT${_n}_ENTRY_VL"; local _evl="${!_v:-}"
+        _v="EXIT${_n}_SERVER";   local _srv="${!_v:-}"
+        [[ -n "$_ehy$_evl$_srv" ]] || continue
+        for _f in SERVER PORT PASS; do
+            _v="EXIT${_n}_${_f}"
+            if [[ -z "${!_v:-}" ]]; then
+                echo -e "${RED}内部错误: ${_v} 为空，槽 ${_n} 参数不完整，已中止写入 ${ENV_FILE}。${PLAIN}" >&2
                 return 1
             fi
         done
-    fi
+    done
 
     # 600：env.conf 含 Reality 私钥、Hy2 密码、订阅 Token，不能给其它本地用户读
     # DIRECT_SUFFIXES 是部署方的私有配置（自有域名直连），重写时必须保留：
@@ -1687,8 +1598,8 @@ write_env_config() {
     if [[ -z "$direct_suffixes" && -f "$ENV_FILE" ]]; then
         direct_suffixes=$(grep -oP '^DIRECT_SUFFIXES="\K[^"]*' "$ENV_FILE" 2>/dev/null || true)
     fi
-    # 槽 2 的密码行在 heredoc 之后单独写入（见下），这里只准备两个名字
-    local _PASSKEY="PASS" _PASSREF="EXIT2_PASS"
+    # 槽 1 沿用历史字段名（存量 env 与订阅都指着它们）；槽 2..N 用 EXIT<n>_*，
+    # 由循环统一写出，加槽位只需要改 EXIT_SLOTS_MAX。
     ( umask 077; cat > "$ENV_FILE" <<EOF
 NODE_PREFIX="${node_prefix}"
 SERVER_IP="${server_ip}"
@@ -1701,7 +1612,6 @@ VL_SHORTID="${vl_shortid}"
 HY_DOMAIN="${hy_domain}"
 TARGET_HOST="${target_host}"
 HY_PORT="${hy_port}"
-HY_RANGE="${hy_range}"
 HY_PASS="${hy_password}"
 HY_SKIP_CERT="${hy_skip_cert}"
 SUB_PORT="${sub_port}"
@@ -1717,26 +1627,17 @@ EXIT_HY_SERVER="${EXIT_HY_SERVER:-}"
 EXIT_HY_PORT="${EXIT_HY_PORT:-}"
 EXIT_HY_PASS="${EXIT_HY_PASS:-}"
 EXIT_HY_SNI="${EXIT_HY_SNI:-}"
-EXIT_VL_SERVER="${EXIT_VL_SERVER:-}"
-EXIT_VL_PORT="${EXIT_VL_PORT:-}"
-EXIT_VL_UUID="${EXIT_VL_UUID:-}"
-EXIT_VL_PBK="${EXIT_VL_PBK:-}"
-EXIT_VL_SID="${EXIT_VL_SID:-}"
-EXIT_VL_SNI="${EXIT_VL_SNI:-}"
 EXIT_SKIP_CERT="${EXIT_SKIP_CERT:-false}"
 EXIT_LABEL="${EXIT_LABEL:-SG}"
 EXIT_ENTRY_VL="${EXIT_ENTRY_VL:-2053}"
 EXIT_ENTRY_HY="${EXIT_ENTRY_HY:-2054}"
-EXIT2_SERVER="${EXIT2_SERVER:-}"
-EXIT2_PORT="${EXIT2_PORT:-}"
-EXIT2_SNI="${EXIT2_SNI:-}"
-EXIT2_SKIP_CERT="${EXIT2_SKIP_CERT:-false}"
-EXIT2_LABEL="${EXIT2_LABEL:-}"
-EXIT2_ENTRY_VL="${EXIT2_ENTRY_VL:-}"
-EXIT2_ENTRY_HY="${EXIT2_ENTRY_HY:-}"
 EOF
-        # 密码行单独追加：写入路径不直接在正文里拼字面量，避免被误当成明文替换
-        printf '%s="%s"\n' "EXIT2_${_PASSKEY}" "${!_PASSREF:-}" >> "$ENV_FILE"
+        for ((_n = 2; _n <= EXIT_SLOTS_MAX; _n++)); do
+            for _f in SERVER PORT PASS SNI SKIP_CERT LABEL ENTRY_VL ENTRY_HY; do
+                _v="EXIT${_n}_${_f}"
+                printf 'EXIT%d_%s="%s"\n' "$_n" "$_f" "${!_v:-}" >> "$ENV_FILE"
+            done
+        done
     )
     chmod 600 "$ENV_FILE" 2>/dev/null || true
     ENV_LOADED=""
@@ -1816,11 +1717,11 @@ install_node() {
     mkdir -p "$CONF_DIR" "$WEB_DIR"
 
     # 读取既有配置，作为重置时的默认值（直接回车即沿用）
-    local old_vl_port="" old_vl_sni="" old_hy_port="" old_hy_range="" old_sub_port="" old_prefix="" old_domain=""
+    local old_vl_port="" old_vl_sni="" old_hy_port="" old_sub_port="" old_prefix="" old_domain=""
     if [[ -f "$ENV_FILE" ]]; then
         set +e; load_env; set -e
         old_vl_port="$VL_PORT"; old_vl_sni="$VL_SNI"; old_hy_port="$HY_PORT"
-        old_hy_range="$HY_RANGE"; old_sub_port="$SUB_PORT"; old_prefix="$NODE_PREFIX"
+        old_sub_port="$SUB_PORT"; old_prefix="$NODE_PREFIX"
         old_domain="${HY_DOMAIN:-}"
         # 若 env.conf 中无域名记录，探测 acme.sh 目录中是否曾签发过历史域名证书
         if [[ -z "$old_domain" ]] && [[ -d "$HOME/.acme.sh" ]]; then
@@ -1970,25 +1871,14 @@ install_node() {
     fi
 
     local hy_port="8443"
-    local hy_range="39000:39999"
     while true; do
         ask_trim "请输入 Hysteria2 主监听 UDP 端口 [默认: ${CYAN}${old_hy_port:-8443}${PLAIN}]: " "${old_hy_port:-8443}" hy_port
         if ! validate_port "$hy_port"; then
             echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
         fi
-        check_port_conflict "$hy_port" "udp" "hy2" "" && break
+        check_port_conflict "$hy_port" "udp" "hy2" && break
     done
     HY_PORT="$hy_port"
-
-    while true; do
-        ask_trim "请输入端口跳跃范围 [默认: ${CYAN}${old_hy_range:-39000:39999}${PLAIN}] (none=不启用): " "${old_hy_range:-39000:39999}" hy_range
-        [[ "${hy_range,,}" == "none" ]] && { hy_range=""; break; }
-        if ! validate_range "$hy_range"; then
-            echo -e "${RED}范围格式非法，应为 起始:结束（如 39000:39999）。${PLAIN}"; continue
-        fi
-        check_range_conflict "$hy_range" && break
-    done
-    HY_RANGE="$hy_range"
 
     echo -e "\n${GRAY}──────── ${BOLD}[3/3] 订阅与节点${PLAIN}"
     local sub_port
@@ -2049,16 +1939,10 @@ install_node() {
         return 1
     fi
 
-    # 防火墙精准放行
-    if command -v ufw &>/dev/null && ufw status | grep -qw "active"; then
-        ufw allow "$vl_port/tcp" >/dev/null 2>&1 || true
-        ufw allow "$hy_port/udp" >/dev/null 2>&1 || true
-    fi
-    # 先清理本脚本可能遗留的端口跳跃规则，再按当前配置重建
-    clear_port_hopping
-    if [[ -n "$hy_range" ]]; then
-        setup_port_hopping "$hy_port" "$hy_range"
-    fi
+    # 先清理本脚本可能遗留的端口跳跃规则（旧版本装的），再继续
+    # 4.0 起不再使用端口跳跃：旧 iptables REDIRECT 只在这里清理一次，
+    # 否则升级后那条规则会继续把 UDP 段重定向到旧端口。
+    cleanup_legacy_port_hopping
 
     local sub_proto
     sub_proto=$(sub_scheme)
@@ -2125,7 +2009,7 @@ EOF
         echo -e "${RED}Reality 启用失败，安装中止（Hysteria2 未启用）。${PLAIN}"
         return 1
     fi
-    if ! proto_enable_hy2 "$hy_port" "$hy_domain" "$hy_range"; then
+    if ! proto_enable_hy2 "$hy_port" "$hy_domain"; then
         echo -e "${YELLOW}Hysteria2 启用失败，Reality 已可用。${PLAIN}"
         echo -e "${YELLOW}修复后执行: simbo → 协议管理 → 启用 Hysteria2${PLAIN}"
     fi
@@ -2237,28 +2121,13 @@ uninstall_all() {
     rm -f /etc/systemd/system/sing-box.service
     systemctl daemon-reload
 
+    # 旧版本留下的端口跳跃规则一并清掉（4.0 起不再使用）
+    cleanup_legacy_port_hopping
+
     if [[ -f "$ENV_FILE" ]]; then
         set +e; load_env; set -e
-        if [[ -n "${HY_RANGE:-}" && -n "${HY_PORT:-}" ]]; then
-            echo -e "精准清理端口跳跃规则..."
-            iptables -t nat -D PREROUTING -p udp --dport "$HY_RANGE" -j REDIRECT --to-ports "$HY_PORT" 2>/dev/null || true
-            if command -v netfilter-persistent &>/dev/null; then
-                netfilter-persistent save >/dev/null 2>&1 || true
-            fi
-        fi
         rm -f /etc/caddy/sites/*-"${SUB_PORT:-8444}".caddy /etc/caddy/sites/simple-box*.caddy
         systemctl reload caddy 2>/dev/null || true
-
-        # ufw 放行规则不自动删除：无法区分「本脚本加的」与「用户本来就有的同端口规则」。
-        # 按「宁松勿紧」的取舍，保留规则、把端口列出来让用户自己决定。
-        if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -qw "active"; then
-            local _uports
-            _uports=$(grep -hoP '^(VL_PORT|HY_PORT|SUB_PORT|EXIT_ENTRY_VL|EXIT_ENTRY_HY|EXIT2_ENTRY_VL|EXIT2_ENTRY_HY)="\K[^"]+' "$ENV_FILE" 2>/dev/null | sort -un | tr '\n' ' ')
-            if [[ -n "${_uports// /}" ]]; then
-                echo -e "${YELLOW}ufw 里的放行规则不会自动删除，曾用到的端口: ${_uports}${PLAIN}"
-                echo -e "${YELLOW}  需要清理: ${CYAN}ufw status numbered${YELLOW} 后 ${CYAN}ufw delete <编号>${PLAIN}"
-            fi
-        fi
     fi
 
     # 伪装站点同样是本脚本生成的：camo-*.caddy + 它声明的 /var/www 目录一起清掉，
@@ -2378,50 +2247,42 @@ uninstall_all() {
 # 1. VLESS-Reality 独立模块配置
 
 # ==================== 出站槽位 ====================
-# 结构按 N 槽写，槽位上限由 EXIT_SLOTS_MAX 锁死；加槽位只改这个常量和
-# write_env_config 里的字段，不需要再散着改订阅/面板/菜单。
+# 结构按 N 槽写，上限由 EXIT_SLOTS_MAX 锁死（4）；env 持久化由循环按槽写出，
+# 加槽位只需要改这个常量（入口端口表 EXIT_ENTRY_PORT_PAIRS 够长即可）。
 # 槽 1 沿用历史字段与 tag（exit-vless-in / exit-hy2-in / exit-out），
 # 槽 n>1 用 EXIT<n>_* 字段与 exit<n>-* tag。槽 1 的字段名与 tag 一个都不许改：
 # 存量节点的订阅、客户端配置全都指着它们。
-EXIT_SLOTS_MAX=2
+EXIT_SLOTS_MAX=4
 
-# 把槽 n 映射成统一局部变量 SE_*。槽 1 优先读派生字段（EXIT_SERVER/PORT/
-# PASS/SNI），为空时回落到 EXIT_HY_* / EXIT_VL_*——只 load_env 没 sync 的路径
-# 也不会静默变成「无出口」。
+# 把槽 n 映射成统一局部变量 SE_*。槽 1 读历史字段 EXIT_HY_*，
+# 槽 n>1 读 EXIT<n>_*；两种都直接读 env，不依赖调用方先 sync。
 exit_slot_env() {
-    local n="${1:-1}"
-    SE_TYPE="none"; SE_SERVER=""; SE_PORT=""; SE_PASS=""; SE_SNI=""; SE_SKIP="false"
-    SE_UUID=""; SE_PBK=""; SE_SID=""; SE_ENTRY_VL=""; SE_ENTRY_HY=""; SE_LABEL="SG"
+    local n="${1:-1}" _v
+    SE_TYPE="none"; SE_SERVER=""; SE_PORT=""; SE_SNI=""; SE_SKIP="false"
+    SE_ENTRY_VL=""; SE_ENTRY_HY=""; SE_LABEL="SG"
+    SE_PASS=""
     if [[ "$n" == "1" ]]; then
-        SE_TYPE="${EXIT_TYPE:-none}"
+        # 槽 1 沿用历史字段（EXIT_HY_*）；旧版 Reality 出口已移除，非 hy2 一律视为无出口
         SE_LABEL="${EXIT_LABEL:-SG}"
         SE_ENTRY_VL="${EXIT_ENTRY_VL:-}"; SE_ENTRY_HY="${EXIT_ENTRY_HY:-}"
         SE_SKIP="${EXIT_SKIP_CERT:-false}"
-        case "$SE_TYPE" in
-            hy2)
-                SE_SERVER="${EXIT_SERVER:-${EXIT_HY_SERVER:-}}"
-                SE_PORT="${EXIT_PORT:-${EXIT_HY_PORT:-}}"
-                SE_PASS="${EXIT_PASS:-${EXIT_HY_PASS:-}}"
-                SE_SNI="${EXIT_SNI:-${EXIT_HY_SNI:-}}" ;;
-            vless)
-                SE_SERVER="${EXIT_SERVER:-${EXIT_VL_SERVER:-}}"
-                SE_PORT="${EXIT_PORT:-${EXIT_VL_PORT:-}}"
-                SE_UUID="${EXIT_UUID:-${EXIT_VL_UUID:-}}"
-                SE_PBK="${EXIT_PBK:-${EXIT_VL_PBK:-}}"
-                SE_SID="${EXIT_SID:-${EXIT_VL_SID:-}}"
-                SE_SNI="${EXIT_SNI:-${EXIT_VL_SNI:-}}" ;;
-        esac
+        if [[ "${EXIT_TYPE:-none}" == "hy2" ]]; then
+            SE_TYPE="hy2"
+            _v="EXIT_HY_SERVER"; SE_SERVER="${!_v:-}"
+            _v="EXIT_HY_PORT";   SE_PORT="${!_v:-}"
+            _v="EXIT_HY_PASS";   SE_PASS="${!_v:-}"
+            _v="EXIT_HY_SNI";    SE_SNI="${!_v:-}"
+        fi
     else
         # 槽 n>1 只有 Hysteria2：没有 EXIT<n>_TYPE 这类字段
-        local _v
-        _v="EXIT${n}_SERVER"; SE_SERVER="${!_v:-}"
-        _v="EXIT${n}_PORT";   SE_PORT="${!_v:-}"
-        _v="EXIT${n}_PASS";   SE_PASS="${!_v:-}"
-        _v="EXIT${n}_SNI";    SE_SNI="${!_v:-}"
+        _v="EXIT${n}_SERVER";    SE_SERVER="${!_v:-}"
+        _v="EXIT${n}_PORT";      SE_PORT="${!_v:-}"
+        _v="EXIT${n}_PASS";      SE_PASS="${!_v:-}"
+        _v="EXIT${n}_SNI";       SE_SNI="${!_v:-}"
         _v="EXIT${n}_SKIP_CERT"; SE_SKIP="${!_v:-false}"
-        _v="EXIT${n}_LABEL";  SE_LABEL="${!_v:-EXIT${n}}"
-        _v="EXIT${n}_ENTRY_VL"; SE_ENTRY_VL="${!_v:-}"
-        _v="EXIT${n}_ENTRY_HY"; SE_ENTRY_HY="${!_v:-}"
+        _v="EXIT${n}_LABEL";     SE_LABEL="${!_v:-EXIT${n}}"
+        _v="EXIT${n}_ENTRY_VL";  SE_ENTRY_VL="${!_v:-}"
+        _v="EXIT${n}_ENTRY_HY";  SE_ENTRY_HY="${!_v:-}"
         [[ -n "$SE_SERVER" ]] && SE_TYPE="hy2"
     fi
 }
@@ -2454,9 +2315,8 @@ apply_exit_config() {
     for n in $(exit_active_slots); do
         exit_slot_env "$n"
         slots+=("$n")
-        envs+=("E${n}_TYPE=$SE_TYPE" "E${n}_SERVER=$SE_SERVER" "E${n}_PORT=$SE_PORT" \
+        envs+=("E${n}_SERVER=$SE_SERVER" "E${n}_PORT=$SE_PORT" \
                "E${n}_PASS=$SE_PASS" "E${n}_SNI=$SE_SNI" "E${n}_SKIP_CERT=$SE_SKIP" \
-               "E${n}_UUID=$SE_UUID" "E${n}_PBK=$SE_PBK" "E${n}_SID=$SE_SID" \
                "E${n}_ENTRY_VL=$SE_ENTRY_VL" "E${n}_ENTRY_HY=$SE_ENTRY_HY")
     done
     [[ ${#slots[@]} -gt 0 ]] || return 0
@@ -2473,37 +2333,31 @@ def rename(n, kind):
 def clone(src_tag, new_tag, port):
     if not port or src_tag not in tags:
         return None
-    n = copy.deepcopy(tags[src_tag]); n["tag"] = new_tag; n["listen_port"] = int(port)
-    return n
+    c = copy.deepcopy(tags[src_tag]); c["tag"] = new_tag; c["listen_port"] = int(port)
+    return c
+
+slots = os.environ["EXIT_SLOTS"].split()
+# 幂等：先摘掉上一次追加的同类单元，重复应用不会再撞 duplicate inbound tag
+own = {rename(n, k) for n in slots for k in ("vless-in", "hy2-in", "out")}
+inb = [i for i in inb if i["tag"] not in own]
+d["outbounds"] = [o for o in d.get("outbounds", []) if o.get("tag") not in own]
 
 entries, outs, rules = [], [], []
-for n in os.environ["EXIT_SLOTS"].split():
-    typ = os.environ["E%s_TYPE" % n]
+for n in slots:
     e = [x for x in (clone("vless-reality-in", rename(n, "vless-in"), os.environ.get("E%s_ENTRY_VL" % n)),
                      clone("hy2-in", rename(n, "hy2-in"), os.environ.get("E%s_ENTRY_HY" % n))) if x]
     out_tag = rename(n, "out")
-    if typ == "hy2":
-        out = {"type": "hysteria2", "tag": out_tag,
-               "server": os.environ["E%s_SERVER" % n], "server_port": int(os.environ["E%s_PORT" % n]),
-               "password": os.environ["E%s_PASS" % n],
-               "tls": {"enabled": True,
-                       "server_name": os.environ.get("E%s_SNI" % n) or os.environ["E%s_SERVER" % n],
-                       "insecure": os.environ.get("E%s_SKIP_CERT" % n) == "true"}}
-    else:
-        out = {"type": "vless", "tag": out_tag,
-               "server": os.environ["E%s_SERVER" % n], "server_port": int(os.environ["E%s_PORT" % n]),
-               "uuid": os.environ["E%s_UUID" % n], "flow": "xtls-rprx-vision",
-               "tls": {"enabled": True,
-                       "server_name": os.environ.get("E%s_SNI" % n) or os.environ["E%s_SERVER" % n],
-                       "utls": {"enabled": True, "fingerprint": "chrome"},
-                       "reality": {"enabled": True, "public_key": os.environ["E%s_PBK" % n],
-                                   "short_id": os.environ["E%s_SID" % n]}}}
+    out = {"type": "hysteria2", "tag": out_tag,
+           "server": os.environ["E%s_SERVER" % n], "server_port": int(os.environ["E%s_PORT" % n]),
+           "password": os.environ["E%s_PASS" % n],
+           "tls": {"enabled": True,
+                   "server_name": os.environ.get("E%s_SNI" % n) or os.environ["E%s_SERVER" % n],
+                   "insecure": os.environ.get("E%s_SKIP_CERT" % n) == "true"}}
     entries += e; outs.append(out)
     rules += [{"inbound": [x["tag"]], "outbound": out_tag} for x in e]
 
 d["inbounds"] = inb + entries
 d.setdefault("outbounds", []).extend(outs)
-# 同一份配置被再次应用时不要把旧规则叠加两份
 _keep = [r for r in (d.get("route") or {}).get("rules", [])
          if r.get("outbound") not in {o["tag"] for o in outs}]
 d["route"] = {"rules": _keep + rules, "final": "direct"}
@@ -2678,28 +2532,17 @@ ensure_reality_creds() {
 sync_env_locals() {
     EXIT_TYPE="${EXIT_TYPE:-none}"; EXIT_SKIP_CERT="${EXIT_SKIP_CERT:-false}"
     EXIT_LABEL="${EXIT_LABEL:-SG}"; EXIT_ENTRY_VL="${EXIT_ENTRY_VL:-}"; EXIT_ENTRY_HY="${EXIT_ENTRY_HY:-}"
-    EXIT2_SERVER="${EXIT2_SERVER:-}"; EXIT2_PORT="${EXIT2_PORT:-}"
-    EXIT2_PASS="${EXIT2_PASS:-}"; EXIT2_SNI="${EXIT2_SNI:-}"
-    EXIT2_SKIP_CERT="${EXIT2_SKIP_CERT:-false}"; EXIT2_LABEL="${EXIT2_LABEL:-}"
-    EXIT2_ENTRY_VL="${EXIT2_ENTRY_VL:-}"; EXIT2_ENTRY_HY="${EXIT2_ENTRY_HY:-}"
-    # 两套参数按当前类型解析；切换协议只改 EXIT_TYPE，不会串用对方的地址/端口
-    EXIT_SERVER=""; EXIT_PORT=""; EXIT_PASS=""; EXIT_SNI=""; EXIT_UUID=""; EXIT_PBK=""; EXIT_SID=""
-    case "$EXIT_TYPE" in
-        hy2)
-            EXIT_SERVER="${EXIT_HY_SERVER:-}"; EXIT_PORT="${EXIT_HY_PORT:-}"
-            EXIT_PASS="${EXIT_HY_PASS:-}"; EXIT_SNI="${EXIT_HY_SNI:-}" ;;
-        vless)
-            EXIT_SERVER="${EXIT_VL_SERVER:-}"; EXIT_PORT="${EXIT_VL_PORT:-}"
-            EXIT_UUID="${EXIT_VL_UUID:-}"; EXIT_PBK="${EXIT_VL_PBK:-}"
-            EXIT_SID="${EXIT_VL_SID:-}"; EXIT_SNI="${EXIT_VL_SNI:-}" ;;
-    esac
+    # 槽 1 只支持 Hysteria2 落地；这里只派生「有无中转」判断用的地址。
+    EXIT_SERVER=""
+    [[ "$EXIT_TYPE" == "hy2" ]] && EXIT_SERVER="${EXIT_HY_SERVER:-}"
+    EXIT_SNI="${EXIT_HY_SNI:-}"
     node_prefix="$NODE_PREFIX"; server_ip="$SERVER_IP"
     vl_port="$VL_PORT"; vl_sni="$VL_SNI"; user_uuid="$VL_UUID"
     vl_privkey="$VL_PRIVKEY"; vl_pubkey="$VL_PUBKEY"; vl_shortid="$VL_SHORTID"
     hy_domain="${HY_DOMAIN:-}"; target_host="${TARGET_HOST:-$SERVER_IP}"
-    hy_port="$HY_PORT"; hy_range="${HY_RANGE:-}"; hy_password="$HY_PASS"
+    hy_port="$HY_PORT"; hy_password="$HY_PASS"
     hy_skip_cert="${HY_SKIP_CERT:-false}"; sub_port="$SUB_PORT"
-    sub_proto="${SUB_PROTO:-https}"; sub_token="$SUB_TOKEN"
+    sub_proto=$(sub_scheme); sub_token="$SUB_TOKEN"
 }
 
 # 当前已在 config.json 里的协议集合（供菜单/出口重建使用）。
@@ -2848,37 +2691,34 @@ proto_enable_reality() {
 
 proto_enable_hy2() {
     # 传参 = 非交互（安装向导用）；不传参 = 交互（协议菜单用）
-    local port="" domain="" range="" interactive=1
+    local port="" domain="" interactive=1
     if [[ $# -gt 0 ]]; then
-        interactive=0; port="${1:-}"; domain="${2:-}"; range="${3:-}"
+        interactive=0; port="${1:-}"; domain="${2:-}"
     fi
     load_env || { echo -e "${RED}未检测到已安装的配置${PLAIN}"; return 1; }
 
     if [[ "$interactive" == 1 ]]; then
         # 三样都先从 env 取当前值：reuse 分支不重新赋值，漏掉 domain 就会在
         # 「沿用」之后把 HY_DOMAIN 写成空串，静默降级成 IP 自签（协议看着仍启用）。
-        port="${HY_PORT:-}"; domain="${HY_DOMAIN:-}"; range="${HY_RANGE:-}"
-        echo -e " 当前参数: 端口 ${CYAN}${HY_PORT:-—}${PLAIN} / 域名 ${CYAN}${HY_DOMAIN:-无}${PLAIN} / 跳跃 ${CYAN}${HY_RANGE:-无}${PLAIN}"
+        port="${HY_PORT:-}"; domain="${HY_DOMAIN:-}"
+        echo -e " 当前参数: 端口 ${CYAN}${HY_PORT:-—}${PLAIN} / 域名 ${CYAN}${HY_DOMAIN:-无}${PLAIN}"
         local okh=""
         ask "沿用这组参数？[Y/n]: " okh
         if [[ "${okh,,}" == "n" ]]; then
             ask_trim "请输入 Hysteria2 域名 [默认: ${CYAN}${HY_DOMAIN:-留空=IP自签}${PLAIN}]: " "${HY_DOMAIN:-}" domain
             ask_trim "请输入 Hysteria2 端口 [默认: ${CYAN}${HY_PORT:-10443}${PLAIN}]: " "${HY_PORT:-10443}" port
-            ask_trim "请输入端口跳跃范围 [默认: ${CYAN}${HY_RANGE:-none}${PLAIN}] (none=不启用): " "${HY_RANGE:-none}" range
         fi
     fi
-    port="${port:-${HY_PORT:-10443}}"; range="${range:-${HY_RANGE:-}}"
-    [[ "$range" == "none" ]] && range=""
+    port="${port:-${HY_PORT:-10443}}"
     validate_port "$port" || return 1
 
     # 端口已被本机 sing-box 占用 = 就是这条协议自己在跑，跳过"被占用"判定（幂等重启）
     local holder; holder=$(port_holder "$port" udp)
     if [[ -z "$holder" || "$holder" != *sing-box* ]]; then
-        check_port_conflict "$port" "udp" "hy2" "$range" || return 1
+        check_port_conflict "$port" "udp" "hy2" || return 1
     fi
-    [[ -n "$range" ]] && { check_range_conflict "$range" || return 1; }
 
-    HY_DOMAIN="$domain"; HY_PORT="$port"; HY_RANGE="$range"
+    HY_DOMAIN="$domain"; HY_PORT="$port"
     [[ -z "${HY_PASS:-}" ]] && HY_PASS=$(/usr/local/bin/sing-box generate rand --base64 16)
     # 初值必须是 0：写成 1 时「成功」路径不会赋值，分支永远走到「未找到证书」，
     # 结果是把有效域名证书的节点标成 skip-cert-verify（真实故障，不只是提示错）。
@@ -2900,14 +2740,10 @@ proto_enable_hy2() {
             echo -e "${YELLOW}未找到 ${domain} 的证书，沿用现有证书并保持 skip-cert-verify=true${PLAIN}"
         else
             echo -e "${RED}✗ 没有 ${domain} 的可用证书，已中止启用 Hysteria2${PLAIN}"
-            echo -e "${YELLOW}  先签发该域名的证书（simbo → 4. 订阅地址配置 里填 CF Token），或把域名留空改用 IP 自签${PLAIN}"
+            echo -e "${YELLOW}  先让本机拥有该域名的证书（重跑安装向导，或菜单 8 建站时自动签发），或把域名留空改用 IP 自签${PLAIN}"
             return 1
         fi
     fi
-
-    # 端口跳跃规则跟着当前参数走：先清掉本脚本的旧规则，再按需重建
-    clear_port_hopping
-    [[ -n "$range" ]] && setup_port_hopping "$HY_PORT" "$HY_RANGE"
 
     local set="hy2"; set_has "vless-reality-in" && set="reality hy2"
     render_set "$set" || return 1
@@ -3103,7 +2939,7 @@ regen_from_scope() {
     local vl_p="${1-$VL_PORT}" hy_p="${2-$HY_PORT}" vl_s="${3:-$VL_SNI}"
     local server_ip="$SERVER_IP" target_host="${TARGET_HOST:-$HY_DOMAIN}" sub_token="$SUB_TOKEN"
     local node_prefix="$NODE_PREFIX" vl_port="$vl_p" user_uuid="$VL_UUID" vl_sni="$vl_s"
-    local vl_pubkey="$VL_PUBKEY" vl_shortid="$VL_SHORTID" hy_port="$hy_p" hy_range="${HY_RANGE:-}"
+    local vl_pubkey="$VL_PUBKEY" vl_shortid="$VL_SHORTID" hy_port="$hy_p"
     local hy_password="$HY_PASS" hy_skip_cert="$HY_SKIP_CERT" direct_suffixes="${DIRECT_SUFFIXES:-}"
     regen_subscription "$sub_token" >/dev/null 2>&1 || true
 }
@@ -3189,8 +3025,6 @@ disable_protocol() {
         return 0
     fi
 
-    [[ "$which" == "hy2" ]] && clear_port_hopping
-
     local set="$keep"
     set_has "$(proto_tag "$keep")" || set=""
     render_set "$set" || return 1
@@ -3215,8 +3049,8 @@ disable_protocol() {
 
 
 # 从订阅 URL（provider.yaml）导入出口参数；打印 KEY<TAB>VALUE 供白名单赋值
-# $2 = 槽位号：1（缺省）输出历史的 EXIT_HY_* / EXIT_VL_*；n>1 只认 Hysteria2，
-# 输出该槽的 EXIT<n>_SERVER/PORT/PASS/SNI。
+# $2 = 槽位号：1（缺省）输出历史的 EXIT_HY_*；n>1 输出 EXIT<n>_SERVER/PORT/PASS/SNI。
+# 出口只支持 Hysteria2：订阅里没有 hy2 节点就判定导入失败。
 exit_parse_url() {
     local url="${1:-}" slot="${2:-1}"
     local body
@@ -3260,17 +3094,6 @@ if b:
     for k, v in (("EXIT_HY_SERVER", b.get("server", "")),
                  ("EXIT_HY_PORT", b.get("port", "")), ("EXIT_HY_PASS", b.get("password", "")),
                  ("EXIT_HY_SNI", b.get("sni") or b.get("server", ""))):
-        print(f"{k}\t{v}")
-    sys.exit(0)
-# 槽 n>1 只支持 Hysteria2：没有 hy2 节点就判定导入失败，不回退 Reality
-if sys.argv[2] != "1":
-    sys.exit(1)
-b = pick("vless")
-if b:
-    for k, v in (("EXIT_VL_SERVER", b.get("server", "")),
-                 ("EXIT_VL_PORT", b.get("port", "")), ("EXIT_VL_UUID", b.get("uuid", "")),
-                 ("EXIT_VL_PBK", b.get("public-key", "")), ("EXIT_VL_SID", b.get("short-id", "")),
-                 ("EXIT_VL_SNI", b.get("servername") or b.get("sni") or b.get("server", ""))):
         print(f"{k}\t{v}")
     sys.exit(0)
 sys.exit(1)
@@ -3569,7 +3392,7 @@ exit_slot_default_ports() {
 
 # 校验槽 n 的两个入口端口；冲突时打印原因并返回 1
 exit_entry_ports_ok() {
-    local n="$1" vl="$2" hy="$3" p rs re other held
+    local n="$1" vl="$2" hy="$3" p other held
     if ! validate_port "$vl" || ! validate_port "$hy"; then
         echo -e "${RED}端口必须是 1-65535${PLAIN}"; return 1
     fi
@@ -3582,13 +3405,6 @@ exit_entry_ports_ok() {
             echo -e "${RED}入口端口不能与直连 / 订阅端口 ${p} 重复${PLAIN}"; return 1
         fi
     done
-    if [[ -n "${HY_RANGE:-}" ]]; then
-        rs="${HY_RANGE%%:*}"; re="${HY_RANGE##*:}"
-        if [[ "$rs" =~ ^[0-9]+$ && "$re" =~ ^[0-9]+$ ]] \
-           && (( (vl >= rs && vl <= re) || (hy >= rs && hy <= re) )); then
-            echo -e "${RED}入口端口落在 Hysteria2 端口跳跃段 ${HY_RANGE} 内${PLAIN}"; return 1
-        fi
-    fi
     for other in $(exit_active_slots); do
         [[ "$other" == "$n" ]] && continue
         exit_slot_env "$other"
@@ -3650,14 +3466,7 @@ exit_save_slot() {
     exit_slot_set "$n" ENTRY_VL "$7"
     exit_slot_set "$n" ENTRY_HY "$8"
     [[ "$n" == "1" ]] && EXIT_TYPE="hy2"
-    EXIT2_SKIP_CERT="${EXIT2_SKIP_CERT:-false}"
     apply_exit_reload || return 1
-    # 防火墙宁松勿紧：链式入口是给客户端连的，开了 ufw 就必须放行，
-    # 否则本机 loopback 全绿、外部客户端一律超时。
-    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -qw "active"; then
-        ufw allow "${7}/tcp" >/dev/null 2>&1 || true
-        ufw allow "${8}/udp" >/dev/null 2>&1 || true
-    fi
     return 0
 }
 
@@ -3677,14 +3486,14 @@ exit_add() {
         ask "粘贴落地机的 provider.yaml 地址: " url
         if [[ -z "$url" ]] || ! _imp=$(exit_parse_url "$url" "$n"); then
             echo -e "${RED}✗ 导入失败：地址不可达，或对方没有 Hysteria2 节点${PLAIN}"
-            echo -e "${YELLOW}  多出口只支持 Hysteria2 落地。${PLAIN}"
+            echo -e "${YELLOW}  出口只支持 Hysteria2 落地。${PLAIN}"
             read -r -p "按回车返回..." _ || true
             return 0
         fi
         while IFS=$'\t' read -r _k _v; do
             case "$_k" in
                 EXIT_HY_SERVER|EXIT_HY_PORT|EXIT_HY_PASS|EXIT_HY_SNI|\
-                EXIT2_SERVER|EXIT2_PORT|EXIT2_PASS|EXIT2_SNI)
+                EXIT[2-9]_SERVER|EXIT[2-9]_PORT|EXIT[2-9]_PASS|EXIT[2-9]_SNI)
                     printf -v "$_k" '%s' "$_v" ;;
             esac
         done <<< "$_imp"
@@ -3733,12 +3542,7 @@ exit_edit() {
     local n srv prt pw sni lbl evl ehy dvl dhy _in=""
     n=$(exit_pick_slot) || return 0
     exit_slot_env "$n"
-    if [[ "$n" == "1" && "$SE_TYPE" == "vless" ]]; then
-        echo -e "${YELLOW}槽 1 当前是 Reality 出站；本版多出口只支持 Hysteria2，请重配落点${PLAIN}"
-        srv=""; prt="8443"; pw=""; sni=""
-    else
-        srv="$SE_SERVER"; prt="$SE_PORT"; pw="$SE_PASS"; sni="$SE_SNI"
-    fi
+    srv="$SE_SERVER"; prt="$SE_PORT"; pw="$SE_PASS"; sni="$SE_SNI"
     lbl="$SE_LABEL"; evl="$SE_ENTRY_VL"; ehy="$SE_ENTRY_HY"
 
     ask_trim "落点地址 [${srv:-必填}]: " "$srv" srv
@@ -3790,8 +3594,7 @@ exit_delete() {
     if [[ "$n" == "1" ]]; then
         EXIT_TYPE="none"
         EXIT_LABEL=""; EXIT_ENTRY_VL=""; EXIT_ENTRY_HY=""
-        for _k in EXIT_HY_SERVER EXIT_HY_PORT EXIT_HY_PASS EXIT_HY_SNI \
-                  EXIT_VL_SERVER EXIT_VL_PORT EXIT_VL_UUID EXIT_VL_PBK EXIT_VL_SID EXIT_VL_SNI; do
+        for _k in EXIT_HY_SERVER EXIT_HY_PORT EXIT_HY_PASS EXIT_HY_SNI; do
             printf -v "$_k" '%s' ""
         done
     else
@@ -3810,7 +3613,7 @@ exit_delete() {
 menu_exit() {
     while true; do
         load_env
-        # env 里存的是分协议字段（EXIT_HY_* / EXIT_VL_*），必须解析成当前生效的一组
+        # env 里槽 1 用 EXIT_HY_*、槽 n>1 用 EXIT<n>_*，先 sync 再展示
         sync_env_locals
         [ -t 1 ] && clear
         echo -e "${GRAY}=================== 出站管理 ===================${PLAIN}"
@@ -3819,13 +3622,13 @@ menu_exit() {
         for n in $(exit_active_slots); do
             exit_slot_env "$n"
             _any=1
-            _pname="Hysteria2"; [[ "$SE_TYPE" == "vless" ]] && _pname="Reality"
+            _pname="Hysteria2"
             printf '   %-3s%-12s%-28s%-16s%s\n' "$n" "$_pname" "${SE_SERVER}:${SE_PORT}" \
                 "${SE_ENTRY_VL} / ${SE_ENTRY_HY}" "$SE_LABEL"
         done
         [[ "$_any" == "1" ]] || echo -e "   ${GRAY}（未配置出站，全部走直连）${PLAIN}"
-        if [[ "${EXIT_TYPE:-none}" == "vless" ]]; then
-            echo -e "${YELLOW}槽 1 仍是 Reality 出站：本版多出口只支持 Hysteria2，请用「3. 编辑出口」重配${PLAIN}"
+        if [[ "${EXIT_TYPE:-none}" != "none" && "${EXIT_TYPE:-none}" != "hy2" ]]; then
+            echo -e "${YELLOW}槽 1 的旧版 Reality 出口已不再支持，请用「3. 编辑出口」按 Hysteria2 重配${PLAIN}"
         fi
         echo -e "${GRAY}------------------------------------------------${PLAIN}"
         echo " 1. 查看出站详情"

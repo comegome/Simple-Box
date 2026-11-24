@@ -308,10 +308,10 @@ grep -q 'caddy_installed_by_script' "$TARGET" && ok "Caddy 配置带归属标记
 
 # 10.1 Caddy reload 只在 setup_caddy_subscription 内部做一次，调用方不得重复
 _setup_reload=$(grep -c 'reload_caddy_safe' "$TARGET")
-if [[ "$_setup_reload" -eq 4 ]]; then
-    ok "Caddy reload 只在四个既定位置（定义 + 订阅 setup + 伪装站点生成/删除）"
+if [[ "$_setup_reload" -eq 5 ]]; then
+    ok "Caddy reload 只出现在五个既定位置（定义 + 订阅 setup + 伪装站生成/删除 + 站点翻转）"
 else
-    bad "Caddy reload 调用点异常" "共 ${_setup_reload} 处，应为 4"
+    bad "Caddy reload 调用点异常" "共 ${_setup_reload} 处，应为 5"
 fi
 
 # 10.2 发布订阅的动作序列：render_and_reload 自己生成；install_node 委托给协议模块
@@ -552,6 +552,30 @@ flip_transform "$_f" "agisignal.example.com" 9443 on >/dev/null 2>&1
 _h2=$(sha256sum "$_f" | cut -d' ' -f1)
 [[ "$_h1" == "$_h2" ]] && ok "15.6 重复翻转字节不变" || bad "15.6 重复翻转改动了文件"
 
+# 15.5b/15.5c 旧实现只认裸「域名 {」，另外两种常见写法会静默不改，
+# 随后 sing-box 抢 443 失败（bind: address already in use）——必须都能翻。
+printf 'port.example.com:443 {\n\troot * /var/www/p\n}\n' > "$SB15/sites/ported.caddy"
+flip_transform "$SB15/sites/ported.caddy" port.example.com 9443 on >/dev/null 2>&1
+grep -q '^https://port.example.com:9443 {' "$SB15/sites/ported.caddy" && grep -q 'bind 127.0.0.1' "$SB15/sites/ported.caddy" \
+    && ok "15.5b 带端口的站点块可翻转" || bad "15.5b 带端口的站点块未翻转"
+printf 'https://scheme.example.com {\n\troot * /var/www/s\n}\n' > "$SB15/sites/scheme.caddy"
+flip_transform "$SB15/sites/scheme.caddy" scheme.example.com 9443 on >/dev/null 2>&1
+if grep -q '^https://scheme.example.com:9443 {' "$SB15/sites/scheme.caddy" && ! grep -q 'https://https://' "$SB15/sites/scheme.caddy"; then
+    ok "15.5c 带 scheme 的站点块翻转不重复拼 scheme"
+else
+    bad "15.5c 带 scheme 的站点块翻坏"
+fi
+
+# 15.9b 认不出块首时必须返回非零（否则 Caddy 仍占 443，sing-box 起不来）
+printf 'sub.example.com {\n\trespond ok\n}\n' > "$SB15/sites/subonly.caddy"
+_s_before=$(sha256sum "$SB15/sites/subonly.caddy" | cut -d' ' -f1)
+if flip_transform "$SB15/sites/subonly.caddy" example.com 9443 on >/dev/null 2>&1; then
+    bad "15.9b 找不到块首却返回成功（会导致 443 冲突）"
+else
+    [[ "$(sha256sum "$SB15/sites/subonly.caddy" | cut -d' ' -f1)" == "$_s_before" ]] \
+        && ok "15.9b 认不出的站点块返回非零且文件不变" || bad "15.9b 失败时仍改动了文件"
+fi
+
 # 15.7 别的站点块不受影响
 grep -q "^https://other.example.com:9443 {" "$SB15/sites/other.caddy" \
     && ! grep -q "agisignal" "$SB15/sites/other.caddy" && ok "15.7 其它站点块未被改动" || bad "15.7 误伤其它站点"
@@ -722,12 +746,22 @@ else
     bad "16.2 安装未走协议模块"
 fi
 
+# 16.3b 有本机站点时，非 443 端口必须拒绝（否则站点被搬到回环、公网 443 空着）
+if proto_enable_reality 8443 site.example.com < /dev/null > "$SB16/o1b" 2>&1; then
+    bad "16.3b 有站点时非 443 端口未被拒绝"
+else
+    grep -q '只能监听 443' "$SB16/o1b" \
+        && [[ "$(python3 -c "import json;print(len(json.load(open('$SB16/config.json'))['inbounds']))")" == "0" ]] \
+        && ok "16.3b 有站点 + 非 443 时拒绝且不写配置" \
+        || bad "16.3b 拒绝原因或副作用不对" "$(tail -2 "$SB16/o1b")"
+fi
+
 # 16.3 非交互启用 Reality（传参 + stdin 关闭，不应阻塞）
-if proto_enable_reality 8443 site.example.com < /dev/null > "$SB16/o1" 2>&1; then
+if proto_enable_reality 443 site.example.com < /dev/null > "$SB16/o1" 2>&1; then
     tags=$(python3 -c "import json;print(' '.join(i['tag'] for i in json.load(open('$SB16/config.json'))['inbounds']))")
     hs=$(python3 -c "import json;h=[i for i in json.load(open('$SB16/config.json'))['inbounds'] if i['tag']=='vless-reality-in'][0]['tls']['reality'];print(h['handshake']['server'], h['handshake']['server_port'], [i for i in json.load(open('$SB16/config.json'))['inbounds']][0]['listen_port'])")
-    [[ "$tags" == "vless-reality-in" && "$hs" == "127.0.0.1 9443 8443" ]] \
-        && ok "16.3 非交互启用 Reality：端口 8443 + 回落 127.0.0.1:9443" \
+    [[ "$tags" == "vless-reality-in" && "$hs" == "127.0.0.1 9443 443" ]] \
+        && ok "16.3 非交互启用 Reality：端口 443 + 回落 127.0.0.1:9443" \
         || bad "16.3 启用 Reality 结果异常" "$tags / $hs"
 else
     bad "16.3 非交互启用 Reality 失败" "$(tail -3 "$SB16/o1")"
@@ -1121,6 +1155,36 @@ else
 fi
 if find_cert_dir "" >/dev/null 2>&1; then bad "23.9 空域名应当失败"; else ok "23.9 空域名返回非 0"; fi
 if grep -q 'menu_camo' "$TARGET" && grep -q '8. 伪装站点' "$TARGET"; then ok "23.8 主菜单已挂载伪装站点入口"; else bad "23.8 菜单入口缺失"; fi
+
+# 23.10/23.11 建站只允许「当前伪装域名」，且不得与已有站点块抢同一地址
+_t23=$(mktemp -d); mkdir -p "$_t23/sites"
+printf '{"inbounds":[{"type":"vless","tag":"vless-reality-in"}]}\n' > "$_t23/config.json"
+_s_conf="$CONF_FILE"; _s_sites="$CADDY_SITES_DIR"; _s_sni="${VL_SNI:-}"; _s_camo="$CAMO_PY"
+_s_ssl="${CERT_SSL_ROOT-}"; _s_acme="${CERT_ACME_ROOT-}"
+# 生成器桩成 /bin/true：断言只关心「守卫是否拦住」，不该让它去下载生成器或碰网络
+# 证书根目录显式指到沙箱：第 24 组结尾 unset 过它们，set -u 下漏了会让整套测试当场退出
+CAMO_PY=/bin/true
+CERT_SSL_ROOT="$_t23/ssl"; CERT_ACME_ROOT="$_t23/acme"
+mkdir -p "$CERT_SSL_ROOT" "$CERT_ACME_ROOT"
+CONF_FILE="$_t23/config.json"; CADDY_SITES_DIR="$_t23/sites"; VL_SNI="other.example.com"
+if build_camo_site "cam.example.com" "eso" "" </dev/null > "$_t23/o1" 2>&1; then
+    bad "23.10 Reality 占用 443 时仍给别的域名建站"
+else
+    grep -q '无法同时对外服务' "$_t23/o1" \
+        && ok "23.10 拒绝为「非当前伪装域名」建站" || bad "23.10 拒绝原因不明确" "$(tail -1 "$_t23/o1")"
+fi
+printf 'cam.example.com {\n\trespond ok\n}\n' > "$_t23/sites/existing.caddy"
+CONF_FILE="$_t23/none.json"; VL_SNI=""
+if build_camo_site "cam.example.com" "eso" "" </dev/null > "$_t23/o2" 2>&1; then
+    bad "23.11 已有站点块时仍重复建站（Caddy 会因重复地址加载失败）"
+else
+    grep -q '不再重复建站' "$_t23/o2" \
+        && ok "23.11 同一域名已有站点块时拒绝重复建站" || bad "23.11 拒绝原因不明确" "$(tail -1 "$_t23/o2")"
+fi
+CONF_FILE="$_s_conf"; CADDY_SITES_DIR="$_s_sites"; VL_SNI="$_s_sni"; CAMO_PY="$_s_camo"
+if [[ -n "$_s_ssl" ]]; then CERT_SSL_ROOT="$_s_ssl"; else unset CERT_SSL_ROOT; fi
+if [[ -n "$_s_acme" ]]; then CERT_ACME_ROOT="$_s_acme"; else unset CERT_ACME_ROOT; fi
+rm -rf "$_t23"
 
 group "25. 订阅生成与证书助手"
 # 25.1/25.2 sub_scheme 由 CERT_MODE 唯一决定

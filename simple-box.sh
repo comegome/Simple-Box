@@ -2730,6 +2730,15 @@ proto_enable_reality() {
         fi
     fi
 
+    # 有本机站点时，只能把站点搬到回环、由 Reality 在 443 上代它回落。
+    # Reality 换到非 443 端口时 443 会彻底空着，站点从此在公网消失（比不伪装更可疑）。
+    # 宁可直接拒绝，也不做这种「成功了一半」的迁移。
+    if [[ -n "$site" && "$port" != "443" ]]; then
+        echo -e "${RED}✗ ${sni} 在本机有站点（${site}），Reality 只能监听 443 才能让它继续对外服务${PLAIN}"
+        echo -e "${YELLOW}  二选一：① Reality 端口用 443；② 伪装域名换成外部借壳域名（如 www.icloud.com）${PLAIN}"
+        return 1
+    fi
+
     VL_PORT="$port"; VL_SNI="$sni"
     SITE_FILE="$site"; FLIP_HOST="${site:+$sni}"; FLIP_PORT="${FLIP_PORT:-9443}"
 
@@ -3009,7 +3018,9 @@ flip_site_toggle() {
     local backup; backup=$(mktemp /tmp/caddy-site.XXXXXX)
     cp -f "$site" "$backup" || return 1
     if ! flip_transform "$site" "$domain" "$port" "$mode"; then
-        cp -f "$backup" "$site"; rm -f "$backup"; return 1
+        cp -f "$backup" "$site"; rm -f "$backup"
+        echo -e "${RED}✗ 站点块首行无法识别（需写成 ${domain} { 或 ${domain}:端口 {），已还原文件${PLAIN}"
+        return 1
     fi
     if ! caddy validate --config "${CADDYFILE:-/etc/caddy/Caddyfile}" >/dev/null 2>&1; then
         cp -f "$backup" "$site"; rm -f "$backup"
@@ -3017,28 +3028,47 @@ flip_site_toggle() {
         return 1
     fi
     rm -f "$backup"
-    systemctl restart caddy && echo -e "${GREEN}✓ Caddy 已重载${PLAIN}"
+    # 用 reload 而不是 restart：连续翻转/建站会撞 systemd 的 start-limit-hit（5 次/10 秒）
+    reload_caddy_safe
 }
 
 # 纯文件变换（可单测）：只改站点块的监听地址与 bind，不动其它内容
+# 块首行按「行首 + 域名 + 可选 scheme/端口 + {」匹配，绝不裸子串替换：
+#   裸 replace("domain {", ...) 会漏掉 `domain:443 {` / `https://domain {` 两种写法
+#   （此时 site_file_for 已经命中、校验也通过，但文件一字未改 → 443 仍被 Caddy 占着，
+#    紧接着 sing-box restart 报 bind: address already in use，节点当场死掉），
+#   也会误改 `sub.domain {` 里的子串。匹配不到就返回 2，由调用方还原并报错。
 flip_transform() {
     python3 - "$1" "$2" "$3" "$4" <<'PYEOF'
 import sys, pathlib, re
 site, domain, port, mode = sys.argv[1:5]
 p = pathlib.Path(site); s = p.read_text()
-flipped = "https://%s:%s {" % (domain, port)
-plain = "%s {" % domain
+d = re.escape(domain)
+head = re.compile(r"^(?P<indent>[ \t]*)(?:https?://)?" + d + r"(?::[0-9]+)?[ \t]*\{", re.M)
+flipped_addr = "https://%s:%s {" % (domain, port)
+on_head = re.compile(r"^(?P<indent>[ \t]*)https://" + d + r":" + re.escape(port) + r"[ \t]*\{", re.M)
+
 if mode == "on":
-    if flipped in s:
+    if flipped_addr in s:
         print("already flipped"); sys.exit(0)
-    s = s.replace(plain, flipped, 1)
-    if "\tbind 127.0.0.1" not in s:
-        s = s.replace(flipped, flipped + "\n\tbind 127.0.0.1", 1)
+    m = head.search(s)
+    if not m:
+        sys.stderr.write("找不到 %s 的站点块首行（写成 %s { 或 %s:端口 { 均可）\n" % (domain, domain, domain))
+        sys.exit(2)
+    new_head = m.group("indent") + flipped_addr
+    rest = s[m.end():]
+    if "bind 127.0.0.1" in s:
+        s = s[:m.start()] + new_head + rest
+    else:
+        s = s[:m.start()] + new_head + "\n\tbind 127.0.0.1" + rest
 else:
-    if flipped not in s:
+    m = on_head.search(s)
+    if not m:
         print("already plain"); sys.exit(0)
-    s = s.replace(flipped, plain, 1)
-    s = re.sub(r"^\tbind 127\.0\.0\.1\n", "", s, count=1, flags=re.M)
+    rest = s[m.end():]
+    # 只摘掉块首行后面紧跟的那一行 bind，不碰用户自己写的其它 bind
+    rest = re.sub(r"^\n[ \t]*bind 127\.0\.0\.1[ \t]*(?=\n|$)", "", rest, count=1)
+    s = s[:m.start()] + m.group("indent") + domain + " {" + rest
 p.write_text(s)
 PYEOF
 }
@@ -3235,6 +3265,22 @@ camo_pick_source() {
 build_camo_site() {
     local domain="$1" source="$2" style="${3:-}"
     local gen dir caddy_file cert
+    # Reality 在跑时 443 归 sing-box，只有「当前伪装域名」能通过它的回落对外服务。
+    # 给别的域名建站只能把它搬到回环，公网 443 上仍是 Reality 的回落目标——站点等于不存在，
+    # 而且会把全局 SITE_FILE 指到这个站，后续停用 Reality 会翻错站点、把真正的站点留在回环上。
+    if [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in" && [[ "$domain" != "${VL_SNI:-}" ]]; then
+        echo -e "${RED}✗ Reality 正在 443 上用 ${VL_SNI} 伪装，${domain} 无法同时对外服务${PLAIN}"
+        echo -e "${YELLOW}  先把 ${domain} 设为 Reality 的伪装域名（菜单 2 → 启用 Reality），或先停用 Reality 再建站${PLAIN}"
+        return 1
+    fi
+    # 同一域名已有站点块时不能再写 camo-<域名>.caddy：Caddy 会因同一个地址出现两次而加载失败
+    local _exist
+    _exist=$(site_file_for "$domain" 2>/dev/null || true)
+    if [[ -n "$_exist" && "$_exist" != "/etc/caddy/sites/camo-${domain}.caddy" ]]; then
+        echo -e "${RED}✗ 本机已有 ${domain} 的站点配置：${_exist}${PLAIN}"
+        echo -e "${YELLOW}  不再重复建站（会与它抢同一个地址）。要接管请先手工移除那份站点块${PLAIN}"
+        return 1
+    fi
     gen=$(ensure_camo_generator) || {
         echo -e "${RED}✗ 无法获取站点生成器（${CAMO_URL}）${PLAIN}"
         echo -e "${YELLOW}  节点本身不受影响，可稍后重试${PLAIN}"
@@ -3279,7 +3325,9 @@ build_camo_site() {
     fi
 
     # 自检：真的取到页面才算成功（配置写错 / 端口被占 都表现为「服务在跑但 404」）
-    local port="${FLIP_PORT:-9443}" code="000"
+    # 只有「Reality 在跑、站点已翻转」时才在回环高位端口上；否则站点就在公网 443
+    local port="443" code="000"
+    if [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in"; then port="${FLIP_PORT:-9443}"; fi
     sleep 1
     code=$(curl -s -o /dev/null -k -m 8 -w '%{http_code}' --resolve "${domain}:${port}:127.0.0.1" \
         "https://${domain}:${port}/" 2>/dev/null || echo 000)
@@ -3503,7 +3551,14 @@ exit_save_slot() {
     exit_slot_set "$n" ENTRY_HY "$8"
     [[ "$n" == "1" ]] && EXIT_TYPE="hy2"
     EXIT2_SKIP_CERT="${EXIT2_SKIP_CERT:-false}"
-    apply_exit_reload
+    apply_exit_reload || return 1
+    # 防火墙宁松勿紧：链式入口是给客户端连的，开了 ufw 就必须放行，
+    # 否则本机 loopback 全绿、外部客户端一律超时。
+    if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -qw "active"; then
+        ufw allow "${7}/tcp" >/dev/null 2>&1 || true
+        ufw allow "${8}/udp" >/dev/null 2>&1 || true
+    fi
+    return 0
 }
 
 exit_add() {

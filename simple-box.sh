@@ -203,11 +203,8 @@ cert_covers_domain() {
     # 证书主题/SAN 必须覆盖该域名
     openssl x509 -in "$crt" -noout -checkhost "$domain" 2>/dev/null | grep -q "does match" || return 1
 
-    # 公私钥配对
-    local crt_pub key_pub
-    crt_pub=$(openssl x509 -in "$crt" -noout -pubkey 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
-    key_pub=$(openssl pkey -in "$key" -pubout 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
-    [[ -n "$crt_pub" && "$crt_pub" == "$key_pub" ]] || return 1
+    # 公私钥配对（与 find_cert_dir 用同一套判定）
+    cert_pair_ok "$crt" "$key" || return 1
 
     return 0
 }
@@ -624,17 +621,11 @@ issue_cert_bundle() {
     # 必须先于下面的失败降级逻辑判断，否则会把有效域名证书覆盖成自签证书
     if [[ -n "$domain" && -z "$cf_token" ]]; then
         # 本机已有该域名的证书（/etc/ssl/<域名> 或 acme.sh 目录）→ 拷进 CERT_DIR 直接复用
-        local _src=""
-        if ! cert_covers_domain "$domain" && _src=$(find_cert_dir "$domain"); then
-            if [[ "$_src" != "$CERT_DIR" ]]; then
-                install -m 644 "$_src/fullchain.cer" "${CERT_DIR}/fullchain.cer" 2>/dev/null || true
-                if [[ -f "$_src/private.key" ]]; then
-                    install -m 640 -g caddy "$_src/private.key" "${CERT_DIR}/private.key" 2>/dev/null \
-                        || install -m 600 "$_src/private.key" "${CERT_DIR}/private.key" 2>/dev/null || true
-                else
-                    install -m 640 -g caddy "$_src/${domain}.key" "${CERT_DIR}/private.key" 2>/dev/null \
-                        || install -m 600 "$_src/${domain}.key" "${CERT_DIR}/private.key" 2>/dev/null || true
-                fi
+        local _src="" _rc=0
+        if ! cert_covers_domain "$domain"; then
+            _src=$(find_cert_dir "$domain") || _rc=$?
+            if [[ "$_rc" -eq 0 && -n "$_src" && "$_src" != "$CERT_DIR" ]]; then
+                install_cert_to "$_src" "$CERT_DIR" || true
                 echo -e "${GREEN}检测到本机已有 ${domain} 的证书（${_src}），已同步复用。${PLAIN}"
             fi
         fi
@@ -2283,17 +2274,58 @@ local_site_domains() {
     done
 }
 
-# 依次查找该域名可用的证书目录：/etc/ssl/<域名> → 短名 → acme.sh → 已就位目录
+# ---- 证书目录：唯一的事实来源 ----
+# 证书在盘上有三种摆法（/etc/sing-box/cert、/etc/ssl/<域名>、acme.sh 的 <域名>_ecc），
+# 私钥还有两种命名（private.key / <域名>.key，Caddy 只认前者）。所有寻找证书的地方
+# 都必须走这里，返回值保证「Caddy 与 sing-box 都能直接用」：
+#   · fullchain.cer 存在     · 私钥存在（两种命名都认）
+#   · 证书覆盖该域名         · 公私钥配对
+# 命名不规范时（acme.sh）就地补一份 <SSL_ROOT>/<域名>/private.key。
+# 返回 0=可用目录（stdout），1=没有该域名的证书，2=有证书但不覆盖域名/不配对。
+CERT_SSL_ROOT="${CERT_SSL_ROOT:-/etc/ssl}"
+CERT_ACME_ROOT="${CERT_ACME_ROOT:-/root/.acme.sh}"
+
+cert_pair_ok() {   # 证书与私钥是否配对（没有 openssl 时不阻塞）
+    local crt="${1:-}" key="${2:-}" a b
+    [[ -s "$crt" && -s "$key" ]] || return 1
+    command -v openssl >/dev/null 2>&1 || return 0
+    a=$(openssl x509 -in "$crt" -noout -pubkey 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
+    b=$(openssl pkey -in "$key" -pubout 2>/dev/null | openssl md5 2>/dev/null | awk '{print $NF}')
+    [[ -n "$a" && "$a" == "$b" ]]
+}
+
 find_cert_dir() {
-    local d="${1:-}" c=()
-    [[ -z "$d" ]] && return 1
-    c=("/etc/ssl/$d" "/etc/ssl/${d%%.*}" "/root/.acme.sh/${d}_ecc" "${CERT_DIR}")
-    for x in "${c[@]}"; do
-        [[ -f "$x/fullchain.cer" ]] || continue
-        [[ -f "$x/private.key" || -f "$x/$d.key" ]] || continue
-        printf '%s\n' "$x"; return 0
+    local d="${1:-}" c crt key bad=""
+    [[ -n "$d" ]] || return 1
+    for c in "$CERT_DIR" "${CERT_SSL_ROOT}/$d" "${CERT_SSL_ROOT}/${d%%.*}" "${CERT_ACME_ROOT}/${d}_ecc"; do
+        crt="$c/fullchain.cer"
+        [[ -f "$crt" ]] || continue
+        key="$c/private.key"; [[ -f "$key" ]] || key="$c/$d.key"
+        [[ -f "$key" ]] || continue
+        cert_covers_host "$crt" "$d" || { bad="${bad:-$crt}"; continue; }
+        cert_pair_ok "$crt" "$key" || { bad="${bad:-$crt}"; continue; }
+        if [[ "$key" != "$c/private.key" ]]; then
+            install -d -m 755 "${CERT_SSL_ROOT}/$d" 2>/dev/null || return 1
+            install -m 644 "$crt" "${CERT_SSL_ROOT}/$d/fullchain.cer" || return 1
+            install -m 640 -g caddy "$key" "${CERT_SSL_ROOT}/$d/private.key" 2>/dev/null \
+                || install -m 600 "$key" "${CERT_SSL_ROOT}/$d/private.key" || return 1
+            c="${CERT_SSL_ROOT}/$d"
+        fi
+        printf '%s\n' "$c"; return 0
     done
+    [[ -n "$bad" ]] && echo -e "${YELLOW}证书校验未通过：${bad}（域名不匹配或公私钥不成对）${PLAIN}" >&2
+    [[ -n "$bad" ]] && return 2
     return 1
+}
+
+# 把一份证书装进目标目录，统一成 fullchain.cer + private.key（唯一改权限的地方）
+install_cert_to() {
+    local src="${1:-}" dst="${2:-}"
+    [[ -f "$src/fullchain.cer" && -f "$src/private.key" && -n "$dst" ]] || return 1
+    mkdir -p "$dst" || return 1
+    install -m 644 "$src/fullchain.cer" "$dst/fullchain.cer" || return 1
+    install -m 640 -g caddy "$src/private.key" "$dst/private.key" 2>/dev/null \
+        || install -m 600 "$src/private.key" "$dst/private.key" || return 1
 }
 
 site_file_for() {
@@ -2323,27 +2355,13 @@ cert_covers_host() {
 }
 
 sync_hy2_cert() {
-    local d="$1" src=""
-    # 证书目录可能是 /etc/ssl/<域名>，也可能是按站点起的短名（如 /etc/ssl/agisignal）
-    # 依次找：/etc/ssl/<域名>、短名目录、acme.sh 默认目录、已就位的 CERT_DIR
-    for src in "/etc/ssl/$d" "/etc/ssl/${d%%.*}" "/root/.acme.sh/${d}_ecc" "$CERT_DIR"; do
-        [[ -n "$d" && -f "$src/fullchain.cer" ]] || { src=""; continue; }
-        if [[ -f "$src/private.key" || -f "$src/${d}.key" ]]; then break; fi
-        src=""
-    done
-    [[ -n "$src" ]] || return 1
-    # 证书必须覆盖目标域名：把 A 域的证书挂到 B 域上，Caddy 与 sing-box 都不会报错，
-    # 只有客户端会报证书错误，属于最难排查的一类静默故障。
-    if ! cert_covers_host "$src/fullchain.cer" "$d"; then
-        echo -e "${RED}证书与域名不匹配：${src}/fullchain.cer 不覆盖 ${d}${PLAIN}"
-        return 2
-    fi
-    [[ "$src" == "$CERT_DIR" ]] && return 0   # 已就位，无需复制
-    local _key="$src/private.key"
-    [[ -f "$_key" ]] || _key="$src/${d}.key"      # acme.sh 目录里 key 以域名命名
-    install -m 644 "$src/fullchain.cer" "$CERT_DIR/fullchain.cer" || return 1
-    install -m 640 -g caddy "$_key" "$CERT_DIR/private.key" 2>/dev/null \
-        || install -m 600 "$_key" "$CERT_DIR/private.key" || return 1
+    local d="${1:-}" src rc=0
+    [[ -n "$d" ]] || return 1
+    src=$(find_cert_dir "$d") || rc=$?
+    if [[ "$rc" -eq 2 ]]; then return 2; fi
+    if [[ "$rc" -ne 0 || -z "$src" ]]; then return 1; fi
+    [[ "$src" == "$CERT_DIR" ]] && return 0        # 已就位
+    install_cert_to "$src" "$CERT_DIR"
 }
 
 ensure_reality_creds() {
@@ -3007,29 +3025,6 @@ ensure_camo_generator() {
     return 1
 }
 
-# 证书定位：Caddy 只认 fullchain.cer + private.key 这两个文件名，
-# acme.sh 默认存的是 <域名>.key，直接指过去会 "no such file"。
-# 顺序：sing-box 证书目录（安装时已就位）→ /etc/ssl/<域名> → acme.sh（补一份副本）。
-camo_cert_dir() {
-    local d="${1:-}" c
-    [[ -n "$d" ]] || return 1
-    if cert_covers_domain "$d" >/dev/null 2>&1; then printf '%s\n' "$CERT_DIR"; return 0; fi
-    for c in "/etc/ssl/$d" "/etc/ssl/${d%%.*}"; do
-        [[ -f "$c/fullchain.cer" && -f "$c/private.key" ]] || continue
-        cert_covers_host "$c/fullchain.cer" "$d" || continue
-        printf '%s\n' "$c"; return 0
-    done
-    local a="/root/.acme.sh/${d}_ecc"
-    if [[ -f "$a/fullchain.cer" && -f "$a/$d.key" ]] && cert_covers_host "$a/fullchain.cer" "$d"; then
-        install -d -m 755 "/etc/ssl/$d" &&
-        install -m 644 "$a/fullchain.cer" "/etc/ssl/$d/fullchain.cer" &&
-        install -m 640 "$a/$d.key" "/etc/ssl/$d/private.key" || return 1
-        chown root:caddy "/etc/ssl/$d/private.key" 2>/dev/null || true
-        printf '%s\n' "/etc/ssl/$d"; return 0
-    fi
-    return 1
-}
-
 # 生成 / 重建站点，并挂到 Caddy；Reality 在跑就同步翻转成 127.0.0.1:FLIP_PORT
 build_camo_site() {
     local domain="$1" source="$2" style="${3:-}"
@@ -3039,7 +3034,7 @@ build_camo_site() {
         echo -e "${YELLOW}  节点本身不受影响，可稍后重试${PLAIN}"
         return 1
     }
-    cert=$(camo_cert_dir "$domain" 2>/dev/null || true)
+    cert=$(find_cert_dir "$domain" 2>/dev/null || true)
     if [[ -z "$cert" ]]; then
         echo -e "${RED}✗ 找不到 ${domain} 的证书${PLAIN}"
         echo -e "${YELLOW}  先执行菜单 4「订阅地址配置」签发 ${HY_DOMAIN:-该域名} 的证书，再回来生成站点${PLAIN}"

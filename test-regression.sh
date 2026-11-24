@@ -879,9 +879,16 @@ else
 fi
 rm -rf "$SB19"
 
-# 15.22 sync_hy2_cert 能直接用 acme.sh 目录里的证书（重装/无 /etc/ssl 时）
-grep -q 'acme.sh/${d}_ecc' "$TARGET" && ok "15.22 证书支持 acme.sh 目录" || bad "15.22 未支持 acme.sh 目录"
-grep -q '_key="$src/${d}.key"' "$TARGET" && ok "15.22 acme 目录用域名命名的 key" || bad "15.22 acme key 文件名未处理"
+# 15.22 证书目录解析统一在 find_cert_dir（sync_hy2_cert 不再自己找目录）
+_fcd=$(awk '/^find_cert_dir\(\) \{/,/^\}/' "$TARGET")
+grep -q 'CERT_ACME_ROOT' <<<"$_fcd" && ok "15.22 find_cert_dir 覆盖 acme.sh 目录" || bad "15.22 find_cert_dir 未覆盖 acme.sh 目录"
+grep -q 'key="$c/$d.key"' <<<"$_fcd" && ok "15.22 find_cert_dir 识别 acme 的 <域名>.key" || bad "15.22 find_cert_dir 未处理 acme key 命名"
+_shc=$(awk '/^sync_hy2_cert\(\) \{/,/^\}/' "$TARGET")
+if grep -q 'find_cert_dir' <<<"$_shc" && ! grep -q '/root/.acme.sh' <<<"$_shc"; then
+    ok "15.22 sync_hy2_cert 复用 find_cert_dir（不再自带一套查找）"
+else
+    bad "15.22 sync_hy2_cert 仍有重复的证书查找逻辑"
+fi
 
 # 17.15 出口菜单进循环必须先解析分协议字段，否则显示成 "Hy2 → :"
 _body=$(awk '/^menu_exit\(\) \{/,/^\}/' "$TARGET")
@@ -1043,6 +1050,61 @@ else
     bad "22.5 退出码未捕获，set -e 可能直接退出"
 fi
 
+group "24. 证书定位（find_cert_dir / install_cert_to）"
+C24=$(mktemp -d)
+export CERT_SSL_ROOT="$C24/ssl" CERT_ACME_ROOT="$C24/acme"
+_old_cert_dir="$CERT_DIR"; CERT_DIR="$C24/sbcert"
+mkdir -p "$CERT_SSL_ROOT" "$CERT_ACME_ROOT" "$CERT_DIR"
+if openssl req -x509 -newkey rsa:2048 -nodes -keyout "$C24/a.key" -out "$C24/a.crt" -days 2 \
+        -subj "/CN=a.example.com" -addext "subjectAltName=DNS:a.example.com" >/dev/null 2>&1; then
+
+    # 24.1 标准布局：/etc/ssl/<域名>/{fullchain.cer,private.key}
+    mkdir -p "$CERT_SSL_ROOT/a.example.com"
+    cp "$C24/a.crt" "$CERT_SSL_ROOT/a.example.com/fullchain.cer"
+    cp "$C24/a.key" "$CERT_SSL_ROOT/a.example.com/private.key"
+    _r=$(find_cert_dir "a.example.com" 2>/dev/null)
+    [[ "$_r" == "$CERT_SSL_ROOT/a.example.com" ]] && ok "24.1 标准布局直接命中" \
+        || bad "24.1 标准布局未命中" "got=${_r:-空}"
+
+    # 24.2 acme.sh 布局（<域名>.key）→ 会自动补出 private.key 并改指 /etc/ssl/<域名>
+    mkdir -p "$CERT_ACME_ROOT/b.example.com_ecc"
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout "$CERT_ACME_ROOT/b.example.com_ecc/b.example.com.key" \
+        -out "$CERT_ACME_ROOT/b.example.com_ecc/fullchain.cer" -days 2 \
+        -subj "/CN=b.example.com" -addext "subjectAltName=DNS:b.example.com" >/dev/null 2>&1
+    _r=$(find_cert_dir "b.example.com" 2>/dev/null)
+    if [[ "$_r" == "$CERT_SSL_ROOT/b.example.com" && -f "$CERT_SSL_ROOT/b.example.com/private.key" ]]; then
+        ok "24.2 acme 布局已规范化为 /etc/ssl/<域名>/private.key"
+    else
+        bad "24.2 acme 布局未规范化" "got=${_r:-空}"
+    fi
+
+    # 24.3 目录存在但证书不覆盖该域名 → 返回 2（区别于「没证书」的 1）
+    mkdir -p "$CERT_SSL_ROOT/c.example.com"
+    cp "$C24/a.crt" "$CERT_SSL_ROOT/c.example.com/fullchain.cer"
+    cp "$C24/a.key" "$CERT_SSL_ROOT/c.example.com/private.key"
+    rc=0; find_cert_dir "c.example.com" >/dev/null 2>&1 || rc=$?
+    [[ "$rc" -eq 2 ]] && ok "24.3 域名不匹配返回 2" || bad "24.3 域名不匹配返回 ${rc}，应为 2"
+    rc=0; find_cert_dir "nope.example.com" >/dev/null 2>&1 || rc=$?
+    [[ "$rc" -eq 1 ]] && ok "24.4 无证书返回 1" || bad "24.4 无证书返回 ${rc}，应为 1"
+
+    # 24.5 install_cert_to 统一权限
+    install_cert_to "$CERT_SSL_ROOT/a.example.com" "$C24/dst" >/dev/null 2>&1
+    _m=$(stat -c '%a' "$C24/dst/private.key" 2>/dev/null)
+    [[ -f "$C24/dst/fullchain.cer" && "$_m" =~ ^(640|600)$ ]] && ok "24.5 install_cert_to 装好证书且私钥权限 ${_m}" \
+        || bad "24.5 install_cert_to 结果异常" "mode=${_m:-无}"
+
+    # 24.6 证书与私钥不配对时拒绝
+    cp "$C24/a.crt" "$C24/mix/fullchain.cer" 2>/dev/null || { mkdir -p "$C24/mix"; cp "$C24/a.crt" "$C24/mix/fullchain.cer"; }
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout "$C24/mix/private.key" -out "$C24/mix/o.crt" -days 2 \
+        -subj "/CN=a.example.com" -addext "subjectAltName=DNS:a.example.com" >/dev/null 2>&1
+    cert_pair_ok "$C24/mix/fullchain.cer" "$C24/mix/private.key" && bad "24.6 不配对却被判为配对" \
+        || ok "24.6 不配对的证书与私钥被判为不配对"
+else
+    printf '  \033[33m-\033[0m openssl 不可用，跳过第 24 组\n'
+fi
+CERT_DIR="$_old_cert_dir"; unset CERT_SSL_ROOT CERT_ACME_ROOT
+rm -rf "$C24"
+
 group "23. 伪装站点（camo）"
 _blk=$(camo_caddy_block "cam.example.com" "/var/www/cam.example.com" "/etc/ssl/cam.example.com" 2>/dev/null)
 if printf '%s' "$_blk" | grep -q '^cam\.example\.com {'; then ok "23.1 站点块以域名开头"; else bad "23.1 站点块缺少域名行"; fi
@@ -1056,13 +1118,7 @@ if python3 -c 'import ast,sys;ast.parse(open(sys.argv[1]).read())' "${SCRIPT_DIR
 else
     bad "23.7 生成器缺失或语法错误"
 fi
-if declare -f camo_cert_dir >/dev/null && camo_cert_dir "" >/dev/null 2>&1; then
-    bad "23.9 camo_cert_dir 空域名应当失败"
-elif declare -f camo_cert_dir >/dev/null; then
-    ok "23.9 camo_cert_dir 已定义且空域名返回非 0"
-else
-    bad "23.9 camo_cert_dir 未定义"
-fi
+if find_cert_dir "" >/dev/null 2>&1; then bad "23.9 空域名应当失败"; else ok "23.9 空域名返回非 0"; fi
 if grep -q 'menu_camo' "$TARGET" && grep -q '8. 伪装站点' "$TARGET"; then ok "23.8 主菜单已挂载伪装站点入口"; else bad "23.8 菜单入口缺失"; fi
 
 group "14. 清理"

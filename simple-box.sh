@@ -2163,6 +2163,17 @@ uninstall_all() {
         systemctl reload caddy 2>/dev/null || true
     fi
 
+    # 伪装站点同样是本脚本生成的：camo-*.caddy + 它声明的 /var/www 目录一起清掉，
+    # 否则卸载后残留的站点块会让 foreign_sites 判定误以为「用户还有自己的站点」，
+    # 从而跳过 Caddy 卸载，站点还会指向已删除的 /etc/sing-box/cert 报错。
+    local _cf _croot
+    for _cf in /etc/caddy/sites/camo-*.caddy; do
+        [[ -f "$_cf" ]] || continue
+        _croot=$(awk '/^[[:space:]]*root \*/{print $3; exit}' "$_cf" 2>/dev/null || true)
+        rm -f "$_cf"
+        [[ -n "$_croot" && "$_croot" == /var/www/* ]] && rm -rf "$_croot"
+    done
+
     # 清理 acme.sh 中本机签发的续期任务（仅当存在 acme.sh 时）
     if [[ -x "$HOME/.acme.sh/acme.sh" && -f "$ENV_FILE" ]]; then
         local un_domain
@@ -2191,7 +2202,7 @@ uninstall_all() {
     local foreign_sites=0
     if [[ -d /etc/caddy/sites ]]; then
         foreign_sites=$(find /etc/caddy/sites -maxdepth 1 -type f \
-            ! -name 'simple-box*' ! -name "*-${SUB_PORT:-8444}.caddy" 2>/dev/null | wc -l)
+            ! -name 'simple-box*' ! -name 'camo-*' ! -name "*-${SUB_PORT:-8444}.caddy" 2>/dev/null | wc -l)
     fi
     if [[ "$foreign_sites" -gt 0 ]]; then
         caddy_owned=false
@@ -2605,6 +2616,9 @@ proto_enable_hy2() {
     load_env || { echo -e "${RED}未检测到已安装的配置${PLAIN}"; return 1; }
 
     if [[ "$interactive" == 1 ]]; then
+        # 三样都先从 env 取当前值：reuse 分支不重新赋值，漏掉 domain 就会在
+        # 「沿用」之后把 HY_DOMAIN 写成空串，静默降级成 IP 自签（协议看着仍启用）。
+        port="${HY_PORT:-}"; domain="${HY_DOMAIN:-}"; range="${HY_RANGE:-}"
         echo -e " 当前参数: 端口 ${CYAN}${HY_PORT:-—}${PLAIN} / 域名 ${CYAN}${HY_DOMAIN:-无}${PLAIN} / 跳跃 ${CYAN}${HY_RANGE:-无}${PLAIN}"
         local okh=""
         ask "沿用这组参数？[Y/n]: " okh
@@ -2627,7 +2641,9 @@ proto_enable_hy2() {
 
     HY_DOMAIN="$domain"; HY_PORT="$port"; HY_RANGE="$range"
     [[ -z "${HY_PASS:-}" ]] && HY_PASS=$(/usr/local/bin/sing-box generate rand --base64 16)
-    local cert_rc=1
+    # 初值必须是 0：写成 1 时「成功」路径不会赋值，分支永远走到「未找到证书」，
+    # 结果是把有效域名证书的节点标成 skip-cert-verify（真实故障，不只是提示错）。
+    local cert_rc=0
     if [[ -n "$domain" ]]; then
         sync_hy2_cert "$domain" || cert_rc=$?
     fi
@@ -3166,12 +3182,17 @@ menu_camo() {
                 read -r -p "要删除的域名: " domain || return 0
                 domain="$(trim_string "${domain:-}")"
                 [[ -n "$domain" ]] || continue
+                # 正在给 Reality 当回落的站点不能直接删：删掉站点块后 443 会被转发到
+                # 一个已经没人监听的 9443，探测者拿到的是连接重置，比不伪装更可疑。
+                if [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in" && [[ "${VL_SNI:-}" == "$domain" ]]; then
+                    echo -e "${RED}✗ ${domain} 正被 Reality 当作伪装域名，不能直接删除${PLAIN}"
+                    echo -e "${YELLOW}  先到「入站管理」把 Reality 的伪装域名换成别的（或先停用 Reality），再回来删${PLAIN}"
+                    read -r -p "按回车键继续..." _ || true
+                    continue
+                fi
                 local d="${CAMO_ROOT}/${domain}" f="/etc/caddy/sites/camo-${domain}.caddy"
                 rm -f "$f"
                 rm -rf "$d"
-                if [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in" && [[ "${VL_SNI:-}" == "$domain" ]]; then
-                    echo -e "${YELLOW}注意：Reality 的 SNI 仍指向 ${domain}，请在「协议管理」里改成别的站点${PLAIN}"
-                fi
                 reload_caddy_safe || true
                 echo -e "${GREEN}✓ 已删除 ${domain} 的站点${PLAIN}"
                 read -r -p "按回车键继续..." _ || true

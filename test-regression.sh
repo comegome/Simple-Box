@@ -1206,6 +1206,43 @@ else
     bad "26.4 hy_password 取值路径异常"
 fi
 
+group "27. 协议启用复用不丢域"
+_h2=$(awk '/^proto_enable_hy2\(\) \{/,/^}/' "$TARGET")
+if grep -q 'port="\${HY_PORT:-}"; domain="\${HY_DOMAIN:-}"; range="\${HY_RANGE:-}"' <<<"$_h2"; then
+    ok "27.1 Hy2 交互复用前从 env 取回 port/domain/range"
+else
+    bad "27.1 Hy2 复用路径没有回填 domain（会静默降级 IP 自签）"
+fi
+if grep -q 'HY_DOMAIN="\$domain"' <<<"$_h2"; then
+    ok "27.2 HY_DOMAIN 仍由 domain 变量写入（单一来源）"
+else
+    bad "27.2 HY_DOMAIN 赋值点变了"
+fi
+_r2=$(awk '/^proto_enable_reality\(\) \{/,/^}/' "$TARGET")
+if grep -q 'port="\${port:-\${VL_PORT' <<<"$_r2" && grep -q 'sni="\${sni:-\${VL_SNI' <<<"$_r2"; then
+    ok "27.3 Reality 复用路径仍以 env 兜底"
+else
+    bad "27.3 Reality 复用路径缺少 env 兜底"
+fi
+
+group "28. 卸载清理伪装站"
+_un=$(awk '/^uninstall_all\(\) \{/,/^\}/' "$TARGET")
+if grep -q 'camo-\*\.caddy' <<<"$_un"; then
+    ok "28.1 卸载会删除 camo-*.caddy"
+else
+    bad "28.1 卸载遗留伪装站站点块（会让 foreign_sites 误判、站点指向已删证书）"
+fi
+if grep -q '_croot' <<<"$_un"; then
+    ok "28.2 站点根目录一并清理（仅限 /var/www/*）"
+else
+    bad "28.2 未清理站点根目录"
+fi
+if awk '/^menu_camo\(\) \{/,/^\}/' "$TARGET" | grep -q '正被 Reality 当作伪装域名'; then
+    ok "28.3 删除在用的伪装域名会被拦下"
+else
+    bad "28.3 删除在用的伪装域名没有保护"
+fi
+
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
 ok "临时文件已清理"

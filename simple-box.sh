@@ -23,12 +23,19 @@ ENV_LOADED=""
 load_env() {
     [[ -n "$ENV_LOADED" ]] && return 0
     [[ -f "$ENV_FILE" ]] || return 1
-    . "$ENV_FILE"
+    # 写成 if 条件：env.conf 末条命令失败也不会在 set -e 下把调用方带走，
+    # 调用处因此不需要 set +e / set -e 包裹（原先 9 处已删）。
+    if . "$ENV_FILE"; then :; fi
     ENV_LOADED=1
 }
 TEMPLATE_FILE="${CONF_DIR}/template.yaml"
 
 SCRIPT_URL="https://raw.githubusercontent.com/comegome/Simple-Box/main/simple-box.sh"
+
+# 临时文件兜底：正常路径各自删，异常退出（Ctrl-C / 报错）时由主流程里的 EXIT trap 收尾。
+# 只在入口设置 trap——被 source 时不能往调用方 shell 里塞 trap。
+TMP_CLEANUP=()
+cleanup_tmp() { local _f; for _f in "${TMP_CLEANUP[@]}"; do [[ -n "$_f" ]] && rm -rf "$_f"; done; }
 
 # 管道执行（curl ... | bash）不受支持，且必须在此处就拦下：
 # bash 从 stdin 读取脚本正文，脚本里的 read 会与 bash 抢同一条流，
@@ -464,9 +471,9 @@ update_singbox_core() {
         cur_ver=$(/usr/local/bin/sing-box version 2>/dev/null | head -n1 | awk '{print $3}')
     fi
 
-    local tag=""
-    tag=$(curl -sSL --max-time 20 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null \
-        | grep -Po '"tag_name": "\K[^"]*' || true)
+    local rel_json="" tag=""
+    rel_json=$(curl -sSL --max-time 20 "https://api.github.com/repos/SagerNet/sing-box/releases/latest" 2>/dev/null || true)
+    tag=$(grep -Po '"tag_name": "\K[^"]*' <<<"$rel_json" || true)
     if [[ -z "$tag" ]]; then
         if [[ -f /usr/local/bin/sing-box ]]; then
             echo -e "${YELLOW}获取最新版本失败（GitHub API 不通或被限流），已保留现有版本 (v${cur_ver})。${PLAIN}"
@@ -492,8 +499,22 @@ update_singbox_core() {
         fi
     fi
 
-    local url="https://github.com/SagerNet/sing-box/releases/download/${tag}/sing-box-${latest_ver}-linux-${arch}.tar.gz"
-    local tmp_dir=$(mktemp -d)
+    # 官方 release 不发布 checksum 文件，但 API 的 asset 对象自带 sha256 digest。
+    # 校验挡的是「下到半截 / 变体选错 / 中间设备替换」，且不需要用户手抄哈希。
+    local pkg="sing-box-${latest_ver}-linux-${arch}.tar.gz"
+    local want_sha=""
+    want_sha=$(awk -v want="$pkg" '
+        index($0, want) && /"name"/ { hit = 1 }
+        hit && /"digest":/ {
+            v = $0
+            sub(/.*"digest":[[:space:]]*"/, "", v)
+            sub(/".*/, "", v)
+            print v; exit
+        }' <<<"$rel_json")
+    local url="https://github.com/SagerNet/sing-box/releases/download/${tag}/${pkg}"
+    local tmp_dir
+    tmp_dir=$(mktemp -d)
+    TMP_CLEANUP+=("$tmp_dir")
     local tmp_tar="${tmp_dir}/sing-box.tar.gz"
 
     echo -e "正在下载并更新内核..."
@@ -506,7 +527,7 @@ update_singbox_core() {
         # 资产 JSON 里 "id" 在 "name" 之前，用 awk 记住最近一个合法 id，命中目标名时吐出。
         # 不要用 grep -o 在 name 那行找 id——两者不在同一行。
         asset_id=$(curl -sSL --max-time 20 "https://api.github.com/repos/SagerNet/sing-box/releases/tags/${tag}" 2>/dev/null \
-            | awk -v want="sing-box-${latest_ver}-linux-${arch}.tar.gz" '
+            | awk -v want="$pkg" '
                 /"id":/ {
                     v = $0
                     sub(/.*"id":[[:space:]]*/, "", v)
@@ -524,6 +545,21 @@ update_singbox_core() {
             return 1
         fi
     fi
+    # 校验失败立刻中止：此刻现网二进制一个字节都没动
+    if [[ -n "$want_sha" ]]; then
+        local got_sha
+        got_sha=$(sha256sum "$tmp_tar" | awk '{print $1}')
+        if [[ "sha256:${got_sha}" != "$want_sha" ]]; then
+            echo -e "${RED}内核包 sha256 校验失败，已中止（现有内核未改动）。${PLAIN}"
+            echo -e "${GRAY}期望: ${want_sha#sha256:}${PLAIN}"
+            echo -e "${GRAY}实际: ${got_sha}${PLAIN}"
+            rm -rf "$tmp_dir"
+            return 1
+        fi
+        echo -e "${GREEN}✓ 内核包 sha256 校验通过${PLAIN}"
+    else
+        echo -e "${YELLOW}未取到官方 sha256（API 未返回 digest），跳过校验。${PLAIN}"
+    fi
     if ! tar -xzf "$tmp_tar" -C "$tmp_dir" --strip-components=1 2>/dev/null; then
         echo -e "${RED}内核压缩包解压失败，已保留现有版本。${PLAIN}"
         rm -rf "$tmp_dir"
@@ -535,6 +571,8 @@ update_singbox_core() {
         if [[ -x /usr/local/bin/sing-box ]]; then
             old_bin_backup="/usr/local/bin/sing-box.bak.$$"
             cp -f /usr/local/bin/sing-box "$old_bin_backup" 2>/dev/null || old_bin_backup=""
+            # 备份必须可执行：cp 覆盖已存在的同名文件时不改权限
+            [[ -n "$old_bin_backup" ]] && chmod 755 "$old_bin_backup" 2>/dev/null || true
         fi
         install -m 755 "$tmp_dir/sing-box" /usr/local/bin/sing-box
         rm -rf "$tmp_dir"
@@ -1413,7 +1451,9 @@ fetch_latest_script() {
 reinstall_with_latest() {
     local share_dir="/usr/local/share/simple-box"
     local target="${share_dir}/simple-box.sh"
-    local latest; latest=$(mktemp /tmp/simple-box.latest.XXXXXX)
+    local latest
+    latest=$(mktemp /tmp/simple-box.latest.XXXXXX)
+    TMP_CLEANUP+=("$latest")
 
     echo -e "正在检查仓库最新脚本..."
     if ! fetch_latest_script "$latest"; then
@@ -1719,7 +1759,7 @@ install_node() {
     # 读取既有配置，作为重置时的默认值（直接回车即沿用）
     local old_vl_port="" old_vl_sni="" old_hy_port="" old_sub_port="" old_prefix="" old_domain=""
     if [[ -f "$ENV_FILE" ]]; then
-        set +e; load_env; set -e
+        load_env
         old_vl_port="$VL_PORT"; old_vl_sni="$VL_SNI"; old_hy_port="$HY_PORT"
         old_sub_port="$SUB_PORT"; old_prefix="$NODE_PREFIX"
         old_domain="${HY_DOMAIN:-}"
@@ -2034,7 +2074,7 @@ show_clash_snippet() {
 
     # 子 shell 隔离：source env.conf 的变量不外泄到调用方作用域
     (
-        set +e; load_env; set -e
+        load_env
         local prov="${WEB_DIR}/${SUB_TOKEN}/provider.yaml"
         if [[ ! -s "$prov" ]]; then
             regen_subscription "${SUB_TOKEN:-}" >/dev/null 2>&1 || true
@@ -2070,7 +2110,7 @@ show_links() {
         echo -e "${RED}未找到节点环境配置，请先执行安装！${PLAIN}"
         return 1
     fi
-    set +e; load_env; set -e
+    load_env
     sync_env_locals
 
     # 链接不再手拼：直接重建订阅（生成器含链式节点），再展示 links.txt，
@@ -2125,7 +2165,7 @@ uninstall_all() {
     cleanup_legacy_port_hopping
 
     if [[ -f "$ENV_FILE" ]]; then
-        set +e; load_env; set -e
+        load_env
         rm -f /etc/caddy/sites/*-"${SUB_PORT:-8444}".caddy /etc/caddy/sites/simple-box*.caddy
         systemctl reload caddy 2>/dev/null || true
     fi
@@ -2759,7 +2799,7 @@ menu_sub_module() {
         read -r -p "按回车键返回..." dummy || true
         return 0
     fi
-    set +e; load_env; set -e
+    load_env
 
     while true; do
         [ -t 1 ] && clear
@@ -2821,7 +2861,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 echo -e "当前在线订阅: ${CYAN}${sub_proto}://${target_host}:${SUB_PORT}/${new_token}/config.yaml${PLAIN}"
                 echo -e "${YELLOW}提示: 订阅参数已更新，请在客户端 (如 ClashX.Meta) 中修改端口或更新订阅 URL。${PLAIN}"
                 read -r -p "按回车键返回..." dummy || true
-                set +e; load_env; set -e
+                load_env
                 ;;
             2)
                 echo -e "\n${YELLOW}=== 重置节点名称前缀 ===${PLAIN}"
@@ -2850,7 +2890,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 echo -e "\n${GREEN}✓ 节点名称前缀已更新为: ${new_prefix}${PLAIN}"
                 echo -e "提示: 订阅链接保持不变，客户端点击「更新订阅」即可同步新节点名。"
                 read -r -p "按回车键返回..." dummy || true
-                set +e; load_env; set -e
+                load_env
                 ;;
             3)
                 echo -e "\n${YELLOW}=== 自有域名直连 ===${PLAIN}"
@@ -2886,7 +2926,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 fi
                 echo -e "${YELLOW}提示: 客户端点击「更新订阅」即可同步。${PLAIN}"
                 read -r -p "按回车键返回..." dummy || true
-                set +e; load_env; set -e
+                load_env
                 ;;
             0) break ;;
             *) echo -e "${RED}无效选项${PLAIN}"; sleep 1 ;;
@@ -3739,7 +3779,7 @@ menu() {
 
         local cert_display="未配置"
         if [[ -f "$ENV_FILE" ]]; then
-            set +e; load_env; set -e
+            load_env
             if [[ "${CERT_MODE:-selfsigned}" == "domain" && -n "${HY_DOMAIN:-}" ]]; then
                 cert_display="${HY_DOMAIN} (CA 证书)"
             else
@@ -3813,6 +3853,7 @@ menu() {
 #   3) curl ... | bash                       -> BASH_SOURCE[0] 为空，$0 为 bash（管道）
 _ENTRY_SRC="${BASH_SOURCE[0]:-}"
 if [[ -z "$_ENTRY_SRC" || "$_ENTRY_SRC" == "$0" ]]; then
+    trap cleanup_tmp EXIT
     # 系统不在支持范围内就直接退出，别让用户走到一半才失败
     OS_NAME=$(require_os) || exit 1
     export OS_NAME

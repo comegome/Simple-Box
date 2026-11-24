@@ -1056,6 +1056,13 @@ if python3 -c 'import ast,sys;ast.parse(open(sys.argv[1]).read())' "${SCRIPT_DIR
 else
     bad "23.7 生成器缺失或语法错误"
 fi
+if declare -f camo_cert_dir >/dev/null && camo_cert_dir "" >/dev/null 2>&1; then
+    bad "23.9 camo_cert_dir 空域名应当失败"
+elif declare -f camo_cert_dir >/dev/null; then
+    ok "23.9 camo_cert_dir 已定义且空域名返回非 0"
+else
+    bad "23.9 camo_cert_dir 未定义"
+fi
 if grep -q 'menu_camo' "$TARGET" && grep -q '8. 伪装站点' "$TARGET"; then ok "23.8 主菜单已挂载伪装站点入口"; else bad "23.8 菜单入口缺失"; fi
 
 group "14. 清理"

@@ -3007,6 +3007,29 @@ ensure_camo_generator() {
     return 1
 }
 
+# 证书定位：Caddy 只认 fullchain.cer + private.key 这两个文件名，
+# acme.sh 默认存的是 <域名>.key，直接指过去会 "no such file"。
+# 顺序：sing-box 证书目录（安装时已就位）→ /etc/ssl/<域名> → acme.sh（补一份副本）。
+camo_cert_dir() {
+    local d="${1:-}" c
+    [[ -n "$d" ]] || return 1
+    if cert_covers_domain "$d" >/dev/null 2>&1; then printf '%s\n' "$CERT_DIR"; return 0; fi
+    for c in "/etc/ssl/$d" "/etc/ssl/${d%%.*}"; do
+        [[ -f "$c/fullchain.cer" && -f "$c/private.key" ]] || continue
+        cert_covers_host "$c/fullchain.cer" "$d" || continue
+        printf '%s\n' "$c"; return 0
+    done
+    local a="/root/.acme.sh/${d}_ecc"
+    if [[ -f "$a/fullchain.cer" && -f "$a/$d.key" ]] && cert_covers_host "$a/fullchain.cer" "$d"; then
+        install -d -m 755 "/etc/ssl/$d" &&
+        install -m 644 "$a/fullchain.cer" "/etc/ssl/$d/fullchain.cer" &&
+        install -m 640 "$a/$d.key" "/etc/ssl/$d/private.key" || return 1
+        chown root:caddy "/etc/ssl/$d/private.key" 2>/dev/null || true
+        printf '%s\n' "/etc/ssl/$d"; return 0
+    fi
+    return 1
+}
+
 # 生成 / 重建站点，并挂到 Caddy；Reality 在跑就同步翻转成 127.0.0.1:FLIP_PORT
 build_camo_site() {
     local domain="$1" source="$2" style="${3:-}"
@@ -3016,7 +3039,7 @@ build_camo_site() {
         echo -e "${YELLOW}  节点本身不受影响，可稍后重试${PLAIN}"
         return 1
     }
-    cert=$(find_cert_dir "$domain" 2>/dev/null || true)
+    cert=$(camo_cert_dir "$domain" 2>/dev/null || true)
     if [[ -z "$cert" ]]; then
         echo -e "${RED}✗ 找不到 ${domain} 的证书${PLAIN}"
         echo -e "${YELLOW}  先执行菜单 4「订阅地址配置」签发 ${HY_DOMAIN:-该域名} 的证书，再回来生成站点${PLAIN}"

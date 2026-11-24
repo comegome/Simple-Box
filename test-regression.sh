@@ -1534,12 +1534,13 @@ else
     bad "31.6 菜单表格缺列"
 fi
 
-# 31.7 端口公式：2053 + 10*(n-1)
+# 31.7 端口表：槽 1..4 = 2053/2054、2083/2084、2087/2088、2096/2097
 if declare -F exit_slot_default_ports >/dev/null 2>&1; then
     _d1=$(exit_slot_default_ports 1); _d2=$(exit_slot_default_ports 2)
-    [[ "$_d1" == "2053 2054" && "$_d2" == "2063 2064" ]] \
-        && ok "31.7 入口端口默认值按 2053+10(n-1) 计算" \
-        || bad "31.7 端口公式异常" "$_d1 / $_d2"
+    _d3=$(exit_slot_default_ports 3); _d4=$(exit_slot_default_ports 4)
+    [[ "$_d1" == "2053 2054" && "$_d2" == "2083 2084" && "$_d3" == "2087 2088" && "$_d4" == "2096 2097" ]] \
+        && ok "31.7 入口端口默认值按 CF HTTPS 端口表取（2053/2083/2087/2096）" \
+        || bad "31.7 端口表异常" "$_d1 / $_d2 / $_d3 / $_d4"
 else
     bad "31.7 exit_slot_default_ports 未定义"
 fi

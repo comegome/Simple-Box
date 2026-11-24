@@ -134,7 +134,7 @@ simbo
 =================== 出站管理 ===================
    #  协议        落点                        入口            标签
    1  Hysteria2   isif.example.com:8443      2053 / 2054     ISIF
-   2  Hysteria2   sl.example.com:8443        2063 / 2064     SL
+   2  Hysteria2   sl.example.com:8443        2083 / 2084     SL
 ------------------------------------------------
  1. 查看出站详情
  2. 新增出口
@@ -145,7 +145,7 @@ simbo
 ```
 
 * 一个「出口」= 一组独立的链式入口端口 + 一个 `exit<n>-out` 出站 + 订阅里两条带后缀的节点
-* 入口端口默认按 `2053 + 10×(n-1)` 计算：槽 1 = `2053 / 2054`，槽 2 = `2063 / 2064`
+* 入口端口默认取 **Cloudflare 支持代理的 HTTPS 端口**：槽 1 = `2053 / 2054`，槽 2 = `2083 / 2084`，槽 3 = `2087 / 2088`，槽 4 = `2096 / 2097`（TCP 用 CF 放行端口，UDP 取 +1 成对）
 * 当前上限 **2 个出口**；出口只支持 **Hysteria2**（实测第二跳 hy2 比 Reality 快约 2.8 倍，且落地全用 hy2）
 * 完整的加/删/验收步骤见下方 [🔗 多出口（链式落地）完整配置步骤](#多出口链式落地完整配置步骤)
 
@@ -217,7 +217,7 @@ simbo
 ```
 客户端 ──Reality/Hysteria2(443/8443)──────────► 入口机 ──► 直出（默认，不改动）
        ├─Reality/Hysteria2(2053/2054)─exit-out──► 落地 A ──► 目标站
-       └─Reality/Hysteria2(2063/2064)─exit2-out─► 落地 B ──► 目标站
+       └─Reality/Hysteria2(2083/2084)─exit2-out─► 落地 B ──► 目标站
 ```
 
 * 直连节点：`FN-VLESS-Reality`、`FN-Hysteria2`
@@ -254,14 +254,14 @@ simbo
 粘贴落地机的 provider.yaml 地址: https://landing.example.com:8444/<token>/provider.yaml
 ✓ 已导入落点 landing.example.com:8443
 节点后缀 [EXIT2]: SL
-链式入口端口 · Reality [2063]:
-链式入口端口 · Hysteria2 [2064]:
-✓ 出口 2 已保存（Hysteria2 → landing.example.com:8443，入口 2063/2064）
+链式入口端口 · Reality [2083]:
+链式入口端口 · Hysteria2 [2084]:
+✓ 出口 2 已保存（Hysteria2 → landing.example.com:8443，入口 2083/2084）
 ✓ 出站连通性正常
 ```
 
 * 粘贴地址后自动识别地址、端口、密码、SNI（只认 Hysteria2 节点；找不到会直接报错）；
-* 方括号里是当前值，**回车即沿用**；入口端口默认按 `2053+10×(n-1)` 给；
+* 方括号里是当前值，**回车即沿用**；入口端口默认按上表的 CF 端口对给；
 * 端口会校验：不能与 `443 / 8443 / 8444`、端口跳跃段、另一个出口的入口端口冲突，且上机前用 `ss` 确认空闲；
 * 最后一行是自动连通性自检：`✓ 正常` / `✗ 连不通（端口没放行或密码不对）` / `⚠ IP 与落地机不一致（对方也在中转）`。
 
@@ -272,7 +272,7 @@ simbo
 ```
 # 入口机上起临时客户端，比出口 IP 的 hash
 via2053 / via2054 = 落地 A 的出口 IP
-via2063 / via2064 = 落地 B 的出口 IP
+via2083 / via2084 = 落地 B 的出口 IP
 ```
 
 1. `3. 出站管理` → `1. 查看出站详情`，核对每个出口的落点、入口端口与后缀；
@@ -293,8 +293,8 @@ via2063 / via2064 = 落地 B 的出口 IP
   { "tag": "hy2-in",            "listen_port": 8443 },
   { "tag": "exit-vless-in",     "listen_port": 2053 },
   { "tag": "exit-hy2-in",       "listen_port": 2054 },
-  { "tag": "exit2-vless-in",    "listen_port": 2063 },
-  { "tag": "exit2-hy2-in",      "listen_port": 2064 }
+  { "tag": "exit2-vless-in",    "listen_port": 2083 },
+  { "tag": "exit2-hy2-in",      "listen_port": 2084 }
 ],
 "outbounds": [
   { "tag": "direct",    "type": "direct" },
@@ -371,7 +371,7 @@ via2063 / via2064 = 落地 B 的出口 IP
 这两个主流发行版的官方系统仓库已内置 Caddy（v2.6.2+），无需引入任何第三方软件源、第三方 GPG Keyring 或编译环境，即可实现极简、稳定、无外部网络依赖的自闭环安装与运行。
 
 #### Q8：开启出站中转后，原来的直连节点会受影响吗？
-不会。中转是**额外的入口端口**（每个出口一组，默认 2053/2054、2063/2064），直连节点（443 / 8443）的 inbound、参数与订阅条目完全不变。删除出口后配置与订阅回到没有该出口时的状态。
+不会。中转是**额外的入口端口**（每个出口一组，默认 2053/2054、2083/2084），直连节点（443 / 8443）的 inbound、参数与订阅条目完全不变。删除出口后配置与订阅回到没有该出口时的状态。
 
 #### Q9：为什么中转节点比直连慢？
 中转要多走一段「入口机 → 落地机」，延迟天然叠加。中转的价值是**落地 IP**，不是延迟。如果只是日常浏览，用直连；需要干净落地 IP 时再切到 `-SG` 节点。
@@ -383,8 +383,8 @@ via2063 / via2064 = 落地 B 的出口 IP
 ```bash
 systemctl status sing-box caddy --no-pager        # 检查服务运行状态
 sing-box check -c /etc/sing-box/config.json       # 校验 sing-box 配置完整性
-ss -tlnp | grep -E ':(443|8444|2053|2063)'        # Reality / 订阅 / 链式入口
-ss -ulnp | grep -E ':(8443|2054|2064)'            # Hysteria2 与链式中转入口
+ss -tlnp | grep -E ':(443|8444|2053|2083)'        # Reality / 订阅 / 链式入口
+ss -ulnp | grep -E ':(8443|2054|2084)'            # Hysteria2 与链式中转入口
 iptables -t nat -L PREROUTING -n --line-numbers   # 检查端口跳跃 REDIRECT 规则
 grep -oE '^EXIT[0-9]*_[A-Z_]+' /etc/sing-box/env.conf   # 只看出口字段名（不打印密码）
 ```

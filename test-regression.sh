@@ -279,6 +279,32 @@ else
     ok "cert_covers_domain 拒绝公私钥不配对"
 fi
 
+# 站点在用 CERT_DIR 的证书时，证书降级不得覆盖它（否则站点 + Reality 回落一起失效）
+_s8=$(mktemp -d); mkdir -p "$_s8/cert" "$_s8/sites" "$_s8/empty"
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$_s8/k.pem" -out "$_s8/c.pem" -days 2 \
+    -subj "/CN=old.example.com" -addext "subjectAltName=DNS:old.example.com" >/dev/null 2>&1
+cp "$_s8/c.pem" "$_s8/cert/fullchain.cer"; cp "$_s8/k.pem" "$_s8/cert/private.key"
+printf 'site.example.com {\n\ttls %s/cert/fullchain.cer %s/cert/private.key\n\tfile_server\n}\n' "$_s8" "$_s8" > "$_s8/sites/site.caddy"
+_s8_before=$(sha256sum "$_s8/cert/fullchain.cer" | cut -d' ' -f1)
+_s8_cd="$CERT_DIR"; _s8_sites="${CADDY_SITES_DIR-}"
+CERT_DIR="$_s8/cert"; CADDY_SITES_DIR="$_s8/sites"
+issue_cert_bundle "site.example.com" "" "203.0.113.7" > "$_s8/o" 2>&1; _s8_rc=$?
+if [[ "$_s8_rc" -ne 0 && "$(sha256sum "$_s8/cert/fullchain.cer" | cut -d' ' -f1)" == "$_s8_before" ]]; then
+    ok "8.7 站点在用 CERT_DIR 证书时拒绝写 IP 自签（证书未变）"
+else
+    bad "8.7 证书被 IP 自签覆盖或未中止" "rc=$_s8_rc"
+fi
+grep -q '未改动任何证书' "$_s8/o" && ok "8.8 中止原因写明「未改动任何证书」" || bad "8.8 缺少中止原因"
+CADDY_SITES_DIR="$_s8/empty"
+issue_cert_bundle "" "" "203.0.113.7" >/dev/null 2>&1; _s8_rc2=$?
+_s8_chk=$(openssl x509 -in "$_s8/cert/fullchain.cer" -noout -checkhost 203.0.113.7 2>/dev/null || true)
+if [[ "$_s8_rc2" -eq 0 ]] && grep -q 'does match' <<<"$_s8_chk"; then
+    ok "8.9 没有站点引用时仍正常降级为 IP 自签"
+else
+    bad "8.9 正常自签路径被破坏"
+fi
+CERT_DIR="$_s8_cd"; if [[ -n "$_s8_sites" ]]; then CADDY_SITES_DIR="$_s8_sites"; else unset CADDY_SITES_DIR; fi; rm -rf "$_s8"
+
 # ---------- 9. 全量回归：幂等性静态断言 ----------
 group "9. 全量回归：幂等性静态断言"
 grep -q 'iptables -t nat -F PREROUTING' "$TARGET" && bad "存在 iptables 全表清空炸弹" || ok "无 iptables 全表清空"
@@ -433,53 +459,71 @@ LEFT2=$(find "$E2E" -name '*.tmp.*' 2>/dev/null | wc -l)
 [[ "$LEFT2" -eq 0 ]] && ok "11.13 重复调用后无残留" || bad "11.13 重复调用残留 $LEFT2 个"
 rm -rf "$E2E"
 
-# ---------- 12. Caddyfile 不监听 80 端口 ----------
-group "12. Caddyfile auto_https disable_redirects"
+# ---------- 12. Caddyfile：只在仍是本脚本骨架时才写 ----------
+group "12. Caddyfile 归属与 80 端口"
 if grep -q 'auto_https disable_redirects' "$TARGET"; then
     ok "12.1 脚本写入的 Caddyfile 含 disable_redirects"
 else
     bad "12.1 脚本未写 disable_redirects（会意外监听 80）"
 fi
-if grep -q "cat > /etc/caddy/Caddyfile <<'CADDYEOF'" "$TARGET"; then
+if grep -q 'cat > "\$caddyfile" <<.CADDYEOF.' "$TARGET"; then
     ok "12.2 使用 heredoc 写入完整全局块"
 else
     bad "12.2 未用 heredoc 写全局块"
 fi
-if grep -q 'caddyfile_created_by_script' "$TARGET" &&    grep -q 'auto_https disable_redirects.*Caddyfile\|grep -q "auto_https disable_redirects" /etc/caddy/Caddyfile' "$TARGET"; then
-    ok "12.3 存在旧版 Caddyfile 升级修复逻辑"
+
+# 12.3-12.7 直接调用 ensure_caddyfile（不再在测试里复刻实现——复刻出来的副本会和实现漂移）
+CD=$(mktemp -d); mkdir -p "$CD/conf"
+_save_cf="${CADDYFILE:-}"; _save_cd="$CONF_DIR"; CONF_DIR="$CD/conf"
+
+CADDYFILE="$CD/new/Caddyfile"
+_a=$(ensure_caddyfile)
+if [[ "$_a" == "written" ]] && grep -q 'auto_https disable_redirects' "$CADDYFILE" \
+   && [[ "$(grep -c '^import sites/\*\.caddy$' "$CADDYFILE")" == "1" ]]; then
+    ok "12.3 新装写入骨架（含 disable_redirects，import 只有一行）"
 else
-    bad "12.3 缺少旧版升级修复"
+    bad "12.3 新装骨架不对" "$_a"
+fi
+_h1=$(sha256sum "$CADDYFILE" | cut -d' ' -f1); _a=$(ensure_caddyfile); _h2=$(sha256sum "$CADDYFILE" | cut -d' ' -f1)
+if [[ "$_a" == "ours" && "$_h1" == "$_h2" ]]; then ok "12.4 规范骨架重复执行不改文件"; else bad "12.4 幂等失败" "$_a"; fi
+
+CADDYFILE="$CD/legacy/Caddyfile"; mkdir -p "$CD/legacy"; printf 'import sites/*.caddy\n' > "$CADDYFILE"
+_a=$(ensure_caddyfile)
+if grep -q 'auto_https disable_redirects' "$CADDYFILE" && [[ "$(grep -c '^import sites/\*\.caddy$' "$CADDYFILE")" == "1" ]]; then
+    ok "12.5 旧版 import-only Caddyfile 升级后含 disable_redirects"
+else
+    bad "12.5 旧版升级失败" "$_a"
 fi
 
-# 功能验证：模拟老版本 Caddyfile 升级
-CD=$(mktemp -d); mkdir -p "$CD/etc/caddy" "$CD/conf"
-printf 'import sites/*.caddy\n' > "$CD/etc/caddy/Caddyfile"
-: > "$CD/conf/.caddyfile_created_by_script"
-(
-  CONF_DIR="$CD/conf"; CF="$CD/etc/caddy/Caddyfile"
-  if [[ -f "${CONF_DIR}/.caddyfile_created_by_script" ]] && ! grep -q "auto_https disable_redirects" "$CF"; then
-    t=$(mktemp "$CD/etc/caddy/.Caddyfile.XXXXXX")
-    { printf '{\n\tauto_https disable_redirects\n}\n'
-      grep -v '^import sites/\*\.caddy$' "$CF" | sed '/^$/d'
-      printf 'import sites/*.caddy\n'; } > "$t"
-    mv -f "$t" "$CF"
-  fi
-)
-grep -q 'auto_https disable_redirects' "$CD/etc/caddy/Caddyfile" && ok "12.4 老版 Caddyfile 升级后含 disable_redirects" || bad "12.4 升级未生效"
-[[ $(grep -c '^import sites/\*\.caddy$' "$CD/etc/caddy/Caddyfile") -eq 1 ]] && ok "12.5 import 行未重复" || bad "12.5 import 行重复"
+CADDYFILE="$CD/user/Caddyfile"; mkdir -p "$CD/user"
+printf 'example.com {\n  reverse_proxy localhost:3000\n}\n' > "$CADDYFILE"
+_cp="$CD/user/orig"; cp "$CADDYFILE" "$_cp"
+_a=$(ensure_caddyfile)
+if grep -q 'reverse_proxy localhost:3000' "$CADDYFILE" && [[ "$(grep -c '^import sites/\*\.caddy$' "$CADDYFILE")" == "1" ]] \
+   && [[ "$(head -3 "$CADDYFILE")" == "$(cat "$_cp")" ]]; then
+    ok "12.6 用户 Caddyfile 只追加 import，内容原样"
+else
+    bad "12.6 用户 Caddyfile 被改写" "$_a"
+fi
 
-# 用户自有 Caddyfile 不得被改
-CD2=$(mktemp -d); mkdir -p "$CD2/etc/caddy" "$CD2/conf"
-printf 'example.com {\n  reverse_proxy localhost:3000\n}\n' > "$CD2/etc/caddy/Caddyfile"
-cp "$CD2/etc/caddy/Caddyfile" "$CD2/orig"
-(
-  CONF_DIR="$CD2/conf"; CF="$CD2/etc/caddy/Caddyfile"
-  if [[ -f "${CONF_DIR}/.caddyfile_created_by_script" ]] && ! grep -q "auto_https disable_redirects" "$CF"; then
-    echo "SHOULD_NOT_RUN" > "$CF"
-  fi
-)
-diff -q "$CD2/orig" "$CD2/etc/caddy/Caddyfile" >/dev/null && ok "12.6 用户自有 Caddyfile 未被改动" || bad "12.6 用户 Caddyfile 被误改"
-rm -rf "$CD" "$CD2"
+CADDYFILE="$CD/user2/Caddyfile"; mkdir -p "$CD/user2"
+printf '{ auto_https off }\nexample.com {\n  reverse_proxy localhost:3000\n}\nimport sites/*.caddy\n' > "$CADDYFILE"
+_b=$(sha256sum "$CADDYFILE" | cut -d' ' -f1); _a=$(ensure_caddyfile)
+if [[ "$_a" == "foreign" && "$(sha256sum "$CADDYFILE" | cut -d' ' -f1)" == "$_b" ]]; then
+    ok "12.7 用户改过的 Caddyfile 原样保留（foreign）"
+else
+    bad "12.7 用户 Caddyfile 被改动" "$_a"
+fi
+_un_all=$(awk '/^uninstall_all\(\) \{/,/^}/' "$TARGET")
+# 先落变量再匹配：set -o pipefail 下 `awk | grep -q` 会因 SIGPIPE 假红
+if grep -q 'caddyfile_is_ours' <<<"$_un_all"; then
+    ok "12.8 卸载按内容判 Caddyfile 归属"
+else
+    bad "12.8 卸载仍只看标记，会误删用户 Caddyfile"
+fi
+
+CONF_DIR="$_save_cd"; if [[ -n "$_save_cf" ]]; then CADDYFILE="$_save_cf"; else unset CADDYFILE; fi
+rm -rf "$CD"
 
 # ---------- 13. 端口占用判定：Caddy 只在订阅端口上算可复用 ----------
 group "13. 端口占用判定"

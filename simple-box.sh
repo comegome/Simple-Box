@@ -694,8 +694,20 @@ issue_cert_bundle() {
     else
         [[ -n "$domain" ]] && {
             echo -e "${RED}域名证书申请失败（Token 权限、域名拼写或 CF 网络问题）。${PLAIN}"
-            echo -e "${YELLOW}已自动降级为 10 年期 IP 自签证书，保证节点立即可用。${PLAIN}"
         }
+        # 伪装站 / 接入域站点用的就是 CERT_DIR 里这份证书。此时写 IP 自签会让站点与
+        # Reality 回落一起失效（客户端 x509 域名不匹配），而安装日志还会说「节点可用」。
+        # 按「不破坏原有站点」优先的规则：直接中止，一个字节都不改。
+        local _cert_users
+        _cert_users=$(sites_using_cert_dir)
+        if [[ -n "$_cert_users" ]]; then
+            echo -e "${RED}✗ 本机站点正在使用 ${CERT_DIR} 的证书：${PLAIN}"
+            printf '    %s\n' $_cert_users
+            echo -e "${YELLOW}  改成 IP 自签会让这些站点与 Reality 回落一起失效，已中止（未改动任何证书）。${PLAIN}"
+            echo -e "${YELLOW}  修好 Token / DNS 后重跑安装；或先停用 Reality、移走站点再装。${PLAIN}"
+            return 1
+        fi
+        echo -e "${YELLOW}已自动降级为 10 年期 IP 自签证书，保证节点立即可用。${PLAIN}"
         # 模式 B: 为公网 IP 生成 10 年自签 ECC 证书（含公私钥配对严格校验）
         if ! issue_self_signed_cert "$server_ip"; then
             echo -e "${RED}自签证书生成失败。${PLAIN}"
@@ -902,6 +914,54 @@ verify_caddy_listening() {
     return 1
 }
 
+# ---- Caddyfile 归属：内容判据，不是标记判据 ----
+# 标记只说明「装的时候是我写的」；用户完全可能之后在这份文件里加站点或全局选项。
+# 只有内容仍是脚本骨架（或旧版「只有 import 一行」）才算我们的，才敢重写/删除。
+caddyfile_is_ours() {
+    local f="${CADDYFILE:-/etc/caddy/Caddyfile}" body skeleton
+    [[ -f "$f" ]] || return 1
+    body=$(cat "$f")
+    skeleton=$(printf '{\n\t# 本机只有订阅站点，不需要 HTTP->HTTPS 重定向，避免额外监听 80\n\tauto_https disable_redirects\n}\nimport sites/*.caddy')
+    [[ "$body" == "$skeleton" ]] && return 0
+    [[ "$(printf '%s' "$body" | sed '/^[[:space:]]*$/d')" == "import sites/*.caddy" ]] && return 0
+    return 1
+}
+
+# 决定 Caddyfile 怎么处理，打印 written / appended / ours / foreign 之一。
+#   written  新装或旧版骨架 → 写成规范形态（含 auto_https disable_redirects）
+#   appended 我们的文件以外、缺 import → 只追加一行（订阅站靠它加载）
+#   ours     已经是规范形态 → 一个字节都不动
+#   foreign  用户改过且已有 import → 保留原样
+ensure_caddyfile() {
+    local caddyfile="${CADDYFILE:-/etc/caddy/Caddyfile}" ours=false
+    mkdir -p "$(dirname "$caddyfile")" 2>/dev/null || true
+    [[ -f "$caddyfile" ]] && caddyfile_is_ours && ours=true
+
+    if [[ ! -f "$caddyfile" ]] || [[ "$ours" == "true" ]]; then
+        if [[ ! -f "$caddyfile" ]] || ! grep -q "auto_https disable_redirects" "$caddyfile"; then
+            cat > "$caddyfile" <<'CADDYEOF'
+{
+	# 本机只有订阅站点，不需要 HTTP->HTTPS 重定向，避免额外监听 80
+	auto_https disable_redirects
+}
+import sites/*.caddy
+CADDYEOF
+            printf 'written\n'
+        else
+            printf 'ours\n'
+        fi
+        : > "${CONF_DIR}/.caddyfile_created_by_script" 2>/dev/null || true
+        return 0
+    fi
+    if ! grep -q "import sites/\*\\.caddy" "$caddyfile"; then
+        printf '\nimport sites/*.caddy\n' >> "$caddyfile"
+        : > "${CONF_DIR}/.caddyfile_appended_by_script" 2>/dev/null || true
+        printf 'appended\n'
+        return 0
+    fi
+    printf 'foreign\n'
+}
+
 # 部署 Caddy 证书管理服务
 setup_caddy_subscription() {
     local domain_or_ip="${1:-}"
@@ -923,38 +983,16 @@ setup_caddy_subscription() {
     harden_private_key
 
     mkdir -p "/etc/caddy/sites"
-    
-    # 若 Caddy 为本脚本安装，或 Caddyfile 尚不存在：写入纯净配置，绝不监听 80 端口（杜绝与 Nginx/Apache 冲突）
-    # 必须显式写 auto_https disable_redirects：只写 import 时 Caddy 仍会为 HTTPS 站点自动
-    # 监听 80 做 HTTP->HTTPS 重定向，凭空多出一个公网入口。
-    if [ ! -f /etc/caddy/Caddyfile ] || [[ -f "${CONF_DIR}/.caddy_installed_by_script" ]]; then
-        cat > /etc/caddy/Caddyfile <<'CADDYEOF'
-{
-	# 本机只有订阅站点，不需要 HTTP->HTTPS 重定向，避免额外监听 80
-	auto_https disable_redirects
-}
-import sites/*.caddy
-CADDYEOF
-        : > "${CONF_DIR}/.caddyfile_created_by_script" 2>/dev/null || true
-    elif ! grep -q "import sites/\*\.caddy" /etc/caddy/Caddyfile; then
-        echo -e "\nimport sites/*.caddy" >> /etc/caddy/Caddyfile
-        : > "${CONF_DIR}/.caddyfile_appended_by_script" 2>/dev/null || true
-    fi
 
-    # 旧版脚本写出的 Caddyfile 只有 import 行，会意外监听 80。已归属本脚本的配置补上
-    # disable_redirects；用户自己的 Caddyfile 不动（其 80 端口可能承载真实服务）。
-    if [[ -f "${CONF_DIR}/.caddyfile_created_by_script" ]] \
-        && ! grep -q "auto_https disable_redirects" /etc/caddy/Caddyfile; then
-        local tmp_caddyfile
-        tmp_caddyfile=$(mktemp /etc/caddy/.Caddyfile.XXXXXX)
-        {
-            printf '{\n\t# 本机只有订阅站点，不需要 HTTP->HTTPS 重定向，避免额外监听 80\n\tauto_https disable_redirects\n}\n'
-            grep -v '^import sites/\*\.caddy$' /etc/caddy/Caddyfile | sed '/^$/d'
-            printf 'import sites/*.caddy\n'
-        } > "$tmp_caddyfile"
-        mv -f "$tmp_caddyfile" /etc/caddy/Caddyfile
-        echo -e "${GREEN}已为旧版 Caddyfile 补上 auto_https disable_redirects（停止监听 80）${PLAIN}"
-    fi
+    # Caddyfile 只在「文件不存在」或「内容仍是本脚本那份骨架」时才写。
+    # 用户在这份文件里加过站点/全局选项时一律保留（只写 sites/ 下的订阅站点），
+    # 否则一次保存订阅就会把人家自己的站点抹掉。
+    local _cf_action
+    _cf_action=$(ensure_caddyfile)
+    case "$_cf_action" in
+        foreign) echo -e "${CYAN}检测到 Caddyfile 已被修改，保留原样（订阅站只写 sites/）${PLAIN}" ;;
+        appended) echo -e "${GRAY}已在 Caddyfile 追加 import sites/*.caddy${PLAIN}" ;;
+    esac
 
     # 清理所有旧版 simple-box caddy 配置文件
     rm -f /etc/caddy/sites/*-${sub_port}.caddy /etc/caddy/sites/simple-box*.caddy
@@ -2210,6 +2248,17 @@ uninstall_all() {
         fi
         rm -f /etc/caddy/sites/*-"${SUB_PORT:-8444}".caddy /etc/caddy/sites/simple-box*.caddy
         systemctl reload caddy 2>/dev/null || true
+
+        # ufw 放行规则不自动删除：无法区分「本脚本加的」与「用户本来就有的同端口规则」。
+        # 按「宁松勿紧」的取舍，保留规则、把端口列出来让用户自己决定。
+        if command -v ufw &>/dev/null && ufw status 2>/dev/null | grep -qw "active"; then
+            local _uports
+            _uports=$(grep -hoP '^(VL_PORT|HY_PORT|SUB_PORT|EXIT_ENTRY_VL|EXIT_ENTRY_HY|EXIT2_ENTRY_VL|EXIT2_ENTRY_HY)="\K[^"]+' "$ENV_FILE" 2>/dev/null | sort -un | tr '\n' ' ')
+            if [[ -n "${_uports// /}" ]]; then
+                echo -e "${YELLOW}ufw 里的放行规则不会自动删除，曾用到的端口: ${_uports}${PLAIN}"
+                echo -e "${YELLOW}  需要清理: ${CYAN}ufw status numbered${YELLOW} 后 ${CYAN}ufw delete <编号>${PLAIN}"
+            fi
+        fi
     fi
 
     # 伪装站点同样是本脚本生成的：camo-*.caddy + 它声明的 /var/www 目录一起清掉，
@@ -2244,6 +2293,15 @@ uninstall_all() {
     [[ -f "${CONF_DIR}/.caddy_installed_by_script" ]] && caddy_owned=true
     [[ -f "${CONF_DIR}/.caddyfile_created_by_script" ]] && caddyfile_created=true
     [[ -f "${CONF_DIR}/.caddyfile_appended_by_script" ]] && caddyfile_appended=true
+
+    # 标记只说明「装的时候是我写的」。用户之后在这份 Caddyfile 里加过站点或全局选项时，
+    # 按标记删文件 = 连人家的站点一起删。内容不再是脚本骨架就一律按用户所有处理：
+    # 保留 Caddyfile、保留 import 行、保留 caddy 包，只删本脚本的站点文件。
+    if [[ "$caddyfile_created" == "true" ]] && ! caddyfile_is_ours; then
+        caddyfile_created=false
+        caddy_owned=false
+        echo -e "${YELLOW}检测到 Caddyfile 已被修改（不再是本脚本写入的形态），将保留 Caddyfile 与 Caddy 软件包${PLAIN}"
+    fi
 
     # 关键判定：sites 目录里是否还有「不是本脚本的」站点。
     # 场景：脚本装了 caddy（有归属标记），用户后来用这个 caddy 跑了自己的服务。
@@ -2554,6 +2612,17 @@ site_file_for() {
     done
     (( ${#hits[@]} )) || return 1
     printf '%s\n' "${hits[0]}"
+}
+
+# 有站点块直接引用 CERT_DIR 的证书（翻转后的伪装站、接入域站点）。
+# 这些站点一旦被 IP 自签覆盖就会当场失效，所以证书降级前必须先问一句。
+sites_using_cert_dir() {
+    local dir="${CADDY_SITES_DIR:-/etc/caddy/sites}" main="${CADDYFILE:-/etc/caddy/Caddyfile}" f
+    for f in "$dir"/*.caddy "$main"; do
+        [[ -f "$f" ]] || continue
+        grep -qE "^[[:space:]]*tls[[:space:]]+${CERT_DIR}/" "$f" && printf '%s\n' "$f"
+    done
+    return 0
 }
 
 # 外部伪装域名必须支持 TLS 1.3 + h2，否则 Reality 握手失败但配置看起来正常

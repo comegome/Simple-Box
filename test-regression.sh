@@ -350,7 +350,7 @@ else
 fi
 
 # 10.2 发布订阅的动作序列：render_and_reload 自己生成；install_node 委托给协议模块
-_body=$(awk '/^render_and_reload\(\)/ {p=1} p {print} p && /^}/ && NR>1 {exit}' "$TARGET")
+_body=$(awk '/^_render_and_reload\(\)/ {p=1} p {print} p && /^}/ && NR>1 {exit}' "$TARGET")
 _has_gen=$(grep -cE 'regen_subscription|generate_full_client_config' <<<"$_body")
 _has_setup=$(grep -c 'setup_caddy_subscription' <<<"$_body")
 if [[ "$_has_gen" -ge 1 && "$_has_setup" -ge 1 ]]; then
@@ -1487,7 +1487,7 @@ _gf=$(awk '/^generate_full_client_config\(\) \{/,/^}/' "$TARGET" | sed '/^[[:spa
 grep -q 'exit_active_slots' <<<"$_gf" && ok "30.5 策略组按槽遍历" || bad "30.5 策略组未按槽遍历"
 
 # 30.6 render_and_reload 里先 sync_env_locals，再 apply_exit_config
-_rr=$(awk '/^render_and_reload\(\) \{/,/^}/' "$TARGET" | sed '/^[[:space:]]*#/d')
+_rr=$(awk '/^_render_and_reload\(\) \{/,/^}/' "$TARGET" | sed '/^[[:space:]]*#/d')
 _s=$(grep -n 'sync_env_locals' <<<"$_rr" | head -1 | cut -d: -f1)
 _a=$(grep -n 'apply_exit_config' <<<"$_rr" | head -1 | cut -d: -f1)
 [[ -n "$_s" && -n "$_a" && "$_s" -lt "$_a" ]] \
@@ -1899,6 +1899,41 @@ TMP_CLEANUP=( "$_t32/junk" ); cleanup_tmp
 [[ ! -d "$_t32/junk" ]] && ok "32.24 cleanup_tmp 清目录与文件" || bad "32.24 cleanup_tmp 未清干净"
 TMP_CLEANUP=()
 rm -rf "$_t32"
+
+# ---------- 33. 写路径互斥（flock 只包 render_and_reload） ----------
+group "33. 写路径互斥"
+
+_lock_fixed=$(grep -c '^SIMBO_LOCK="/run/simbo.lock"' "$TARGET")
+[[ "$_lock_fixed" -eq 1 ]] \
+    && ok "33.1 锁文件是固定路径（不同实例锁同一个文件）" \
+    || bad "33.1 锁文件路径不是固定值" "命中 ${_lock_fixed} 处"
+
+_wrap=$(awk '/^render_and_reload\(\) \{/,/^}/' "$TARGET")
+if grep -q 'flock -w' <<<"$_wrap"; then
+    ok "33.2 包装层取锁且有等待上限（不会无限阻塞）"
+else
+    bad "33.2 包装层未取锁或无 -w 上限"
+fi
+
+if grep -q '_render_and_reload' <<<"$_wrap"; then
+    ok "33.3 包装层调用真正的写入实现"
+else
+    bad "33.3 包装层没有调用 _render_and_reload"
+fi
+
+_body33=$(awk '/^_render_and_reload\(\) \{/,/^}/' "$TARGET")
+_body_flock=$(grep -c 'flock' <<<"$_body33")
+[[ "$_body_flock" -eq 0 ]] \
+    && ok "33.4 写入实现内部不再取锁（避免自锁/嵌套）" \
+    || bad "33.4 函数体内又取了锁" "命中 ${_body_flock} 处"
+
+# 锁必须只覆盖写路径：菜单入口不得取锁
+_menu33=$(awk '/^menu\(\) \{/,/^}/' "$TARGET")
+if grep -q 'flock' <<<"$_menu33"; then
+    bad "33.5 菜单入口取了锁（会把「看状态」也拦住）"
+else
+    ok "33.5 菜单入口不取锁，只拦写路径"
+fi
 
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null

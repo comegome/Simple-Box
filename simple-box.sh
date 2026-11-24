@@ -12,6 +12,8 @@ PLAIN=$'\033[0m'
 GRAY=$'\033[0;90m'
 BOLD=$'\033[1m'
 
+# 写配置的互斥锁：只包 render_and_reload 这一段，不拦「开着面板看状态」的另一个实例
+SIMBO_LOCK="/run/simbo.lock"
 CONF_DIR="/etc/sing-box"
 CONF_FILE="${CONF_DIR}/config.json"
 CERT_DIR="${CONF_DIR}/cert"
@@ -1692,8 +1694,28 @@ EOF
 
 }
 
-# 校验 sing-box 配置、重启并全量刷新客户端文件与 Caddy 订阅
+# 校验 sing-box 配置、重启并全量刷新客户端文件与 Caddy 订阅。
+# 这是唯一会改配置/重启服务/重建订阅的写路径，两个实例同时进来会互相覆盖
+# （结果取决于谁最后 restart），所以在这里串行化。锁只包这一段：菜单本身不取锁。
 render_and_reload() {
+    local _fd
+    if ! exec {_fd}>"$SIMBO_LOCK"; then
+        echo -e "${RED}无法创建锁文件 ${SIMBO_LOCK}，本次未执行。${PLAIN}"
+        return 1
+    fi
+    if ! flock -w 5 "$_fd"; then
+        exec {_fd}>&-
+        echo -e "${RED}另一个 simbo 实例正在写配置（等待 5 秒未拿到锁），本次未执行。${PLAIN}"
+        return 1
+    fi
+    local _rc=0
+    _render_and_reload || _rc=$?
+    flock -u "$_fd"
+    exec {_fd}>&-
+    return "$_rc"
+}
+
+_render_and_reload() {
     if [[ ! -x /usr/local/bin/sing-box ]]; then
         echo -e "${RED}未找到 sing-box 内核，无法应用配置。${PLAIN}"
         return 1

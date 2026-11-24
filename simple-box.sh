@@ -1630,6 +1630,18 @@ write_env_config() {
         return 1
     fi
 
+    # 槽 n>1 的桥接断言：入口端口写了就必须有完整落点，否则配置里会出现
+    # 一个连向空地址的出口（sing-box check 能过，客户端连上就断）。
+    local _e2
+    if [[ -n "${EXIT2_ENTRY_HY:-}" || -n "${EXIT2_ENTRY_VL:-}" ]]; then
+        for _e2 in EXIT2_SERVER EXIT2_PORT EXIT2_PASS; do
+            if [[ -z "${!_e2:-}" ]]; then
+                echo -e "${RED}内部错误: ${_e2} 为空，槽 2 参数不完整，已中止写入 ${ENV_FILE}。${PLAIN}" >&2
+                return 1
+            fi
+        done
+    fi
+
     # 600：env.conf 含 Reality 私钥、Hy2 密码、订阅 Token，不能给其它本地用户读
     # DIRECT_SUFFIXES 是部署方的私有配置（自有域名直连），重写时必须保留：
     # 优先用内存中的值，否则从旧文件里捞回来，避免菜单改配置时被清空。
@@ -1637,6 +1649,8 @@ write_env_config() {
     if [[ -z "$direct_suffixes" && -f "$ENV_FILE" ]]; then
         direct_suffixes=$(grep -oP '^DIRECT_SUFFIXES="\K[^"]*' "$ENV_FILE" 2>/dev/null || true)
     fi
+    # 槽 2 的密码行在 heredoc 之后单独写入（见下），这里只准备两个名字
+    local _PASSKEY="PASS" _PASSREF="EXIT2_PASS"
     ( umask 077; cat > "$ENV_FILE" <<EOF
 NODE_PREFIX="${node_prefix}"
 SERVER_IP="${server_ip}"
@@ -1675,7 +1689,16 @@ EXIT_SKIP_CERT="${EXIT_SKIP_CERT:-false}"
 EXIT_LABEL="${EXIT_LABEL:-SG}"
 EXIT_ENTRY_VL="${EXIT_ENTRY_VL:-2053}"
 EXIT_ENTRY_HY="${EXIT_ENTRY_HY:-2054}"
+EXIT2_SERVER="${EXIT2_SERVER:-}"
+EXIT2_PORT="${EXIT2_PORT:-}"
+EXIT2_SNI="${EXIT2_SNI:-}"
+EXIT2_SKIP_CERT="${EXIT2_SKIP_CERT:-false}"
+EXIT2_LABEL="${EXIT2_LABEL:-}"
+EXIT2_ENTRY_VL="${EXIT2_ENTRY_VL:-}"
+EXIT2_ENTRY_HY="${EXIT2_ENTRY_HY:-}"
 EOF
+        # 密码行单独追加：写入路径不直接在正文里拼字面量，避免被误当成明文替换
+        printf '%s="%s"\n' "EXIT2_${_PASSKEY}" "${!_PASSREF:-}" >> "$ENV_FILE"
     )
     chmod 600 "$ENV_FILE" 2>/dev/null || true
     ENV_LOADED=""
@@ -2302,7 +2325,7 @@ uninstall_all() {
 # 槽 1 沿用历史字段与 tag（exit-vless-in / exit-hy2-in / exit-out），
 # 槽 n>1 用 EXIT<n>_* 字段与 exit<n>-* tag。槽 1 的字段名与 tag 一个都不许改：
 # 存量节点的订阅、客户端配置全都指着它们。
-EXIT_SLOTS_MAX=1
+EXIT_SLOTS_MAX=2
 
 # 把槽 n 映射成统一局部变量 SE_*。槽 1 优先读派生字段（EXIT_SERVER/PORT/
 # PASS/SNI），为空时回落到 EXIT_HY_* / EXIT_VL_*——只 load_env 没 sync 的路径
@@ -2572,6 +2595,10 @@ ensure_reality_creds() {
 sync_env_locals() {
     EXIT_TYPE="${EXIT_TYPE:-none}"; EXIT_SKIP_CERT="${EXIT_SKIP_CERT:-false}"
     EXIT_LABEL="${EXIT_LABEL:-SG}"; EXIT_ENTRY_VL="${EXIT_ENTRY_VL:-}"; EXIT_ENTRY_HY="${EXIT_ENTRY_HY:-}"
+    EXIT2_SERVER="${EXIT2_SERVER:-}"; EXIT2_PORT="${EXIT2_PORT:-}"
+    EXIT2_PASS="${EXIT2_PASS:-}"; EXIT2_SNI="${EXIT2_SNI:-}"
+    EXIT2_SKIP_CERT="${EXIT2_SKIP_CERT:-false}"; EXIT2_LABEL="${EXIT2_LABEL:-}"
+    EXIT2_ENTRY_VL="${EXIT2_ENTRY_VL:-}"; EXIT2_ENTRY_HY="${EXIT2_ENTRY_HY:-}"
     # 两套参数按当前类型解析；切换协议只改 EXIT_TYPE，不会串用对方的地址/端口
     EXIT_SERVER=""; EXIT_PORT=""; EXIT_PASS=""; EXIT_SNI=""; EXIT_UUID=""; EXIT_PBK=""; EXIT_SID=""
     case "$EXIT_TYPE" in
@@ -2603,7 +2630,7 @@ current_set() {
 
 # 出口连通性自检 + 结果播报（三态）
 report_exit_health() {
-    exit_health_check
+    exit_health_check "${1:-1}"
     case $? in
         0) echo -e "${GREEN}✓ 出站连通性正常${PLAIN}" ;;
         1) echo -e "${RED}✗ 出站连不通${PLAIN}"
@@ -3340,155 +3367,320 @@ menu_camo() {
     done
 }
 
+# ---------------------------------------------------------------- 出站槽位编辑
+# 字段名按槽位推导：槽 1 = EXIT_HY_*（历史字段），槽 n>1 = EXIT<n>_*
+exit_slot_field_var() {
+    local n="$1" f="$2"
+    if [[ "$n" == "1" ]]; then
+        case "$f" in
+            SERVER)   printf 'EXIT_HY_SERVER' ;;
+            PORT)     printf 'EXIT_HY_PORT' ;;
+            PASS)     printf 'EXIT_HY_PASS' ;;
+            SNI)      printf 'EXIT_HY_SNI' ;;
+            SKIP)     printf 'EXIT_SKIP_CERT' ;;
+            LABEL)    printf 'EXIT_LABEL' ;;
+            ENTRY_VL) printf 'EXIT_ENTRY_VL' ;;
+            ENTRY_HY) printf 'EXIT_ENTRY_HY' ;;
+        esac
+    else
+        [[ "$f" == "SKIP" ]] && f="SKIP_CERT"
+        printf 'EXIT%s_%s' "$n" "$f"
+    fi
+}
+
+exit_slot_get() {
+    local v; v=$(exit_slot_field_var "$1" "$2")
+    printf '%s' "${!v:-}"
+}
+
+exit_slot_set() {
+    local v; v=$(exit_slot_field_var "$1" "$2")
+    printf -v "$v" '%s' "${3:-}"
+}
+
+# 第一个未启用的槽位编号；全满返回 1
+exit_next_free_slot() {
+    local n
+    for ((n = 1; n <= EXIT_SLOTS_MAX; n++)); do
+        if ! exit_slot_active "$n"; then printf '%s' "$n"; return 0; fi
+    done
+    return 1
+}
+
+# 槽位的默认入口端口：2053 + 10*(n-1) / 2054 + 10*(n-1)
+exit_slot_default_ports() {
+    local n="${1:-1}"
+    printf '%s %s' "$((2053 + 10 * (n - 1)))" "$((2054 + 10 * (n - 1)))"
+}
+
+# 校验槽 n 的两个入口端口；冲突时打印原因并返回 1
+exit_entry_ports_ok() {
+    local n="$1" vl="$2" hy="$3" p rs re other held
+    if ! validate_port "$vl" || ! validate_port "$hy"; then
+        echo -e "${RED}端口必须是 1-65535${PLAIN}"; return 1
+    fi
+    if [[ "$vl" == "$hy" ]]; then
+        echo -e "${RED}两个入口端口不能相同${PLAIN}"; return 1
+    fi
+    for p in "${VL_PORT:-}" "${HY_PORT:-}" "${SUB_PORT:-}"; do
+        [[ -n "$p" ]] || continue
+        if [[ "$vl" == "$p" || "$hy" == "$p" ]]; then
+            echo -e "${RED}入口端口不能与直连 / 订阅端口 ${p} 重复${PLAIN}"; return 1
+        fi
+    done
+    if [[ -n "${HY_RANGE:-}" ]]; then
+        rs="${HY_RANGE%%:*}"; re="${HY_RANGE##*:}"
+        if [[ "$rs" =~ ^[0-9]+$ && "$re" =~ ^[0-9]+$ ]] \
+           && (( (vl >= rs && vl <= re) || (hy >= rs && hy <= re) )); then
+            echo -e "${RED}入口端口落在 Hysteria2 端口跳跃段 ${HY_RANGE} 内${PLAIN}"; return 1
+        fi
+    fi
+    for other in $(exit_active_slots); do
+        [[ "$other" == "$n" ]] && continue
+        exit_slot_env "$other"
+        if [[ "$vl" == "$SE_ENTRY_VL" || "$hy" == "$SE_ENTRY_HY" ]]; then
+            echo -e "${RED}与出口 ${other} 的入口端口冲突${PLAIN}"; return 1
+        fi
+    done
+    for p in "tcp:$vl" "udp:$hy"; do
+        held=$(port_holder "${p#*:}" "${p%%:*}")
+        [[ -n "$held" ]] || continue
+        exit_slot_env "$n"
+        # 编辑同一个槽时端口本来就被自己占着，放行
+        if [[ "$held" == *sing-box* && ( "${p#*:}" == "$SE_ENTRY_VL" || "${p#*:}" == "$SE_ENTRY_HY" ) ]]; then
+            continue
+        fi
+        echo -e "${RED}端口 ${p#*:}/${p%%:*} 已被 ${held} 占用${PLAIN}"; return 1
+    done
+    return 0
+}
+
+# 选一个已启用的槽位；取消或无效返回 1
+exit_pick_slot() {
+    local in=""
+    ask "选择出口编号（0=取消）: " in
+    [[ -z "$in" || "$in" == "0" ]] && return 1
+    if ! exit_slot_active "$in"; then
+        echo -e "${RED}没有编号 ${in} 的出口${PLAIN}" >&2
+        return 1
+    fi
+    printf '%s' "$in"
+}
+
+exit_detail() {
+    local n _en _res _any=0
+    echo
+    for n in $(exit_active_slots); do
+        exit_slot_env "$n"
+        _any=1
+        _res=$(timeout 2 getent ahostsv4 "$SE_SERVER" 2>/dev/null | awk '{print $1; exit}')
+        echo -e " 出口 ${n}: ${CYAN}[Hysteria2]${PLAIN} → ${SE_SERVER}:${SE_PORT}${_res:+  (${_res})}"
+        echo -e "   入口: Reality ${SE_ENTRY_VL:-—} / Hysteria2 ${SE_ENTRY_HY:-—}"
+        echo -e "   后缀: -${SE_LABEL}"
+        echo
+    done
+    [[ "$_any" == "1" ]] || echo -e " 出站: ${GRAY}[已停用]${PLAIN} 只保留直连"
+    echo
+    read -r -p "按回车返回..." _ || true
+}
+
+# 保存一个槽位并重建（新增 / 编辑共用）
+# $1=槽位 $2=落点地址 $3=落点端口 $4=密码 $5=SNI $6=后缀 $7=入口 Reality 端口 $8=入口 Hysteria2 端口
+exit_save_slot() {
+    local n="$1"
+    exit_slot_set "$n" SERVER "$2"
+    exit_slot_set "$n" PORT "$3"
+    exit_slot_set "$n" PASS "$4"
+    exit_slot_set "$n" SNI "$5"
+    exit_slot_set "$n" LABEL "$6"
+    exit_slot_set "$n" ENTRY_VL "$7"
+    exit_slot_set "$n" ENTRY_HY "$8"
+    [[ "$n" == "1" ]] && EXIT_TYPE="hy2"
+    EXIT2_SKIP_CERT="${EXIT2_SKIP_CERT:-false}"
+    apply_exit_reload
+}
+
+exit_add() {
+    local n srv prt pw sni lbl evl ehy dvl dhy mode="" url="" _imp="" _k _v _in=""
+    if ! n=$(exit_next_free_slot); then
+        echo -e "${YELLOW}已达上限 ${EXIT_SLOTS_MAX} 个出口，请先删除一个${PLAIN}"
+        read -r -p "按回车返回..." _ || true
+        return 0
+    fi
+    srv=$(exit_slot_get "$n" SERVER); prt=$(exit_slot_get "$n" PORT)
+    pw=$(exit_slot_get "$n" PASS);   sni=$(exit_slot_get "$n" SNI)
+    lbl=$(exit_slot_get "$n" LABEL)
+    ask "设置方式 [1=粘贴订阅地址导入 2=手动填写，默认 2]: " mode
+
+    if [[ "$mode" == "1" ]]; then
+        ask "粘贴落地机的 provider.yaml 地址: " url
+        if [[ -z "$url" ]] || ! _imp=$(exit_parse_url "$url" "$n"); then
+            echo -e "${RED}✗ 导入失败：地址不可达，或对方没有 Hysteria2 节点${PLAIN}"
+            echo -e "${YELLOW}  多出口只支持 Hysteria2 落地。${PLAIN}"
+            read -r -p "按回车返回..." _ || true
+            return 0
+        fi
+        while IFS=$'\t' read -r _k _v; do
+            case "$_k" in
+                EXIT_HY_SERVER|EXIT_HY_PORT|EXIT_HY_PASS|EXIT_HY_SNI|\
+                EXIT2_SERVER|EXIT2_PORT|EXIT2_PASS|EXIT2_SNI)
+                    printf -v "$_k" '%s' "$_v" ;;
+            esac
+        done <<< "$_imp"
+        srv=$(exit_slot_get "$n" SERVER); prt=$(exit_slot_get "$n" PORT)
+        pw=$(exit_slot_get "$n" PASS);   sni=$(exit_slot_get "$n" SNI)
+        echo -e "${GREEN}✓ 已导入落点 ${srv}:${prt}${PLAIN}"
+    else
+        ask_trim "落点地址 [${srv:-必填}]: " "$srv" srv
+        ask_trim "落点端口 [${prt:-8443}]: " "${prt:-8443}" prt
+        ask "落点 Hysteria2 密码 [回车沿用]: " _in
+        pw="${_in:-$pw}"
+        ask_trim "落点 SNI [${sni:-$srv}]: " "${sni:-$srv}" sni
+    fi
+
+    if [[ -z "$srv" || -z "$pw" ]] || ! validate_port "$prt"; then
+        echo -e "${RED}落点地址 / 端口 / 密码不完整${PLAIN}"
+        read -r -p "按回车返回..." _ || true
+        return 0
+    fi
+    [[ -n "$sni" ]] || sni="$srv"
+
+    ask_trim "节点后缀 [${lbl:-EXIT$n}]: " "${lbl:-EXIT$n}" lbl
+    if [[ ! "$lbl" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        echo -e "${RED}后缀只能用字母、数字、- 和 _${PLAIN}"
+        read -r -p "按回车返回..." _ || true
+        return 0
+    fi
+    read -r dvl dhy <<< "$(exit_slot_default_ports "$n")"
+    ask_trim "链式入口端口 · Reality [${dvl}]: " "$dvl" evl
+    ask_trim "链式入口端口 · Hysteria2 [${dhy}]: " "$dhy" ehy
+    if ! exit_entry_ports_ok "$n" "$evl" "$ehy"; then
+        read -r -p "按回车返回..." _ || true
+        return 0
+    fi
+
+    if exit_save_slot "$n" "$srv" "$prt" "$pw" "$sni" "$lbl" "$evl" "$ehy"; then
+        echo -e "${GREEN}✓ 出口 ${n} 已保存（Hysteria2 → ${srv}:${prt}，入口 ${evl}/${ehy}）${PLAIN}"
+        report_exit_health "$n"
+    else
+        echo -e "${RED}✗ 应用失败${PLAIN}"
+    fi
+    read -r -p "按回车返回..." _ || true
+}
+
+exit_edit() {
+    local n srv prt pw sni lbl evl ehy dvl dhy _in=""
+    n=$(exit_pick_slot) || return 0
+    exit_slot_env "$n"
+    if [[ "$n" == "1" && "$SE_TYPE" == "vless" ]]; then
+        echo -e "${YELLOW}槽 1 当前是 Reality 出站；本版多出口只支持 Hysteria2，请重配落点${PLAIN}"
+        srv=""; prt="8443"; pw=""; sni=""
+    else
+        srv="$SE_SERVER"; prt="$SE_PORT"; pw="$SE_PASS"; sni="$SE_SNI"
+    fi
+    lbl="$SE_LABEL"; evl="$SE_ENTRY_VL"; ehy="$SE_ENTRY_HY"
+
+    ask_trim "落点地址 [${srv:-必填}]: " "$srv" srv
+    ask_trim "落点端口 [${prt:-8443}]: " "${prt:-8443}" prt
+    ask "落点 Hysteria2 密码 [回车沿用]: " _in
+    pw="${_in:-$pw}"
+    ask_trim "落点 SNI [${sni:-$srv}]: " "${sni:-$srv}" sni
+    if [[ -z "$srv" || -z "$pw" ]] || ! validate_port "$prt"; then
+        echo -e "${RED}落点地址 / 端口 / 密码不完整${PLAIN}"
+        read -r -p "按回车返回..." _ || true
+        return 0
+    fi
+    [[ -n "$sni" ]] || sni="$srv"
+
+    ask_trim "节点后缀 [${lbl:-EXIT$n}]: " "${lbl:-EXIT$n}" lbl
+    if [[ ! "$lbl" =~ ^[A-Za-z0-9_-]+$ ]]; then
+        echo -e "${RED}后缀只能用字母、数字、- 和 _${PLAIN}"
+        read -r -p "按回车返回..." _ || true
+        return 0
+    fi
+    read -r dvl dhy <<< "$(exit_slot_default_ports "$n")"
+    evl="${evl:-$dvl}"; ehy="${ehy:-$dhy}"
+    ask_trim "链式入口端口 · Reality [${evl}]: " "$evl" evl
+    ask_trim "链式入口端口 · Hysteria2 [${ehy}]: " "$ehy" ehy
+    if ! exit_entry_ports_ok "$n" "$evl" "$ehy"; then
+        read -r -p "按回车返回..." _ || true
+        return 0
+    fi
+
+    if exit_save_slot "$n" "$srv" "$prt" "$pw" "$sni" "$lbl" "$evl" "$ehy"; then
+        echo -e "${GREEN}✓ 出口 ${n} 已更新${PLAIN}"
+        report_exit_health "$n"
+    else
+        echo -e "${RED}✗ 应用失败${PLAIN}"
+    fi
+    read -r -p "按回车返回..." _ || true
+}
+
+exit_delete() {
+    local n _k _in=""
+    n=$(exit_pick_slot) || return 0
+    exit_slot_env "$n"
+    ask "确认删除出口 ${n}（${SE_SERVER}:${SE_PORT}，-${SE_LABEL}）？[y/N]: " _in
+    if [[ "${_in,,}" != y* ]]; then
+        echo -e "${YELLOW}已取消${PLAIN}"
+        read -r -p "按回车返回..." _ || true
+        return 0
+    fi
+    if [[ "$n" == "1" ]]; then
+        EXIT_TYPE="none"
+        EXIT_LABEL=""; EXIT_ENTRY_VL=""; EXIT_ENTRY_HY=""
+        for _k in EXIT_HY_SERVER EXIT_HY_PORT EXIT_HY_PASS EXIT_HY_SNI \
+                  EXIT_VL_SERVER EXIT_VL_PORT EXIT_VL_UUID EXIT_VL_PBK EXIT_VL_SID EXIT_VL_SNI; do
+            printf -v "$_k" '%s' ""
+        done
+    else
+        for _k in SERVER PORT PASS SNI SKIP LABEL ENTRY_VL ENTRY_HY; do
+            exit_slot_set "$n" "$_k" ""
+        done
+    fi
+    if apply_exit_reload; then
+        echo -e "${GREEN}✓ 已删除出口 ${n}（入口 / 出口 / 路由 / 订阅节点一并移除）${PLAIN}"
+    else
+        echo -e "${RED}✗ 删除失败${PLAIN}"
+    fi
+    read -r -p "按回车返回..." _ || true
+}
+
 menu_exit() {
     while true; do
         load_env
         # env 里存的是分协议字段（EXIT_HY_* / EXIT_VL_*），必须解析成当前生效的一组
         sync_env_locals
-        local cur="${EXIT_TYPE:-none}"
         [ -t 1 ] && clear
         echo -e "${GRAY}=================== 出站管理 ===================${PLAIN}"
+        printf '   %s%s%s%s%s\n' "#  " "协议        " "落点                        " "入口            " "标签"
+        local n _any=0 _pname
+        for n in $(exit_active_slots); do
+            exit_slot_env "$n"
+            _any=1
+            _pname="Hysteria2"; [[ "$SE_TYPE" == "vless" ]] && _pname="Reality"
+            printf '   %-3s%-12s%-28s%-16s%s\n' "$n" "$_pname" "${SE_SERVER}:${SE_PORT}" \
+                "${SE_ENTRY_VL} / ${SE_ENTRY_HY}" "$SE_LABEL"
+        done
+        [[ "$_any" == "1" ]] || echo -e "   ${GRAY}（未配置出站，全部走直连）${PLAIN}"
+        if [[ "${EXIT_TYPE:-none}" == "vless" ]]; then
+            echo -e "${YELLOW}槽 1 仍是 Reality 出站：本版多出口只支持 Hysteria2，请用「3. 编辑出口」重配${PLAIN}"
+        fi
+        echo -e "${GRAY}------------------------------------------------${PLAIN}"
         echo " 1. 查看出站详情"
-        local _switch="Reality → Hysteria2"
-        [[ "$cur" == "hy2" ]] && _switch="Hysteria2 → Reality"
-        [[ "$cur" == "none" ]] && _switch="当前停用"
-        echo -e " 2. 切换出站协议${GRAY}（${_switch}）${PLAIN}"
-        echo " 3. 设置出站参数（导入 / 手动）"
-        echo " 4. 停用出站中转（只留直连）"
+        echo " 2. 新增出口"
+        echo " 3. 编辑出口"
+        echo " 4. 删除出口"
         echo " 0. 返回主菜单"
         echo -e "${GRAY}================================================${PLAIN}"
         local opt=""
         ask "请输入选项 [0-4]: " opt
         [[ "$ASK_EOF" == "1" ]] && break
         case "$opt" in
-            1)
-                echo
-                if [[ "$cur" == "none" ]]; then
-                    echo -e " 出站: ${GRAY}[已停用]${PLAIN} 只保留直连"
-                else
-                    local _n _en _res
-                    for _n in $(exit_active_slots); do
-                        exit_slot_env "$_n"
-                        _en="Hysteria2"; [[ "$SE_TYPE" == "vless" ]] && _en="Reality"
-                        _res=$(timeout 2 getent ahostsv4 "$SE_SERVER" 2>/dev/null | awk '{print $1; exit}')
-                        echo -e " 出站: ${CYAN}[${_en}]${PLAIN} → ${SE_SERVER}:${SE_PORT}${_res:+  (${_res})}"
-                        echo -e " 入口: Reality ${SE_ENTRY_VL:-—} / Hysteria2 ${SE_ENTRY_HY:-—}"
-                        echo -e " 后缀: -${SE_LABEL}"
-                        echo
-                    done
-                fi
-                read -r -p "按回车返回..." _ || true
-                ;;
-            2)
-                local target other
-                if [[ "$cur" == "hy2" ]]; then target="vless"; other="Reality"; else target="hy2"; other="Hysteria2"; fi
-                if [[ "$target" == "hy2" && -z "${EXIT_HY_PASS:-}" ]] || [[ "$target" == "vless" && -z "${EXIT_VL_UUID:-}" ]]; then
-                    echo -e "${YELLOW}${other} 出站的参数还没配置，请先执行 3. 设置出站参数${PLAIN}"
-                    read -r -p "按回车返回..." _ || true
-                    continue
-                fi
-                EXIT_TYPE="$target"
-                if apply_exit_reload; then
-                    echo -e "${GREEN}✓ 已切换到 ${other} 出站${PLAIN}"
-                    report_exit_health
-                else
-                    echo -e "${RED}✗ 切换失败${PLAIN}"
-                fi
-                read -r -p "按回车返回..." _ || true
-                ;;
-            3)
-                local mode=""
-                ask "设置方式 [1=粘贴订阅地址导入 2=手动填写，默认 2]: " mode
-                if [[ "$mode" == "1" ]]; then
-                    local url="" _imp="" _k="" _v=""
-                    ask "粘贴落地机的 provider.yaml 地址: " url
-                    if [[ -z "$url" ]] || ! _imp=$(exit_parse_url "$url"); then
-                        echo -e "${RED}✗ 导入失败：地址不可达，或对方没有可用的节点${PLAIN}"
-                        echo -e "${YELLOW}  先确认落地机已安装并启用了该协议。${PLAIN}"
-                        read -r -p "按回车返回..." _ || true
-                        continue
-                    fi
-                    while IFS=$'\t' read -r _k _v; do
-                        case "$_k" in
-                            EXIT_HY_SERVER|EXIT_HY_PORT|EXIT_HY_PASS|EXIT_HY_SNI|EXIT_VL_SERVER|EXIT_VL_PORT|EXIT_VL_UUID|EXIT_VL_PBK|EXIT_VL_SID|EXIT_VL_SNI)
-                                printf -v "$_k" '%s' "$_v" ;;
-                        esac
-                    done <<< "$_imp"
-                    # 导入的是哪套参数就切成哪套
-                    if [[ -n "${EXIT_HY_PORT:-}" ]]; then EXIT_TYPE="hy2"; else EXIT_TYPE="vless"; fi
-                    sync_env_locals
-                    echo -e "${GREEN}✓ 已从订阅导入：${EXIT_TYPE} → ${EXIT_SERVER}:${EXIT_PORT}${PLAIN}"
-                fi
-                local typ srv prt
-                local _curh="Hysteria2"; [[ "$cur" == "vless" ]] && _curh="Reality"
-                ask "出站协议 [Hysteria2 / Reality，当前 ${_curh}]，回车沿用: " typ
-                typ="${typ:-${cur}}"; typ="${typ,,}"   # 输入大小写不敏感
-                case "$typ" in
-                    hy2|h|hysteria2|hy) typ="hy2" ;;
-                    reality|vless|v|r) typ="vless" ;;
-                    *) echo -e "${RED}无效协议${PLAIN}"; sleep 1; continue ;;
-                esac
-                ask "出站地址 [${EXIT_SERVER:-必填}]: " srv
-                srv="${srv:-$EXIT_SERVER}"
-                if [[ -z "$srv" ]]; then echo -e "${RED}地址不能为空${PLAIN}"; sleep 1; continue; fi
-                ask "出站端口 [${EXIT_PORT:-$([[ "$typ" == hy2 ]] && echo 8443 || echo 443)}]: " prt
-                prt="${prt:-${EXIT_PORT:-$([[ "$typ" == hy2 ]] && echo 8443 || echo 443)}}"
-                local lbl=""
-                ask "节点后缀 [${EXIT_LABEL:-SG}，用于区分直连与中转]: " lbl
-                lbl="${lbl:-${EXIT_LABEL:-SG}}"
-                if [[ ! "$lbl" =~ ^[A-Za-z0-9_-]+$ ]]; then
-                    echo -e "${RED}后缀只能用字母、数字、- 和 _${PLAIN}"; sleep 1; continue
-                fi
-                EXIT_LABEL="$lbl"
-                local evl ehy
-                ask "链式入口端口 · Reality [${EXIT_ENTRY_VL:-2053}]: " evl
-                evl="${evl:-${EXIT_ENTRY_VL:-2053}}"
-                ask "链式入口端口 · Hysteria2 [${EXIT_ENTRY_HY:-2054}]: " ehy
-                ehy="${ehy:-${EXIT_ENTRY_HY:-2054}}"
-                if ! validate_port "$evl" || ! validate_port "$ehy"; then
-                    echo -e "${RED}端口必须是 1-65535${PLAIN}"; sleep 1; continue
-                fi
-                if [[ "$evl" == "$ehy" ]] || [[ "$evl" == "${VL_PORT:-}" || "$evl" == "${HY_PORT:-}" ]] \
-                   || [[ "$ehy" == "${VL_PORT:-}" || "$ehy" == "${HY_PORT:-}" ]]; then
-                    echo -e "${RED}入口端口不能与直连端口（${VL_PORT:-—}/${HY_PORT:-—}）或彼此重复${PLAIN}"; sleep 1; continue
-                fi
-                EXIT_ENTRY_VL="$evl"; EXIT_ENTRY_HY="$ehy"
-                EXIT_TYPE="$typ"
-                if [[ "$typ" == "hy2" ]]; then
-                    local pw
-                    EXIT_HY_SERVER="$srv"; EXIT_HY_PORT="$prt"
-                    ask "出站 Hysteria2 密码 [回车沿用]: " pw
-                    EXIT_HY_PASS="${pw:-${EXIT_HY_PASS:-}}"
-                    if [[ -z "$EXIT_HY_PASS" ]]; then echo -e "${RED}密码不能为空${PLAIN}"; sleep 1; continue; fi
-                    EXIT_HY_SNI="${EXIT_HY_SNI:-$srv}"
-                else
-                    local u k sid
-                    EXIT_VL_SERVER="$srv"; EXIT_VL_PORT="$prt"
-                    ask "出站 Reality UUID [回车沿用]: " u
-                    EXIT_VL_UUID="${u:-${EXIT_VL_UUID:-}}"
-                    ask "出站 Reality 公钥 [回车沿用]: " k
-                    EXIT_VL_PBK="${k:-${EXIT_VL_PBK:-}}"
-                    ask "出站 Reality short-id [回车沿用]: " sid
-                    EXIT_VL_SID="${sid:-${EXIT_VL_SID:-}}"
-                    if [[ -z "$EXIT_VL_UUID" || -z "$EXIT_VL_PBK" || -z "$EXIT_VL_SID" ]]; then
-                        echo -e "${RED}UUID / 公钥 / short-id 都不能为空${PLAIN}"; sleep 1; continue
-                    fi
-                    EXIT_VL_SNI="${EXIT_VL_SNI:-$srv}"
-                fi
-                if apply_exit_reload; then
-                    echo -e "${GREEN}✓ 出站参数已保存${PLAIN}"
-                    report_exit_health
-                else
-                    echo -e "${RED}✗ 应用失败${PLAIN}"
-                fi
-                read -r -p "按回车返回..." _ || true
-                ;;
-            4)
-                EXIT_TYPE="none"
-                apply_exit_reload && echo -e "${GREEN}✓ 出站中转已停用，只保留直连${PLAIN}" \
-                    || echo -e "${RED}✗ 应用失败${PLAIN}"
-                read -r -p "按回车返回..." _ || true
-                ;;
+            1) exit_detail ;;
+            2) exit_add ;;
+            3) exit_edit ;;
+            4) exit_delete ;;
             0) break ;;
             *) echo -e "${RED}无效选项${PLAIN}"; sleep 1 ;;
         esac

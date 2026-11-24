@@ -709,7 +709,8 @@ render_and_reload() { return 0; }
 flip_site_toggle() { return 0; }
 
 # 16.1 安装不再自己写配置
-if awk '/^install_node\(\) \{/,/^\}/' "$TARGET" | grep -q 'write_singbox_config'; then
+_inst=$(awk '/^install_node\(\) \{/,/^\}/' "$TARGET")
+if grep -q 'write_singbox_config' <<<"$_inst"; then
     bad "16.1 install_node 仍在直接写配置"
 else
     ok "16.1 install_node 不再直接调 write_singbox_config"
@@ -900,7 +901,7 @@ fi
 
 # 17.14 四个端口都可设置：直连走协议参数，链式走出口设置
 grep -q '链式入口端口 · Reality' "$TARGET" && ok "17.14 链式入口端口可设置" || bad "17.14 未提供入口端口设置"
-grep -q '不能与直连端口' "$TARGET" && ok "17.14 端口冲突有校验" || bad "17.14 端口冲突无校验"
+grep -q '不能与直连' "$TARGET" && ok "17.14 端口冲突有校验" || bad "17.14 端口冲突无校验"
 
 # 17.8 vless 出口
 EXIT_TYPE="vless"; EXIT_PORT="443"; EXIT_UUID="22222222-2222-2222-2222-222222222222"
@@ -1241,7 +1242,8 @@ if grep -q '_croot' <<<"$_un"; then
 else
     bad "28.2 未清理站点根目录"
 fi
-if awk '/^menu_camo\(\) \{/,/^\}/' "$TARGET" | grep -q '正被 Reality 当作伪装域名'; then
+_mc2=$(awk '/^menu_camo\(\) \{/,/^\}/' "$TARGET")
+if grep -q '正被 Reality 当作伪装域名' <<<"$_mc2"; then
     ok "28.3 删除在用的伪装域名会被拦下"
 else
     bad "28.3 删除在用的伪装域名没有保护"
@@ -1357,8 +1359,236 @@ _a=$(grep -n 'apply_exit_config' <<<"$_rr" | head -1 | cut -d: -f1)
 
 # 30.7 槽位上限常量存在且本版锁死为 1
 _max=$(grep -oP '^EXIT_SLOTS_MAX=\K[0-9]+' "$TARGET" | head -1)
-[[ "$_max" == "1" ]] && ok "30.7 EXIT_SLOTS_MAX=1（纯重构阶段只开槽 1）" \
+[[ "$_max" == "2" ]] && ok "30.7 EXIT_SLOTS_MAX=2（槽 1 + 槽 2）" \
     || bad "30.7 EXIT_SLOTS_MAX 取值异常" "=${_max:-未定义}"
+
+group "31. 第二出口（hy2-only）与菜单"
+
+SB31="$TMPD/m31"; mkdir -p "$SB31"
+# 每个路径都从 render_set 重新写出的配置开始（apply_exit_config 本身是追加式的）
+mk31cfg() {
+    python3 - "$1" <<'PYEOF'
+import json, sys
+d = {"log": {"level": "warn"},
+     "inbounds": [
+       {"type": "vless", "tag": "vless-reality-in", "listen": "0.0.0.0", "listen_port": 443,
+        "users": [{"uuid": "11111111-1111-1111-1111-111111111111"}],
+        "tls": {"enabled": True, "server_name": "gh.example.com"}},
+       {"type": "hysteria2", "tag": "hy2-in", "listen": "0.0.0.0", "listen_port": 8443,
+        "users": [{"password": "x"}],
+        "tls": {"enabled": True, "certificate_path": "/tmp/c.cer", "key_path": "/tmp/c.key"}}],
+     "outbounds": [{"type": "direct", "tag": "direct"}]}
+json.dump(d, open(sys.argv[1], "w"))
+PYEOF
+}
+mk31cfg "$SB31/cfg.json"
+
+snap31() {
+    python3 - "$1" <<'PYEOF'
+import json, sys
+d = json.load(open(sys.argv[1]))
+print(" ".join(i["tag"] for i in d["inbounds"]))
+print(" ".join(o["tag"] for o in d["outbounds"]))
+print(len(d.get("route", {}).get("rules", [])))
+print(" ".join(sorted(str(i["listen_port"]) for i in d["inbounds"])))
+PYEOF
+}
+
+# 两个槽都启用后连续渲染两次（覆盖 render_and_reload / disable_protocol 两条写配置路径）
+(
+  CONF_FILE="$SB31/cfg.json"
+  unset EXIT_SERVER EXIT_PORT EXIT_PASS EXIT_SNI EXIT_UUID EXIT_PBK EXIT_SID
+  EXIT_TYPE="hy2"; EXIT_HY_SERVER="isif.example.com"; EXIT_HY_PORT="8443"; EXIT_HY_PASS="p1"
+  EXIT_HY_SNI="isif.example.com"; EXIT_LABEL="ISIF"; EXIT_ENTRY_VL="2053"; EXIT_ENTRY_HY="2054"
+  EXIT2_SERVER="sl.example.com"; EXIT2_PORT="8443"; EXIT2_PASS="p2"; EXIT2_SNI="sl.example.com"
+  EXIT2_LABEL="SL"; EXIT2_ENTRY_VL="2063"; EXIT2_ENTRY_HY="2064"
+  apply_exit_config
+  snap31 "$CONF_FILE" > "$SB31/snap1"
+  # 路径二：从同一份基础配置重新渲染（apply_exit_reload / disable_protocol 同序）
+  mk31cfg "$CONF_FILE"
+  apply_exit_config
+  snap31 "$CONF_FILE" > "$SB31/snap2"
+)
+_tags31=$(sed -n 1p "$SB31/snap1" 2>/dev/null || true)
+_outs31=$(sed -n 2p "$SB31/snap1" 2>/dev/null || true)
+_rules31=$(sed -n 3p "$SB31/snap1" 2>/dev/null || true)
+_ports31=$(sed -n 4p "$SB31/snap1" 2>/dev/null || true)
+[[ "$_tags31" == *exit2-vless-in* && "$_tags31" == *exit2-hy2-in* && "$_outs31" == *exit2-out* && "$_rules31" == "4" ]] \
+    && ok "31.1 槽 2 生成 exit2-vless-in / exit2-hy2-in / exit2-out + 两条路由" \
+    || bad "31.1 槽 2 结构异常" "tags=$_tags31 outs=$_outs31 rules=$_rules31"
+[[ "$_ports31" == "2053 2054 2063 2064 443 8443" ]] \
+    && ok "31.1 四个链式入口端口 2053/2054/2063/2064" \
+    || bad "31.1 入口端口集合异常" "$_ports31"
+if diff -q "$SB31/snap1" "$SB31/snap2" >/dev/null 2>&1 && grep -q 'exit2-vless-in' <<<"$_tags31"; then
+    ok "31.2 两条写配置路径产出一致（都保留两组出口）"
+else
+    bad "31.2 两条写配置路径结果不一致" "$(diff "$SB31/snap1" "$SB31/snap2" 2>/dev/null | head -4)"
+fi
+
+# 31.3 槽 2 为空：配置回到单槽形态；env 仍写回 8 个 EXIT2_* 字段
+(
+  CONF_FILE="$SB31/cfg.json"
+  unset EXIT_SERVER EXIT_PORT EXIT_PASS EXIT_SNI EXIT_UUID EXIT_PBK EXIT_SID
+  EXIT_TYPE="hy2"; EXIT_HY_SERVER="isif.example.com"; EXIT_HY_PORT="8443"; EXIT_HY_PASS="p1"
+  EXIT_HY_SNI="isif.example.com"; EXIT_LABEL="ISIF"; EXIT_ENTRY_VL="2053"; EXIT_ENTRY_HY="2054"
+  EXIT2_SERVER=""; EXIT2_PORT=""; EXIT2_PASS=""; EXIT2_SNI=""
+  EXIT2_LABEL=""; EXIT2_ENTRY_VL=""; EXIT2_ENTRY_HY=""
+  mk31cfg "$CONF_FILE"
+  apply_exit_config
+  snap31 "$CONF_FILE" > "$SB31/slot1only"
+)
+_s1=$(sed -n 1p "$SB31/slot1only" 2>/dev/null || true)
+_s1o=$(sed -n 2p "$SB31/slot1only" 2>/dev/null || true)
+_max31=$(grep -oP '^EXIT_SLOTS_MAX=\K[0-9]+' "$TARGET" | head -1)
+_slots_active=$( (unset EXIT_SERVER EXIT_PORT EXIT_PASS EXIT_SNI EXIT_UUID EXIT_PBK EXIT_SID
+  EXIT_TYPE="hy2"; EXIT_HY_SERVER="isif.example.com"; EXIT_HY_PORT="8443"; EXIT_HY_PASS="p1"
+  EXIT2_SERVER=""; EXIT2_PORT=""; EXIT2_PASS=""
+  exit_active_slots | tr '\n' ' ') )
+[[ "$_s1" == "vless-reality-in hy2-in exit-vless-in exit-hy2-in" && "$_s1o" == "direct exit-out" \
+   && "$_max31" == "2" && "$_slots_active" == "1 " ]] \
+    && ok "31.3 槽 2 为空时只生成槽 1 的中转单元（槽 2 结构存在但不生效）" \
+    || bad "31.3 槽 2 为空仍产生多余结构" "$_s1 / $_s1o"
+
+( ENV_FILE="$SB31/env2.conf"
+  node_prefix=SB; server_ip=203.0.113.11; vl_port=443; vl_sni=gh.example.com
+  user_uuid="11111111-1111-1111-1111-111111111111"; vl_privkey=K; vl_pubkey=P; vl_shortid=ab
+  hy_port=8443; hy_password=pw; sub_port=8444; sub_token=tok31
+  unset EXIT2_SERVER EXIT2_PORT EXIT2_LABEL EXIT2_ENTRY_VL EXIT2_ENTRY_HY
+  write_env_config 2>/dev/null || true
+)
+_n31=$(grep -c '^EXIT2_' "$SB31/env2.conf" 2>/dev/null || true)
+[[ "$_n31" == "8" ]] && ok "31.3 env 写回全部 8 个 EXIT2_* 字段（空值）" \
+    || bad "31.3 env 缺少 EXIT2_* 字段" "共 ${_n31:-0} 个"
+
+# 31.4 桥接断言：入口端口有值但落点不完整时拒绝写 env
+( ENV_FILE="$SB31/env3.conf"
+  node_prefix=SB; server_ip=203.0.113.11; vl_port=443; vl_sni=gh.example.com
+  user_uuid="11111111-1111-1111-1111-111111111111"; vl_privkey=K; vl_pubkey=P; vl_shortid=ab
+  hy_port=8443; hy_password=pw; sub_port=8444; sub_token=tok31
+  EXIT2_ENTRY_HY=2064; EXIT2_ENTRY_VL=2063
+  EXIT2_SERVER=""; EXIT2_PORT=""; EXIT2_PASS=""
+  write_env_config 2>/dev/null || true
+)
+if [[ ! -f "$SB31/env3.conf" ]]; then
+    ok "31.4 槽 2 参数不完整时拒绝写入 env（不留半套出口）"
+else
+    bad "31.4 槽 2 不完整仍写入了 env"
+fi
+
+# 31.5 删除槽 2：订阅回到 4 条节点（2 直连 + 2 槽 1 出口）
+(
+  CONF_FILE="$SB31/cfg.json"
+  unset EXIT_SERVER EXIT_PORT EXIT_PASS EXIT_SNI EXIT_UUID EXIT_PBK EXIT_SID
+  EXIT_TYPE="hy2"; EXIT_HY_SERVER="isif.example.com"; EXIT_HY_PORT="8443"; EXIT_HY_PASS="p1"
+  EXIT_HY_SNI="isif.example.com"; EXIT_LABEL="ISIF"; EXIT_ENTRY_VL="2053"; EXIT_ENTRY_HY="2054"
+  EXIT2_SERVER=""; EXIT2_PORT=""; EXIT2_PASS=""; EXIT2_SNI=""
+  EXIT2_LABEL=""; EXIT2_ENTRY_VL=""; EXIT2_ENTRY_HY=""
+  mk31cfg "$CONF_FILE"
+  render_set "reality hy2"; apply_exit_config
+  node_prefix="SB"; server_ip="203.0.113.11"; vl_port=443; hy_port=8443
+  user_uuid="11111111-1111-1111-1111-111111111111"; vl_sni="gh.example.com"
+  vl_pubkey="PBK"; vl_shortid="ab12cd34"; hy_password="hp"; hy_skip_cert="false"
+  WEB_DIR="$SB31/web"; mkdir -p "$WEB_DIR/tok31"
+  generate_full_client_config "sb.example.com" tok31 SB 203.0.113.11 443 \
+    "11111111-1111-1111-1111-111111111111" gh.example.com PBK ab12cd34 8443 8443 hp false
+  grep -c '://' "$WEB_DIR/tok31/links.txt" > "$SB31/nlinks"
+  grep -c '^  - name:' "$WEB_DIR/tok31/provider.yaml" > "$SB31/nnodes"
+)
+# 同一份渲染条件下，槽 2 启用时应当是 6 条（证明「删除」确实减少了节点）
+(
+  CONF_FILE="$SB31/cfg.json"
+  unset EXIT_SERVER EXIT_PORT EXIT_PASS EXIT_SNI EXIT_UUID EXIT_PBK EXIT_SID
+  EXIT_TYPE="hy2"; EXIT_HY_SERVER="isif.example.com"; EXIT_HY_PORT="8443"; EXIT_HY_PASS="p1"
+  EXIT_HY_SNI="isif.example.com"; EXIT_LABEL="ISIF"; EXIT_ENTRY_VL="2053"; EXIT_ENTRY_HY="2054"
+  EXIT2_SERVER="sl.example.com"; EXIT2_PORT="8443"; EXIT2_PASS="p2"; EXIT2_SNI="sl.example.com"
+  EXIT2_LABEL="SL"; EXIT2_ENTRY_VL="2063"; EXIT2_ENTRY_HY="2064"
+  mk31cfg "$CONF_FILE"; render_set "reality hy2"; apply_exit_config
+  node_prefix="SB"; server_ip="203.0.113.11"; vl_port=443; hy_port=8443
+  user_uuid="11111111-1111-1111-1111-111111111111"; vl_sni="gh.example.com"
+  vl_pubkey="PBK"; vl_shortid="ab12cd34"; hy_password="hp"; hy_skip_cert="false"
+  WEB_DIR="$SB31/webB"; mkdir -p "$WEB_DIR/tok31b"
+  generate_full_client_config "sb.example.com" tok31b SB 203.0.113.11 443 \
+    "11111111-1111-1111-1111-111111111111" gh.example.com PBK ab12cd34 8443 8443 hp false
+  grep -c '^  - name:' "$WEB_DIR/tok31b/provider.yaml" > "$SB31/nnodes_before"
+)
+[[ "$(cat "$SB31/nnodes_before" 2>/dev/null)" == "6" && "$(cat "$SB31/nlinks" 2>/dev/null)" == "4" \
+   && "$(cat "$SB31/nnodes" 2>/dev/null)" == "4" ]] \
+    && ok "31.5 槽 2 启用 6 条 → 删除后回到 4 条节点" \
+    || bad "31.5 订阅节点数异常" "links=$(cat "$SB31/nlinks" 2>/dev/null) nodes=$(cat "$SB31/nnodes" 2>/dev/null)"
+if [[ "$(cat "$SB31/nnodes_before" 2>/dev/null)" == "6" ]]; then
+    grep -q 'SL' "$SB31/web/tok31/provider.yaml" 2>/dev/null \
+        && bad "31.5 删除后仍残留 SL 节点" || ok "31.5 已删除槽 2 的订阅节点"
+fi
+
+# 31.6 菜单：新增 / 编辑 / 删除，且不再有「切换出站协议」
+_me31=$(awk '/^menu_exit\(\) \{/,/^}/' "$TARGET")
+if grep -q '2. 新增出口' <<<"$_me31" && grep -q '3. 编辑出口' <<<"$_me31" \
+   && grep -q '4. 删除出口' <<<"$_me31" && ! grep -q '切换出站协议' <<<"$_me31"; then
+    ok "31.6 出站菜单为 查看/新增/编辑/删除（无「切换协议」）"
+else
+    bad "31.6 出站菜单结构不符"
+fi
+if grep -q '落点' <<<"$_me31" && grep -q '入口' <<<"$_me31" && grep -q '标签' <<<"$_me31"; then
+    ok "31.6 菜单表格含 落点 / 入口 / 标签 三列"
+else
+    bad "31.6 菜单表格缺列"
+fi
+
+# 31.7 端口公式：2053 + 10*(n-1)
+if declare -F exit_slot_default_ports >/dev/null 2>&1; then
+    _d1=$(exit_slot_default_ports 1); _d2=$(exit_slot_default_ports 2)
+    [[ "$_d1" == "2053 2054" && "$_d2" == "2063 2064" ]] \
+        && ok "31.7 入口端口默认值按 2053+10(n-1) 计算" \
+        || bad "31.7 端口公式异常" "$_d1 / $_d2"
+else
+    bad "31.7 exit_slot_default_ports 未定义"
+fi
+
+# 31.8 槽 1 不再接受 Reality 出站
+_ee31=$(awk '/^exit_edit\(\) \{/,/^}/' "$TARGET")
+if grep -q '只支持 Hysteria2' <<<"$_ee31"; then
+    ok "31.8 槽 1 编辑时提示只支持 Hysteria2（重配）"
+else
+    bad "31.8 槽 1 仍可能配置成 Reality 出口"
+fi
+
+# 31.9 订阅：两个出口的节点名与策略组同源
+(
+  CONF_FILE="$SB31/cfg.json"
+  unset EXIT_SERVER EXIT_PORT EXIT_PASS EXIT_SNI EXIT_UUID EXIT_PBK EXIT_SID
+  EXIT_TYPE="hy2"; EXIT_HY_SERVER="isif.example.com"; EXIT_HY_PORT="8443"; EXIT_HY_PASS="p1"
+  EXIT_HY_SNI="isif.example.com"; EXIT_LABEL="ISIF"; EXIT_ENTRY_VL="2053"; EXIT_ENTRY_HY="2054"
+  EXIT2_SERVER="sl.example.com"; EXIT2_PORT="8443"; EXIT2_PASS="p2"; EXIT2_SNI="sl.example.com"
+  EXIT2_LABEL="SL"; EXIT2_ENTRY_VL="2063"; EXIT2_ENTRY_HY="2064"
+  mk31cfg "$CONF_FILE"
+  render_set "reality hy2"; apply_exit_config
+  node_prefix="SB"; server_ip="203.0.113.11"; vl_port=443; hy_port=8443
+  user_uuid="11111111-1111-1111-1111-111111111111"; vl_sni="gh.example.com"
+  vl_pubkey="PBK"; vl_shortid="ab12cd34"; hy_password="hp"; hy_skip_cert="false"
+  WEB_DIR="$SB31/web2"; mkdir -p "$WEB_DIR/tok32"
+  generate_full_client_config "sb.example.com" tok32 SB 203.0.113.11 443 \
+    "11111111-1111-1111-1111-111111111111" gh.example.com PBK ab12cd34 8443 8443 hp false
+)
+_ok31=1
+for _nm in "SB-Hysteria2-ISIF" "SB-Hysteria2-SL"; do
+    grep -q "name: \"$_nm\"" "$SB31/web2/tok32/provider.yaml" || _ok31=0
+    grep -q -- "- \"$_nm\"" "$SB31/web2/tok32/config.yaml" || _ok31=0
+done
+[[ "$_ok31" == "1" ]] && ok "31.9 两个出口各生成节点并被策略组引用" \
+    || bad "31.9 出口节点/策略组缺失"
+grep -q 'port: 2063' "$SB31/web2/tok32/provider.yaml" && grep -q 'port: 2064' "$SB31/web2/tok32/provider.yaml" \
+    && ok "31.9 槽 2 节点端口为 2063/2064" || bad "31.9 槽 2 节点端口异常"
+
+# 31.10 订阅 YAML 可被真内核解析（mihomo 可用时）
+if command -v mihomo >/dev/null 2>&1; then
+    if mihomo -t -f "$SB31/web2/tok32/config.yaml" >/dev/null 2>&1; then
+        ok "31.10 mihomo -t 校验生成的订阅通过"
+    else
+        bad "31.10 mihomo -t 校验失败"
+    fi
+else
+    printf '  \033[33m-\033[0m mihomo 未安装，跳过订阅内核校验\n'
+fi
 
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null

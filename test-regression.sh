@@ -1243,6 +1243,38 @@ else
     bad "28.3 删除在用的伪装域名没有保护"
 fi
 
+group "29. 证书与中转单元不被静默抹掉"
+
+_dp=$(awk '/^disable_protocol\(\) \{/,/^}/' "$TARGET" | sed '/^[[:space:]]*#/d')
+if grep -q 'sync_env_locals' <<<"$_dp" && grep -q 'apply_exit_config' <<<"$_dp"; then
+    ok "29.1 停用协议时重建中转单元（含 EXIT_* 派生）"
+else
+    bad "29.1 disable_protocol 没调 apply_exit_config（停用任一协议会把 2053/2054 抹掉）"
+fi
+
+_c1=$(grep -n 'cert_covers_host "${CERT_DIR}/fullchain.cer"' "$TARGET" | cut -d: -f1 | head -1)
+_c2=$(grep -n 'for _c in "/etc/ssl/${HY_DOMAIN:-}"' "$TARGET" | cut -d: -f1 | head -1)
+if [[ -n "$_c1" && -n "$_c2" && "$_c1" -lt "$_c2" ]]; then
+    ok "29.2 订阅站优先用续期目标 CERT_DIR"
+else
+    bad "29.2 订阅站可能优先读 /etc/ssl 下的陈旧副本（续期后仍用旧证书）"
+fi
+
+_b1=$(grep -n '^build_camo_site() {' "$TARGET" | cut -d: -f1 | head -1)
+_bc=$(sed -n "${_b1},$((_b1+45))p" "$TARGET" | sed '/^[[:space:]]*#/d')
+if grep -q '"\$domain" == "\$HY_DOMAIN"' <<<"$_bc" && grep -q 'issue_site_cert "\$domain"' <<<"$_bc"; then
+    ok "29.3 伪装站区分接入域/内容域，内容域走 issue_site_cert"
+else
+    bad "29.3 build_camo_site 未区分接入域，续期不会更新伪装站证书"
+fi
+
+_is=$(awk '/^issue_site_cert\(\) \{/,/^}/' "$TARGET" | sed '/^[[:space:]]*#/d')
+if grep -q 'have_cert" == 0' <<<"$_is"; then
+    ok "29.4 已有证书时不再索取 CF Token"
+else
+    bad "29.4 issue_site_cert 无谓要求 Token（无 token 的机器建站会卡住）"
+fi
+
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
 ok "临时文件已清理"

@@ -724,11 +724,15 @@ issue_site_cert() {
     local acme_bin="$HOME/.acme.sh/acme.sh"
     [[ -n "$domain" ]] || return 1
 
+    # 已有证书时这一步只是「部署 + 挂续期钩子」，不需要 Token
+    local have_cert=0
+    [[ -f "$HOME/.acme.sh/${domain}_ecc/fullchain.cer" ]] && have_cert=1
+
     if [[ -z "$cf_token" ]]; then cf_token="${CF_TOKEN:-}"; fi
     if [[ -z "$cf_token" && -f /root/.cf-token ]]; then
         cf_token=$(tr -d '\r\n' < /root/.cf-token)
     fi
-    if [[ -z "$cf_token" ]]; then
+    if [[ "$have_cert" == 0 && -z "$cf_token" ]]; then
         prompt_cf_token || { echo -e "${YELLOW}没有 CF Token，无法签发 ${domain} 的证书${PLAIN}"; return 1; }
         cf_token="$PROMPTED_CF_TOKEN"
     fi
@@ -957,12 +961,18 @@ CADDYEOF
 
     if [[ "$cert_mode" == "domain" ]]; then
         echo -e "配置 Caddy HTTPS 域名证书 (端口 ${sub_port})..."
-        # 优先用站点证书目录（/etc/ssl/<域名>）；CERT_DIR 是 sing-box 的副本，
-        # 某些环境下 caddy 读它会在握手阶段报 internal error
+        # 续期目标就是 CERT_DIR（acme --install-cert 写这里），优先用它。
+        # /etc/ssl/<域名> 可能只是 find_cert_dir 规范化时留下的副本，续期不会更新它——
+        # 优先读那边会在下一次续期后让订阅站继续用旧证书。
         local tls_dir="$CERT_DIR" _c
-        for _c in "/etc/ssl/${HY_DOMAIN:-}" "/etc/ssl/${HY_DOMAIN%%.*}"; do
-            [[ -n "${HY_DOMAIN:-}" && -f "$_c/fullchain.cer" && -f "$_c/private.key" ]] && { tls_dir="$_c"; break; }
-        done
+        if [[ -n "${HY_DOMAIN:-}" ]] && cert_covers_host "${CERT_DIR}/fullchain.cer" "$HY_DOMAIN" \
+            && cert_pair_ok "${CERT_DIR}/fullchain.cer" "${CERT_DIR}/private.key"; then
+            tls_dir="$CERT_DIR"
+        else
+            for _c in "/etc/ssl/${HY_DOMAIN:-}" "/etc/ssl/${HY_DOMAIN%%.*}"; do
+                [[ -n "${HY_DOMAIN:-}" && -f "$_c/fullchain.cer" && -f "$_c/private.key" ]] && { tls_dir="$_c"; break; }
+            done
+        fi
         cat > "/etc/caddy/sites/simple-box-sub.caddy" <<EOF
 # Simple-Box HTTPS 域名证书
 :${sub_port} {
@@ -2909,6 +2919,9 @@ PYEOF
 disable_protocol() {
     local which="$1"
     load_env || { echo -e "${RED}未检测到已安装的配置${PLAIN}"; return 1; }
+    # EXIT_SERVER/PORT 是运行时派生字段；不 sync 的话 apply_exit_config 会因
+    # EXIT_SERVER 为空直接返回，中转单元照样被抹掉
+    sync_env_locals
     local label tag keep
     label="$(proto_human "$which")"; tag="$(proto_tag "$which")"
     keep="hy2"; [[ "$which" == "hy2" ]] && keep="reality"
@@ -2923,6 +2936,9 @@ disable_protocol() {
     local set="$keep"
     set_has "$(proto_tag "$keep")" || set=""
     render_set "$set" || return 1
+    # render_set 只写主 inbound；中转单元由 apply_exit_config 追加，漏了这一步
+    # 停用任一协议都会把 exit-*-in / exit-out 从配置里抹掉，链式入口静默变死端口
+    apply_exit_config
     systemctl restart sing-box || return 1
 
     # Reality 停用后 443 空出来，把站点搬回去；SITE_FILE 缺失时按域名重新发现
@@ -3082,12 +3098,18 @@ build_camo_site() {
         echo -e "${YELLOW}  节点本身不受影响，可稍后重试${PLAIN}"
         return 1
     }
-    cert=$(find_cert_dir "$domain" 2>/dev/null || true)
-    if [[ -z "$cert" ]]; then
-        echo -e "${YELLOW}${domain} 还没有证书，尝试用 Cloudflare DNS-01 现签一张（不影响 Hy2 的证书）...${PLAIN}"
-        issue_site_cert "$domain" || return 1
+    # 伪装站证书单独落 /etc/ssl/<域名>，并把 acme 续期目标也指到这里（issue_site_cert 负责）。
+    # 接入域（HY_DOMAIN / TARGET_HOST）例外：那张证书由 CERT_DIR 统一供给 sing-box 与订阅站，
+    # 不能再复制一份到 /etc/ssl，否则续期只会更新其中一处。
+    if [[ -n "${HY_DOMAIN:-}" && ( "$domain" == "$HY_DOMAIN" || "$domain" == "${TARGET_HOST:-}" ) ]]; then
         cert=$(find_cert_dir "$domain" 2>/dev/null || true)
-        [[ -n "$cert" ]] || return 1
+        [[ -n "$cert" ]] || {
+            echo -e "${RED}✗ 接入域 ${domain} 的证书缺失，先重跑证书签发${PLAIN}"
+            return 1
+        }
+    else
+        issue_site_cert "$domain" || return 1
+        cert="$CERT_SSL_ROOT/$domain"
     fi
 
     dir="${CAMO_ROOT}/${domain}"

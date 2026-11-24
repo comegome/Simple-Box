@@ -461,6 +461,21 @@ disable_bbr() {
 }
 
 
+# 从 release JSON 里取指定资产的 sha256 digest。
+# asset 对象里 "digest" 排在 "name" 之后，所以先记住命中目标名的对象，再吐紧随其后的 digest。
+_release_digest() {
+    local json="${1:-}" want="${2:-}"
+    [[ -n "$json" && -n "$want" ]] || return 0
+    awk -v want="$want" '
+        index($0, want) && /"name"/ { hit = 1 }
+        hit && /"digest":/ {
+            v = $0
+            sub(/.*"digest":[[:space:]]*"/, "", v)
+            sub(/".*/, "", v)
+            print v; exit
+        }' <<<"$json"
+}
+
 # 获取并升级官方 sing-box 内核（带精准版本校验）
 update_singbox_core() {
     local force_flag="${1:-}"
@@ -503,14 +518,7 @@ update_singbox_core() {
     # 校验挡的是「下到半截 / 变体选错 / 中间设备替换」，且不需要用户手抄哈希。
     local pkg="sing-box-${latest_ver}-linux-${arch}.tar.gz"
     local want_sha=""
-    want_sha=$(awk -v want="$pkg" '
-        index($0, want) && /"name"/ { hit = 1 }
-        hit && /"digest":/ {
-            v = $0
-            sub(/.*"digest":[[:space:]]*"/, "", v)
-            sub(/".*/, "", v)
-            print v; exit
-        }' <<<"$rel_json")
+    want_sha=$(_release_digest "$rel_json" "$pkg")
     local url="https://github.com/SagerNet/sing-box/releases/download/${tag}/${pkg}"
     local tmp_dir
     tmp_dir=$(mktemp -d)

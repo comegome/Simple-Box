@@ -1762,6 +1762,144 @@ else
     printf '  \033[33m-\033[0m mihomo 未安装，跳过订阅内核校验\n'
 fi
 
+# ---------- 32. 此前零覆盖 / 只有静态断言的函数，补执行型断言 ----------
+group "32. 核心函数执行覆盖"
+
+# 32.1-32.4 load_env：缺文件返回 1；末条命令失败不带走调用方；读一次即缓存
+_t32=$(mktemp -d)
+_s_env="$ENV_FILE"; _s_loaded="${ENV_LOADED-}"
+ENV_FILE="$_t32/env.conf"; ENV_LOADED=""
+load_env; _rc=$?
+[[ "$_rc" -eq 1 ]] && ok "32.1 env.conf 不存在时返回 1（未安装护栏）" || bad "32.1 缺文件返回 ${_rc}，应为 1"
+printf 'FOO=bar\nfalse\n' > "$ENV_FILE"
+# 真正要守的是「set -e 下不把调用方带走」——必须在 -e 生效的子进程里跑，
+# 套件本身是 set +e，原地调用区分不出裸 source 与条件式 source。
+_o32=$(bash -c 'set -e; source "$1"; ENV_FILE="$2"; load_env; echo "SURVIVED:${FOO:-}"' _ "$TARGET" "$ENV_FILE" 2>&1)
+[[ "$_o32" == *"SURVIVED:bar"* ]] \
+    && ok "32.2 set -e 下 env.conf 末条命令失败不带走调用方" \
+    || bad "32.2 调用方被 source 的返回码带走" "${_o32:-无输出}"
+ENV_LOADED=""; load_env
+printf 'FOO=baz\n' > "$ENV_FILE"
+load_env; [[ "${FOO:-}" == "bar" ]] \
+    && ok "32.3 第二次调用走缓存，不重读文件" || bad "32.3 缓存失效，读到 ${FOO:-}"
+ENV_LOADED=""; load_env; [[ "${FOO:-}" == "baz" ]] \
+    && ok "32.4 清缓存后重读生效（write_env_config 依赖）" || bad "32.4 清缓存后仍读到 ${FOO:-}"
+ENV_FILE="$_s_env"; ENV_LOADED="$_s_loaded"; unset FOO
+
+# 32.5-32.7 _release_digest：只认目标资产，变体不串味，缺 digest 返回空
+_j32=$(cat <<'EOF'
+{
+  "assets": [
+    {
+      "name": "sing-box-1.2.3-linux-amd64-glibc.tar.gz",
+      "size": 10,
+      "digest": "sha256:aaaa"
+    },
+    {
+      "name": "sing-box-1.2.3-linux-amd64.tar.gz",
+      "size": 20,
+      "digest": "sha256:bbbb"
+    },
+    {
+      "name": "sing-box-1.2.3-linux-amd64-musl.tar.gz",
+      "size": 30
+    }
+  ]
+}
+EOF
+)
+_d32=$(_release_digest "$_j32" "sing-box-1.2.3-linux-amd64.tar.gz")
+[[ "$_d32" == "sha256:bbbb" ]] \
+    && ok "32.5 取到 plain 包的 digest（不被 glibc 变体串味）" || bad "32.5 取到 ${_d32:-空}"
+_d32=$(_release_digest "$_j32" "sing-box-1.2.3-linux-amd64-musl.tar.gz")
+[[ -z "$_d32" ]] && ok "32.6 该资产没有 digest 时返回空（调用方跳过校验）" || bad "32.6 返回 ${_d32}"
+_d32=$(_release_digest "$_j32" "sing-box-9.9.9-linux-amd64.tar.gz")
+[[ -z "$_d32" ]] && ok "32.7 目标资产不存在时返回空" || bad "32.7 返回 ${_d32}"
+
+# 32.8-32.10 detect_public_ip：占位串 / 内网段必须拒绝（写坏订阅的旧坑）
+mkdir -p "$_t32/bin"
+cat > "$_t32/bin/curl" <<'EOF'
+#!/bin/sh
+printf '%s\n' "${FAKE_CURL_OUT:-}"
+EOF
+chmod 755 "$_t32/bin/curl"
+_s_path="$PATH"; PATH="$_t32/bin:$PATH"
+export FAKE_CURL_OUT="public-ip-xxxx"
+detect_public_ip >/dev/null 2>&1 && bad "32.8 占位串被当成公网 IP" \
+    || ok "32.8 占位串被拒绝（曾写进 SERVER_IP 导致订阅不可解析）"
+export FAKE_CURL_OUT="203.0.113.9"
+[[ "$(detect_public_ip)" == "203.0.113.9" ]] && ok "32.9 合法 IPv4 原样输出" || bad "32.9 合法 IP 未输出"
+export FAKE_CURL_OUT="10.0.0.5"
+detect_public_ip >/dev/null 2>&1 && bad "32.10 内网地址被当成公网 IP" || ok "32.10 内网地址被跳过"
+PATH="$_s_path"; unset FAKE_CURL_OUT
+
+# 32.11-32.12 tidy_links / tidy_proxies：块与块之间恰好一个空行，块内不得有空行
+printf 'vless://a\nhysteria2://b\nvless://c\n' > "$_t32/links.txt"
+tidy_links "$_t32/links.txt"
+[[ "$(grep -c '://' "$_t32/links.txt")" -eq 3 && "$(grep -c '^$' "$_t32/links.txt")" -eq 2 ]] \
+    && ok "32.11 tidy_links：3 条链接、条间恰好 2 个空行" \
+    || bad "32.11 tidy_links 结果异常" "行数=$(wc -l < "$_t32/links.txt") 空行=$(grep -c '^$' "$_t32/links.txt")"
+cat > "$_t32/prov.yaml" <<'EOF'
+proxies:
+  - name: "A"
+    type: vless
+
+  - name: "B"
+    type: vless
+proxy-groups:
+  - name: "G"
+EOF
+tidy_proxies "$_t32/prov.yaml"
+[[ "$(grep -c '^$' "$_t32/prov.yaml")" -eq 2 ]] \
+    && awk 'NF==0 { if (prev==0) e=1; prev=0; next } { prev=1 } END { exit e }' "$_t32/prov.yaml" \
+    && ok "32.12 tidy_proxies：块间各一个空行、无连续空行" \
+    || bad "32.12 tidy_proxies 结果异常" "空行=$(grep -c '^$' "$_t32/prov.yaml")"
+
+# 32.13-32.16 出口槽位字段映射：写错会静默写坏 env.conf
+_f32a=$(exit_slot_field_var 1 SERVER); _f32b=$(exit_slot_field_var 1 SKIP)
+[[ "$_f32a" == "EXIT_HY_SERVER" && "$_f32b" == "EXIT_SKIP_CERT" ]] \
+    && ok "32.13 槽 1 沿用历史字段名（存量订阅指着它们）" || bad "32.13 槽 1 映射变了: ${_f32a} ${_f32b}"
+_f32a=$(exit_slot_field_var 2 SKIP); _f32b=$(exit_slot_field_var 4 PASS)
+[[ "$_f32a" == "EXIT2_SKIP_CERT" && "$_f32b" == "EXIT4_PASS" ]] \
+    && ok "32.14 槽 n>1 映射为 EXIT<n>_*，SKIP 展开成 SKIP_CERT" || bad "32.14 映射异常: ${_f32a} ${_f32b}"
+exit_slot_set 3 LABEL "TST"
+[[ "$(exit_slot_get 3 LABEL)" == "TST" && "${EXIT3_LABEL:-}" == "TST" ]] \
+    && ok "32.15 set/get 往返一致且落到真实变量" || bad "32.15 往返异常: ${EXIT3_LABEL:-空}"
+exit_slot_set 3 SERVER ""
+[[ -z "${EXIT3_SERVER:-}" ]] && ok "32.16 set 空值可清字段" || bad "32.16 清空失败: ${EXIT3_SERVER:-}"
+unset EXIT3_LABEL EXIT3_SERVER EXIT3_PORT
+
+# 32.17-32.20 exit_entry_ports_ok：相同端口 / 撞直连 / 撞订阅 / 合法
+_o_vl="$VL_PORT"; _o_hy="$HY_PORT"; _o_sp="$SUB_PORT"
+VL_PORT=443; HY_PORT=8443; SUB_PORT=8444
+exit_entry_ports_ok 1 39181 39181 >/dev/null 2>&1 && bad "32.17 两个入口端口相同未拦" || ok "32.17 两端口相同被拒"
+exit_entry_ports_ok 1 443 39182 >/dev/null 2>&1 && bad "32.18 入口端口撞 VL_PORT 未拦" || ok "32.18 撞直连端口被拒"
+exit_entry_ports_ok 1 39181 8444 >/dev/null 2>&1 && bad "32.19 入口端口撞 SUB_PORT 未拦" || ok "32.19 撞订阅端口被拒"
+exit_entry_ports_ok 1 39181 39182 >/dev/null 2>&1 && ok "32.20 合法端口组合通过" || bad "32.20 合法组合被误拒"
+VL_PORT="$_o_vl"; HY_PORT="$_o_hy"; SUB_PORT="$_o_sp"
+
+# 32.21-32.23 证书归属护栏：站点引用 CERT_DIR 时，证书降级必须能被发现
+mkdir -p "$_t32/sites" "$_t32/cert"
+_c_cd="$CERT_DIR"; _c_sites="${CADDY_SITES_DIR:-}"; _c_file="${CADDYFILE:-}"
+CERT_DIR="$_t32/cert"; CADDY_SITES_DIR="$_t32/sites"; CADDYFILE="$_t32/Caddyfile"
+printf 'a.example.com {\n\ttls %s/fullchain.cer %s/private.key\n}\n' "$CERT_DIR" "$CERT_DIR" > "$_t32/sites/a.caddy"
+[[ -n "$(sites_using_cert_dir)" ]] \
+    && ok "32.21 识别出引用 CERT_DIR 的站点（降级会同时打死站点与 Reality）" \
+    || bad "32.21 引用 CERT_DIR 的站点未被识别"
+printf 'b.example.com {\n\trespond ok\n}\n' > "$_t32/sites/a.caddy"
+[[ -z "$(sites_using_cert_dir)" ]] && ok "32.22 未引用 CERT_DIR 的站点不算" || bad "32.22 误报站点"
+printf 'c.example.com {\n\ttls %s/nope.cer %s/nope.key\n}\n' "$_t32" "$_t32" > "$_t32/sites/c.caddy"
+site_cert_problem "$_t32/sites/c.caddy" "c.example.com" >/dev/null 2>&1 \
+    && bad "32.23 站点证书文件缺失未报错" || ok "32.23 站点证书缺失被拦"
+CERT_DIR="$_c_cd"; CADDY_SITES_DIR="$_c_sites"; CADDYFILE="$_c_file"
+
+# 32.24 EXIT 兜底清理函数本身有效（trap 在入口安装，这里只验清理动作）
+mkdir -p "$_t32/junk/file.txt"
+TMP_CLEANUP=( "$_t32/junk" ); cleanup_tmp
+[[ ! -d "$_t32/junk" ]] && ok "32.24 cleanup_tmp 清目录与文件" || bad "32.24 cleanup_tmp 未清干净"
+TMP_CLEANUP=()
+rm -rf "$_t32"
+
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
 ok "临时文件已清理"

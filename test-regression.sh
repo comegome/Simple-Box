@@ -1149,21 +1149,25 @@ _case_cnt=$(awk '/^generate_full_client_config\(\) \{/,/^}/' "$TARGET" | grep -c
     || bad "25.8 仍有 ${_case_cnt} 处重复 case"
 
 # 25.9 缺证书时 build_camo_site 会现签，而不是让用户去菜单 4 碰壁
-if awk '/^build_camo_site\(\) \{/,/^}/' "$TARGET" | grep -q 'issue_site_cert'; then
+# 注意：awk | grep -q 在 pipefail 下会因 SIGPIPE 假红，先取变量再匹配
+_bcs=$(awk '/^build_camo_site\(\) \{/,/^}/' "$TARGET")
+if grep -q 'issue_site_cert' <<<"$_bcs"; then
     ok "25.9 伪装站缺证书时自动签发"
 else
     bad "25.9 伪装站缺证书时不会签发"
 fi
 
 # 25.10 菜单 8 建站后可直接切 Reality SNI
-if awk '/^menu_camo\(\) \{/,/^}/' "$TARGET" | grep -q 'proto_enable_reality'; then
+_mc=$(awk '/^menu_camo\(\) \{/,/^}/' "$TARGET")
+if grep -q 'proto_enable_reality' <<<"$_mc"; then
     ok "25.10 菜单 8 建站后可一键切换 Reality 伪装域名"
 else
     bad "25.10 菜单 8 仍未接入 Reality 切换"
 fi
 
 # 25.11 Reality 启用流程里，自有域名可现场建站
-if awk '/^proto_enable_reality\(\) \{/,/^}/' "$TARGET" | grep -q 'build_camo_site'; then
+_per=$(awk '/^proto_enable_reality\(\) \{/,/^}/' "$TARGET")
+if grep -q 'build_camo_site' <<<"$_per"; then
     ok "25.11 Reality 启用流程可现场生成伪装站"
 else
     bad "25.11 Reality 启用流程没有建站入口"
@@ -1274,6 +1278,87 @@ if grep -q 'have_cert" == 0' <<<"$_is"; then
 else
     bad "29.4 issue_site_cert 无谓要求 Token（无 token 的机器建站会卡住）"
 fi
+
+group "30. 出站槽位抽象（纯重构，N=1 零行为变化）"
+
+# 30.1 槽位映射存在，槽 1 读派生字段、为空时回落到 EXIT_HY_*
+if declare -F exit_slot_env >/dev/null 2>&1 && declare -F exit_active_slots >/dev/null 2>&1; then
+    ( EXIT_TYPE=hy2; EXIT_SERVER=""; EXIT_PORT=""; EXIT_PASS=""; EXIT_SNI=""
+      EXIT_HY_SERVER="isif.example.com"; EXIT_HY_PORT="8443"; EXIT_HY_PASS="p9"; EXIT_HY_SNI="isif.example.com"
+      exit_slot_env 1
+      [[ "$SE_SERVER" == "isif.example.com" && "$SE_PORT" == "8443" && "$SE_PASS" == "p9" ]] )
+    if [[ $? -eq 0 ]]; then ok "30.1 exit_slot_env 槽 1 回落读取 EXIT_HY_*（漏 sync 也不会丢中转）"
+    else bad "30.1 exit_slot_env 槽 1 映射错误"; fi
+else
+    bad "30.1 槽位抽象缺失（exit_slot_env / exit_active_slots 未定义）"
+fi
+
+# 30.2 槽 1 的 tag 一字不改
+if declare -F exit_slot_tag >/dev/null 2>&1; then
+    _t1="$(exit_slot_tag 1 vless-in) $(exit_slot_tag 1 hy2-in) $(exit_slot_tag 1 out)"
+    [[ "$_t1" == "exit-vless-in exit-hy2-in exit-out" ]] \
+        && ok "30.2 槽 1 tag 保持 exit-vless-in / exit-hy2-in / exit-out" \
+        || bad "30.2 槽 1 tag 变了（存量订阅与客户端会失联）" "$_t1"
+else
+    bad "30.2 exit_slot_tag 未定义"
+fi
+
+# 30.3 只有 EXIT_HY_*（未 sync）时仍然追加中转单元
+SB30="$TMPD/m30"; mkdir -p "$SB30"
+python3 - "$SB30/cfg.json" <<'PY'
+import json, sys
+d = {"log": {"level": "warn"},
+     "inbounds": [
+       {"type": "vless", "tag": "vless-reality-in", "listen": "0.0.0.0", "listen_port": 443,
+        "users": [{"uuid": "11111111-1111-1111-1111-111111111111"}],
+        "tls": {"enabled": True, "server_name": "gh.example.com"}},
+       {"type": "hysteria2", "tag": "hy2-in", "listen": "0.0.0.0", "listen_port": 8443,
+        "users": [{"password": "x"}],
+        "tls": {"enabled": True, "certificate_path": "/tmp/c.cer", "key_path": "/tmp/c.key"}}],
+     "outbounds": [{"type": "direct", "tag": "direct"}]}
+json.dump(d, open(sys.argv[1], "w"))
+PY
+(
+  CONF_FILE="$SB30/cfg.json"
+  unset EXIT_SERVER EXIT_PORT EXIT_PASS EXIT_SNI EXIT_UUID EXIT_PBK EXIT_SID
+  EXIT_TYPE="hy2"; EXIT_HY_SERVER="isif.example.com"; EXIT_HY_PORT="8443"; EXIT_HY_PASS="p9"
+  EXIT_HY_SNI="isif.example.com"; EXIT_ENTRY_VL="2053"; EXIT_ENTRY_HY="2054"; EXIT_LABEL="ISIF"
+  apply_exit_config
+  python3 -c "import json,sys;d=json.load(open('$SB30/cfg.json'));print(' '.join(i['tag'] for i in d['inbounds']))" > "$SB30/tags"
+)
+_tags30=$(cat "$SB30/tags" 2>/dev/null || true)
+[[ "$_tags30" == *exit-hy2-in* && "$_tags30" == *exit-vless-in* ]] \
+    && ok "30.3 未 sync 时也按 EXIT_HY_* 追加中转单元" \
+    || bad "30.3 未 sync 时 apply_exit_config 静默返回、中转消失" "$_tags30"
+
+# 30.4 配置渲染按槽循环，不再读单一 EXIT_TYPE 后直接返回
+_aec=$(awk '/^apply_exit_config\(\) \{/,/^}/' "$TARGET" | sed '/^[[:space:]]*#/d')
+if grep -q 'exit_active_slots' <<<"$_aec" && ! grep -qE 'EXIT_TYPE:-none.*return 0' <<<"$_aec"; then
+    ok "30.4 apply_exit_config 遍历槽位"
+else
+    bad "30.4 apply_exit_config 仍按单一 EXIT_TYPE 处理"
+fi
+
+# 30.5 订阅 / 面板 / 策略组都按槽遍历
+_em=$(awk '/^emit_nodes\(\) \{/,/^}/' "$TARGET" | sed '/^[[:space:]]*#/d')
+grep -q 'exit_active_slots' <<<"$_em" && ok "30.5 emit_nodes 按槽遍历" || bad "30.5 emit_nodes 未按槽遍历"
+_io=$(awk '/^print_io_status\(\) \{/,/^}/' "$TARGET" | sed '/^[[:space:]]*#/d')
+grep -q 'exit_active_slots' <<<"$_io" && ok "30.5 面板按槽遍历" || bad "30.5 print_io_status 未按槽遍历"
+_gf=$(awk '/^generate_full_client_config\(\) \{/,/^}/' "$TARGET" | sed '/^[[:space:]]*#/d')
+grep -q 'exit_active_slots' <<<"$_gf" && ok "30.5 策略组按槽遍历" || bad "30.5 策略组未按槽遍历"
+
+# 30.6 render_and_reload 里先 sync_env_locals，再 apply_exit_config
+_rr=$(awk '/^render_and_reload\(\) \{/,/^}/' "$TARGET" | sed '/^[[:space:]]*#/d')
+_s=$(grep -n 'sync_env_locals' <<<"$_rr" | head -1 | cut -d: -f1)
+_a=$(grep -n 'apply_exit_config' <<<"$_rr" | head -1 | cut -d: -f1)
+[[ -n "$_s" && -n "$_a" && "$_s" -lt "$_a" ]] \
+    && ok "30.6 render_and_reload 先 sync 再追加中转" \
+    || bad "30.6 render_and_reload 缺少 sync_env_locals 前置"
+
+# 30.7 槽位上限常量存在且本版锁死为 1
+_max=$(grep -oP '^EXIT_SLOTS_MAX=\K[0-9]+' "$TARGET" | head -1)
+[[ "$_max" == "1" ]] && ok "30.7 EXIT_SLOTS_MAX=1（纯重构阶段只开槽 1）" \
+    || bad "30.7 EXIT_SLOTS_MAX 取值异常" "=${_max:-未定义}"
 
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null

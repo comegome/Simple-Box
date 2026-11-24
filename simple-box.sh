@@ -1065,21 +1065,29 @@ print_io_status() {
     done
 
     # ---- 出站：直连是默认行为（route.final=direct），不占行；只报中转 ----
-    local ep="" en=""
-    if set_has "vless-reality-in"; then ep="TCP ${EXIT_ENTRY_VL:-2053}"; fi
-    if set_has "hy2-in"; then ep="${ep:+$ep / }UDP ${EXIT_ENTRY_HY:-2054}"; fi
-    if [[ "${EXIT_TYPE:-none}" != "none" && -n "$ep" ]]; then
-        [[ "$EXIT_TYPE" == "vless" ]] && en="Reality" || en="Hysteria2"
+    local ep="" en="" eshow="" _ip="" n="" _name="" _any=0 _vlp="" _hyp=""
+    for n in $(exit_active_slots); do
+        exit_slot_env "$n"
+        _vlp="$SE_ENTRY_VL"; _hyp="$SE_ENTRY_HY"
+        # 槽 1 的历史默认值：env 里没写也按 2053/2054 显示（与旧版面板一致）
+        [[ -n "$_vlp" || "$n" != "1" ]] || _vlp=2053
+        [[ -n "$_hyp" || "$n" != "1" ]] || _hyp=2054
+        ep=""
+        [[ -n "$_vlp" ]] && set_has "vless-reality-in" && ep="TCP $_vlp"
+        [[ -n "$_hyp" ]] && set_has "hy2-in" && ep="${ep:+$ep / }UDP $_hyp"
+        [[ -n "$ep" ]] || continue
+        _any=1
+        [[ "$SE_TYPE" == "vless" ]] && en="Reality" || en="Hysteria2"
         # 连接仍用域名（落地机换 IP 时自动跟随），面板显示解析结果，便于和实测出口 IP 对照。
         # 不做缓存：解析失败就退回域名，避免出现「面板显示旧 IP」的假象。
-        local eshow="$EXIT_SERVER" _ip
-        _ip=$(timeout 2 getent ahostsv4 "$EXIT_SERVER" 2>/dev/null | awk '{print $1; exit}')
+        eshow="$SE_SERVER"
+        _ip=$(timeout 2 getent ahostsv4 "$SE_SERVER" 2>/dev/null | awk '{print $1; exit}')
         [[ -n "$_ip" ]] && eshow="$_ip"
-        printf ' 出站 %-14s %s  %s  →  %s (%s)\n' "Relay" "${GREEN}[已启用]${PLAIN}" \
+        _name="Relay"; [[ "$n" != "1" ]] && _name="Relay $SE_LABEL"
+        printf ' 出站 %-14s %s  %s  →  %s (%s)\n' "$_name" "${GREEN}[已启用]${PLAIN}" \
             "$ep" "$eshow" "$en"
-    else
-        printf ' 出站 %-14s %s\n' "Relay" "${GRAY}[已停用]${PLAIN}"
-    fi
+    done
+    [[ "$_any" == "1" ]] || printf ' 出站 %-14s %s\n' "Relay" "${GRAY}[已停用]${PLAIN}"
 }
 
 # 组装端口跳跃展示串：主端口，有跳跃范围时追加 "起始-结束"
@@ -1144,13 +1152,15 @@ proto_human() { case "$1" in reality) echo "Reality" ;; hy2) echo "Hysteria2" ;;
 proto_label() { case "$1" in reality) echo "VLESS-Reality" ;; hy2) echo "Hysteria2" ;; esac; }
 
 # 取某协议在「直连 / 出口」两种形态下实际监听的端口；该形态未启用则输出空。
-# 订阅生成里原本这段 case 写了四遍，收敛到一处。
+# 第三个参数是槽位编号（缺省 1，字段名与历史一致）。
 node_port() {
-    local _p="$1" _port=""
-    if [[ "${2:-direct}" == "exit" ]]; then
+    local _p="$1" _shape="${2:-direct}" _slot="${3:-1}" _port="" _v
+    if [[ "$_shape" == "exit" ]]; then
         case "$_p" in
-            reality) [[ -n "${vl_port:-}" ]] && _port="${EXIT_ENTRY_VL:-}" ;;
-            hy2)     [[ -n "${hy_port:-}" ]] && _port="${EXIT_ENTRY_HY:-}" ;;
+            reality) _v="EXIT_ENTRY_VL"; [[ "$_slot" != "1" ]] && _v="EXIT${_slot}_ENTRY_VL"
+                     [[ -n "${vl_port:-}" ]] && _port="${!_v:-}" ;;
+            hy2)     _v="EXIT_ENTRY_HY"; [[ "$_slot" != "1" ]] && _v="EXIT${_slot}_ENTRY_HY"
+                     [[ -n "${hy_port:-}" ]] && _port="${!_v:-}" ;;
         esac
     else
         case "$_p" in
@@ -1161,20 +1171,23 @@ node_port() {
     printf '%s' "$_port"
 }
 
-# 按顺序把节点交给回调：先直连协议，再出口协议（出口节点不带端口跳跃）。
+# 按顺序把节点交给回调：先直连协议，再逐槽的出口协议（出口节点不带端口跳跃）。
 # 用法: emit_nodes <proto_proxy|proto_link> <输出文件>
 emit_nodes() {
-    local cb="$1" out="$2" _p _port
+    local cb="$1" out="$2" _p _port n _label
     for _p in $PROTOCOLS; do
         _port=$(node_port "$_p" direct)
         [[ -n "$_port" ]] || continue
         "$cb" "$_p" "${node_prefix}-$(proto_label "$_p")" "$_port" >> "$out"
     done
-    [[ "${EXIT_TYPE:-none}" != "none" && -n "${EXIT_SERVER:-}" ]] || return 0
-    for _p in $PROTOCOLS; do
-        _port=$(node_port "$_p" exit)
-        [[ -n "$_port" ]] || continue
-        "$cb" "$_p" "${node_prefix}-$(proto_label "$_p")-${EXIT_LABEL:-SG}" "$_port" "" >> "$out"
+    for n in $(exit_active_slots); do
+        exit_slot_env "$n"
+        _label="$SE_LABEL"
+        for _p in $PROTOCOLS; do
+            _port=$(node_port "$_p" exit "$n")
+            [[ -n "$_port" ]] || continue
+            "$cb" "$_p" "${node_prefix}-$(proto_label "$_p")-${_label}" "$_port" "" >> "$out"
+        done
     done
 }
 
@@ -1377,13 +1390,12 @@ EOF
     for _p in $PROTOCOLS; do
         case "$_p" in reality) _port="$vl_port" ;; hy2) _port="$hy_port" ;; esac
         [[ -n "$_port" ]] && printf '      - "%s-%s"\n' "$node_prefix" "$(proto_label "$_p")" >> "$full_config_file"
-        if [[ "${EXIT_TYPE:-none}" != "none" && -n "${EXIT_SERVER:-}" ]]; then
-            case "$_p" in
-                reality) [[ -n "$vl_port" ]] || continue; _port="${EXIT_ENTRY_VL:-}" ;;
-                hy2)     [[ -n "$hy_port" ]] || continue; _port="${EXIT_ENTRY_HY:-}" ;;
-            esac
-            [[ -n "$_port" ]] && printf '      - "%s-%s-%s"\n' "$node_prefix" "$(proto_label "$_p")" "${EXIT_LABEL:-SG}" >> "$full_config_file"
-        fi
+        for _slot in $(exit_active_slots); do
+            exit_slot_env "$_slot"
+            _port=$(node_port "$_p" exit "$_slot")
+            [[ -n "$_port" ]] || continue
+            printf '      - "%s-%s-%s"\n' "$node_prefix" "$(proto_label "$_p")" "$SE_LABEL" >> "$full_config_file"
+        done
     done
     printf '      - "DIRECT"\n' >> "$full_config_file"
 
@@ -1676,6 +1688,10 @@ render_and_reload() {
         echo -e "${RED}未找到 sing-box 内核，无法应用配置。${PLAIN}"
         return 1
     fi
+
+    # 出口字段是运行时派生的：漏 sync 会让 apply_exit_config 认为槽位为空，
+    # 中转单元与 2053/2054 静默消失（本仓库发生过两次）。
+    sync_env_locals
 
     # 不做配置回滚：调用方已经用 write_singbox_config 把新配置 mv 到正式位置，
     # 此处再备份只会备份到「刚写入的新配置」，回滚等于把坏配置复制回自己。
@@ -2280,20 +2296,98 @@ uninstall_all() {
 
 # 1. VLESS-Reality 独立模块配置
 
-# 按 EXIT_TYPE 给 config.json 追加「链式入口 + 出口」；none 时一个字节都不改
+# ==================== 出站槽位 ====================
+# 结构按 N 槽写，槽位上限由 EXIT_SLOTS_MAX 锁死；加槽位只改这个常量和
+# write_env_config 里的字段，不需要再散着改订阅/面板/菜单。
+# 槽 1 沿用历史字段与 tag（exit-vless-in / exit-hy2-in / exit-out），
+# 槽 n>1 用 EXIT<n>_* 字段与 exit<n>-* tag。槽 1 的字段名与 tag 一个都不许改：
+# 存量节点的订阅、客户端配置全都指着它们。
+EXIT_SLOTS_MAX=1
+
+# 把槽 n 映射成统一局部变量 SE_*。槽 1 优先读派生字段（EXIT_SERVER/PORT/
+# PASS/SNI），为空时回落到 EXIT_HY_* / EXIT_VL_*——只 load_env 没 sync 的路径
+# 也不会静默变成「无出口」。
+exit_slot_env() {
+    local n="${1:-1}"
+    SE_TYPE="none"; SE_SERVER=""; SE_PORT=""; SE_PASS=""; SE_SNI=""; SE_SKIP="false"
+    SE_UUID=""; SE_PBK=""; SE_SID=""; SE_ENTRY_VL=""; SE_ENTRY_HY=""; SE_LABEL="SG"
+    if [[ "$n" == "1" ]]; then
+        SE_TYPE="${EXIT_TYPE:-none}"
+        SE_LABEL="${EXIT_LABEL:-SG}"
+        SE_ENTRY_VL="${EXIT_ENTRY_VL:-}"; SE_ENTRY_HY="${EXIT_ENTRY_HY:-}"
+        SE_SKIP="${EXIT_SKIP_CERT:-false}"
+        case "$SE_TYPE" in
+            hy2)
+                SE_SERVER="${EXIT_SERVER:-${EXIT_HY_SERVER:-}}"
+                SE_PORT="${EXIT_PORT:-${EXIT_HY_PORT:-}}"
+                SE_PASS="${EXIT_PASS:-${EXIT_HY_PASS:-}}"
+                SE_SNI="${EXIT_SNI:-${EXIT_HY_SNI:-}}" ;;
+            vless)
+                SE_SERVER="${EXIT_SERVER:-${EXIT_VL_SERVER:-}}"
+                SE_PORT="${EXIT_PORT:-${EXIT_VL_PORT:-}}"
+                SE_UUID="${EXIT_UUID:-${EXIT_VL_UUID:-}}"
+                SE_PBK="${EXIT_PBK:-${EXIT_VL_PBK:-}}"
+                SE_SID="${EXIT_SID:-${EXIT_VL_SID:-}}"
+                SE_SNI="${EXIT_SNI:-${EXIT_VL_SNI:-}}" ;;
+        esac
+    else
+        # 槽 n>1 只有 Hysteria2：没有 EXIT<n>_TYPE 这类字段
+        local _v
+        _v="EXIT${n}_SERVER"; SE_SERVER="${!_v:-}"
+        _v="EXIT${n}_PORT";   SE_PORT="${!_v:-}"
+        _v="EXIT${n}_PASS";   SE_PASS="${!_v:-}"
+        _v="EXIT${n}_SNI";    SE_SNI="${!_v:-}"
+        _v="EXIT${n}_SKIP_CERT"; SE_SKIP="${!_v:-false}"
+        _v="EXIT${n}_LABEL";  SE_LABEL="${!_v:-EXIT${n}}"
+        _v="EXIT${n}_ENTRY_VL"; SE_ENTRY_VL="${!_v:-}"
+        _v="EXIT${n}_ENTRY_HY"; SE_ENTRY_HY="${!_v:-}"
+        [[ -n "$SE_SERVER" ]] && SE_TYPE="hy2"
+    fi
+}
+
+# 槽位是否已配置：落点与端口都在
+exit_slot_active() {
+    exit_slot_env "${1:-1}"
+    [[ "$SE_TYPE" != "none" && -n "$SE_SERVER" && -n "$SE_PORT" ]]
+}
+
+# 已配置的槽位编号，一行一个（订阅生成、面板、配置渲染都遍历它）
+exit_active_slots() {
+    local n
+    for ((n = 1; n <= EXIT_SLOTS_MAX; n++)); do
+        exit_slot_active "$n" && printf '%s\n' "$n"
+    done
+}
+
+# 槽位对应的 inbound/outbound tag；槽 1 保持历史命名
+exit_slot_tag() {
+    local n="${1:-1}" kind="$2"
+    [[ "$n" == "1" ]] && printf 'exit-%s' "$kind" || printf 'exit%s-%s' "$n" "$kind"
+}
+
+# 按槽位给 config.json 追加「链式入口 + 出口」；无启用槽时一个字节都不改
 apply_exit_config() {
-    [[ "${EXIT_TYPE:-none}" == "none" || -z "${EXIT_SERVER:-}" ]] && return 0
-    EXIT_TYPE="$EXIT_TYPE" EXIT_SERVER="$EXIT_SERVER" EXIT_PORT="$EXIT_PORT" \
-    EXIT_PASS="${EXIT_PASS:-}" EXIT_SNI="${EXIT_SNI:-}" EXIT_SKIP_CERT="${EXIT_SKIP_CERT:-false}" \
-    EXIT_UUID="${EXIT_UUID:-}" EXIT_PBK="${EXIT_PBK:-}" EXIT_SID="${EXIT_SID:-}" \
-    EXIT_ENTRY_VL="${EXIT_ENTRY_VL:-}" EXIT_ENTRY_HY="${EXIT_ENTRY_HY:-}" \
-    python3 - "$CONF_FILE" <<'PY'
+    [[ -f "$CONF_FILE" ]] || return 0
+    local -a slots=() envs=()
+    local n
+    for n in $(exit_active_slots); do
+        exit_slot_env "$n"
+        slots+=("$n")
+        envs+=("E${n}_TYPE=$SE_TYPE" "E${n}_SERVER=$SE_SERVER" "E${n}_PORT=$SE_PORT" \
+               "E${n}_PASS=$SE_PASS" "E${n}_SNI=$SE_SNI" "E${n}_SKIP_CERT=$SE_SKIP" \
+               "E${n}_UUID=$SE_UUID" "E${n}_PBK=$SE_PBK" "E${n}_SID=$SE_SID" \
+               "E${n}_ENTRY_VL=$SE_ENTRY_VL" "E${n}_ENTRY_HY=$SE_ENTRY_HY")
+    done
+    [[ ${#slots[@]} -gt 0 ]] || return 0
+    env "${envs[@]}" EXIT_SLOTS="${slots[*]}" python3 - "$CONF_FILE" <<'PY'
 import json, os, sys, copy
 conf = sys.argv[1]
 d = json.load(open(conf))
-typ = os.environ["EXIT_TYPE"]
 inb = d.get("inbounds", [])
 tags = {i["tag"]: i for i in inb}
+
+def rename(n, kind):
+    return "exit-%s" % kind if n == "1" else "exit%s-%s" % (n, kind)
 
 def clone(src_tag, new_tag, port):
     if not port or src_tag not in tags:
@@ -2301,30 +2395,37 @@ def clone(src_tag, new_tag, port):
     n = copy.deepcopy(tags[src_tag]); n["tag"] = new_tag; n["listen_port"] = int(port)
     return n
 
-entries = [e for e in (clone("vless-reality-in", "exit-vless-in", os.environ.get("EXIT_ENTRY_VL")),
-                       clone("hy2-in", "exit-hy2-in", os.environ.get("EXIT_ENTRY_HY"))) if e]
-
-if typ == "hy2":
-    out = {"type": "hysteria2", "tag": "exit-out",
-           "server": os.environ["EXIT_SERVER"], "server_port": int(os.environ["EXIT_PORT"]),
-           "password": os.environ["EXIT_PASS"],
-           "tls": {"enabled": True,
-                   "server_name": os.environ.get("EXIT_SNI") or os.environ["EXIT_SERVER"],
-                   "insecure": os.environ.get("EXIT_SKIP_CERT") == "true"}}
-else:
-    out = {"type": "vless", "tag": "exit-out",
-           "server": os.environ["EXIT_SERVER"], "server_port": int(os.environ["EXIT_PORT"]),
-           "uuid": os.environ["EXIT_UUID"], "flow": "xtls-rprx-vision",
-           "tls": {"enabled": True,
-                   "server_name": os.environ.get("EXIT_SNI") or os.environ["EXIT_SERVER"],
-                   "utls": {"enabled": True, "fingerprint": "chrome"},
-                   "reality": {"enabled": True, "public_key": os.environ["EXIT_PBK"],
-                               "short_id": os.environ["EXIT_SID"]}}}
+entries, outs, rules = [], [], []
+for n in os.environ["EXIT_SLOTS"].split():
+    typ = os.environ["E%s_TYPE" % n]
+    e = [x for x in (clone("vless-reality-in", rename(n, "vless-in"), os.environ.get("E%s_ENTRY_VL" % n)),
+                     clone("hy2-in", rename(n, "hy2-in"), os.environ.get("E%s_ENTRY_HY" % n))) if x]
+    out_tag = rename(n, "out")
+    if typ == "hy2":
+        out = {"type": "hysteria2", "tag": out_tag,
+               "server": os.environ["E%s_SERVER" % n], "server_port": int(os.environ["E%s_PORT" % n]),
+               "password": os.environ["E%s_PASS" % n],
+               "tls": {"enabled": True,
+                       "server_name": os.environ.get("E%s_SNI" % n) or os.environ["E%s_SERVER" % n],
+                       "insecure": os.environ.get("E%s_SKIP_CERT" % n) == "true"}}
+    else:
+        out = {"type": "vless", "tag": out_tag,
+               "server": os.environ["E%s_SERVER" % n], "server_port": int(os.environ["E%s_PORT" % n]),
+               "uuid": os.environ["E%s_UUID" % n], "flow": "xtls-rprx-vision",
+               "tls": {"enabled": True,
+                       "server_name": os.environ.get("E%s_SNI" % n) or os.environ["E%s_SERVER" % n],
+                       "utls": {"enabled": True, "fingerprint": "chrome"},
+                       "reality": {"enabled": True, "public_key": os.environ["E%s_PBK" % n],
+                                   "short_id": os.environ["E%s_SID" % n]}}}
+    entries += e; outs.append(out)
+    rules += [{"inbound": [x["tag"]], "outbound": out_tag} for x in e]
 
 d["inbounds"] = inb + entries
-d.setdefault("outbounds", []).append(out)
-d["route"] = {"rules": [{"inbound": [e["tag"]], "outbound": "exit-out"} for e in entries],
-              "final": "direct"}
+d.setdefault("outbounds", []).extend(outs)
+# 同一份配置被再次应用时不要把旧规则叠加两份
+_keep = [r for r in (d.get("route") or {}).get("rules", [])
+         if r.get("outbound") not in {o["tag"] for o in outs}]
+d["route"] = {"rules": _keep + rules, "final": "direct"}
 json.dump(d, open(conf, "w"), ensure_ascii=False, indent=2)
 PY
 }
@@ -2956,14 +3057,16 @@ disable_protocol() {
 }
 
 
-# 从订阅 URL（provider.yaml）导入出口参数；打印 KEY=VALUE 供 eval
+# 从订阅 URL（provider.yaml）导入出口参数；打印 KEY<TAB>VALUE 供白名单赋值
+# $2 = 槽位号：1（缺省）输出历史的 EXIT_HY_* / EXIT_VL_*；n>1 只认 Hysteria2，
+# 输出该槽的 EXIT<n>_SERVER/PORT/PASS/SNI。
 exit_parse_url() {
-    local url="${1:-}"
+    local url="${1:-}" slot="${2:-1}"
     local body
     body=$(curl -fsSk -m 20 "$url" 2>/dev/null) || return 1
     local tmpf; tmpf=$(mktemp /tmp/exitimport.XXXXXX)
     printf '%s' "$body" > "$tmpf"
-    python3 - "$tmpf" <<'PY'
+    python3 - "$tmpf" "$slot" <<'PY'
 import sys
 lines = open(sys.argv[1]).read().splitlines()
 blocks, cur = [], None
@@ -2990,11 +3093,21 @@ def pick(t):
 
 b = pick("hysteria2")
 if b:
+    if sys.argv[2] != "1":
+        for k, v in ((f"EXIT{sys.argv[2]}_SERVER", b.get("server", "")),
+                     (f"EXIT{sys.argv[2]}_PORT", b.get("port", "")),
+                     (f"EXIT{sys.argv[2]}_PASS", b.get("password", "")),
+                     (f"EXIT{sys.argv[2]}_SNI", b.get("sni") or b.get("server", ""))):
+            print(f"{k}\t{v}")
+        sys.exit(0)
     for k, v in (("EXIT_HY_SERVER", b.get("server", "")),
                  ("EXIT_HY_PORT", b.get("port", "")), ("EXIT_HY_PASS", b.get("password", "")),
                  ("EXIT_HY_SNI", b.get("sni") or b.get("server", ""))):
         print(f"{k}\t{v}")
     sys.exit(0)
+# 槽 n>1 只支持 Hysteria2：没有 hy2 节点就判定导入失败，不回退 Reality
+if sys.argv[2] != "1":
+    sys.exit(1)
 b = pick("vless")
 if b:
     for k, v in (("EXIT_VL_SERVER", b.get("server", "")),
@@ -3010,15 +3123,17 @@ PY
     return $rc
 }
 
-# 出口生效性自检：起临时 socks 走 exit-out，看出口 IP 是否符合预期
+# 出口生效性自检：起临时 socks 走该槽的出口，看出口 IP 是否符合预期
 # 返回 0=正常 1=连不通 2=IP 不符
 exit_health_check() {
-    local port=11080 tmp got want
+    local n="${1:-1}" port=11080 tmp got want out_tag
+    out_tag="$(exit_slot_tag "$n" out)"
+    exit_slot_env "$n"
     tmp=$(mktemp /tmp/exitprobe.XXXXXX.json)
-    python3 - "$CONF_FILE" "$tmp" "$port" <<'PY' || { rm -f "$tmp"; return 1; }
+    python3 - "$CONF_FILE" "$tmp" "$port" "$out_tag" <<'PY' || { rm -f "$tmp"; return 1; }
 import json, sys
 d = json.load(open(sys.argv[1]))
-out = [o for o in d.get("outbounds", []) if o.get("tag") == "exit-out"]
+out = [o for o in d.get("outbounds", []) if o.get("tag") == sys.argv[4]]
 if not out:
     sys.exit(1)
 cfg = {"log": {"level": "error"},
@@ -3032,7 +3147,7 @@ PY
     got=$(curl -s -m 15 --socks5-hostname "127.0.0.1:${port}" https://api.ipify.org 2>/dev/null || true)
     kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null; rm -f "$tmp"
     [[ -n "$got" ]] || return 1
-    want=$(getent hosts "${EXIT_SERVER:-}" | awk '{print $1}' | head -1)
+    want=$(getent hosts "${SE_SERVER:-}" | awk '{print $1}' | head -1)
     [[ -n "$want" ]] || return 0
     [[ "$got" == "$want" ]] && return 0
     printf '%s %s\n' "$got" "$want" > /tmp/exitprobe.result
@@ -3251,13 +3366,17 @@ menu_exit() {
                 if [[ "$cur" == "none" ]]; then
                     echo -e " 出站: ${GRAY}[已停用]${PLAIN} 只保留直连"
                 else
-                    local _en="Hysteria2"; [[ "$cur" == "vless" ]] && _en="Reality"
-                    local _res; _res=$(timeout 2 getent ahostsv4 "$EXIT_SERVER" 2>/dev/null | awk '{print $1; exit}')
-                    echo -e " 出站: ${CYAN}[${_en}]${PLAIN} → ${EXIT_SERVER}:${EXIT_PORT}${_res:+  (${_res})}"
-                    echo -e " 入口: Reality ${EXIT_ENTRY_VL:-—} / Hysteria2 ${EXIT_ENTRY_HY:-—}"
-                    echo -e " 后缀: -${EXIT_LABEL:-SG}"
+                    local _n _en _res
+                    for _n in $(exit_active_slots); do
+                        exit_slot_env "$_n"
+                        _en="Hysteria2"; [[ "$SE_TYPE" == "vless" ]] && _en="Reality"
+                        _res=$(timeout 2 getent ahostsv4 "$SE_SERVER" 2>/dev/null | awk '{print $1; exit}')
+                        echo -e " 出站: ${CYAN}[${_en}]${PLAIN} → ${SE_SERVER}:${SE_PORT}${_res:+  (${_res})}"
+                        echo -e " 入口: Reality ${SE_ENTRY_VL:-—} / Hysteria2 ${SE_ENTRY_HY:-—}"
+                        echo -e " 后缀: -${SE_LABEL}"
+                        echo
+                    done
                 fi
-                echo
                 read -r -p "按回车返回..." _ || true
                 ;;
             2)

@@ -1570,6 +1570,30 @@ EOF
 }
 
 # 集中写入持久化环境变量
+# 把 env.conf 的大写字段铺成 write_env_config 需要的小写变量。
+# 三个菜单分支原先各自抄了 18 行搬运，漏一行就会静默写回旧值（NODE_PREFIX="" 那类事故）。
+# 调用方可先 set_env_scene，再覆盖个别字段（如 sub_token / sub_port），然后调 write_env_config。
+set_env_scene() {
+    node_prefix="${1:-${NODE_PREFIX:-}}"
+    server_ip="$SERVER_IP"
+    vl_port="$VL_PORT"
+    vl_sni="$VL_SNI"
+    user_uuid="$VL_UUID"
+    vl_privkey="${VL_PRIVKEY:-}"
+    vl_pubkey="$VL_PUBKEY"
+    vl_shortid="$VL_SHORTID"
+    hy_domain="${HY_DOMAIN:-}"
+    target_host="${TARGET_HOST:-$server_ip}"
+    hy_port="${HY_PORT:-8443}"
+    hy_range="${HY_RANGE:-}"
+    hy_password="${HY_PASS:-}"
+    hy_skip_cert="${HY_SKIP_CERT:-true}"
+    sub_port="${SUB_PORT:-8444}"
+    sub_token="$SUB_TOKEN"
+    CERT_MODE="${CERT_MODE:-selfsigned}"
+    sub_proto=$(sub_scheme)
+}
+
 write_env_config() {
     # 关键字段必须非空：这些值由调用方在函数内用 local 搬运，漏搬一行就会静默
     # 写入空串（曾导致 NODE_PREFIX="" 让节点名变成 "-VLESS-Reality"）。
@@ -2680,26 +2704,8 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 SUB_TOKEN="$new_token"
                 # 证书模式以 env.conf 持久化的 CERT_MODE 为准（旧逻辑用 HY_SKIP_CERT 推断，
                 # 在「仅 Reality」的 skip 模式下会误判成 domain，把自签证书配成 HTTPS 导致客户端导入失败）
-                local CERT_MODE="${CERT_MODE:-selfsigned}"
-
-                local node_prefix="$NODE_PREFIX"
-                local server_ip="$SERVER_IP"
-                local vl_port="$VL_PORT"
-                local vl_sni="$VL_SNI"
-                local user_uuid="$VL_UUID"
-                local vl_privkey="${VL_PRIVKEY:-}"
-                local vl_pubkey="$VL_PUBKEY"
-                local vl_shortid="$VL_SHORTID"
-                local hy_domain="${HY_DOMAIN:-}"
-                local target_host="${TARGET_HOST:-$server_ip}"
-                local hy_port="${HY_PORT:-8443}"
-                local hy_range="${HY_RANGE:-}"
-                local hy_password="${HY_PASS:-}"
-                local hy_skip_cert="${HY_SKIP_CERT:-true}"
-                # SUB_PROTO 必须由证书模式重新推导，不能沿用旧值（域名/自签切换后会写错协议）
-                local sub_proto
-                sub_proto=$(sub_scheme)
-                local sub_token="$new_token"
+                set_env_scene
+                sub_token="$new_token"
                 if ! write_env_config; then
                     echo -e "${RED}订阅参数写入失败，配置未变更。${PLAIN}"
                     read -r -p "按回车键返回..." dummy || true
@@ -2732,25 +2738,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                     break
                 done
 
-                local node_prefix="$new_prefix"
-                local server_ip="$SERVER_IP"
-                local vl_port="$VL_PORT"
-                local vl_sni="$VL_SNI"
-                local user_uuid="$VL_UUID"
-                local vl_pubkey="$VL_PUBKEY"
-                local vl_shortid="$VL_SHORTID"
-                local vl_privkey="${VL_PRIVKEY:-}"
-                local hy_domain="${HY_DOMAIN:-}"
-                local target_host="${TARGET_HOST:-$server_ip}"
-                local hy_port="${HY_PORT:-8443}"
-                local hy_range="${HY_RANGE:-}"
-                local hy_password="${HY_PASS:-}"
-                local hy_skip_cert="${HY_SKIP_CERT:-true}"
-                local sub_port="${SUB_PORT:-8444}"
-                local sub_token="${SUB_TOKEN}"
-                local CERT_MODE="${CERT_MODE:-selfsigned}"
-                local sub_proto
-                sub_proto=$(sub_scheme)
+                set_env_scene "$new_prefix"
 
                 if ! write_env_config; then
                     echo -e "${RED}节点前缀写入失败，配置未变更。${PLAIN}"
@@ -2781,25 +2769,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 [[ "$suffixes_input" == "-" ]] && suffixes_input=""
                 DIRECT_SUFFIXES=$(clean_suffixes "$suffixes_input")
 
-                local node_prefix="${NODE_PREFIX:-}"
-                local server_ip="$SERVER_IP"
-                local vl_port="$VL_PORT"
-                local vl_sni="$VL_SNI"
-                local user_uuid="$VL_UUID"
-                local vl_pubkey="$VL_PUBKEY"
-                local vl_shortid="$VL_SHORTID"
-                local vl_privkey="${VL_PRIVKEY:-}"
-                local hy_domain="${HY_DOMAIN:-}"
-                local target_host="${TARGET_HOST:-$server_ip}"
-                local hy_port="${HY_PORT:-8443}"
-                local hy_range="${HY_RANGE:-}"
-                local hy_password="${HY_PASS:-}"
-                local hy_skip_cert="${HY_SKIP_CERT:-true}"
-                local sub_port="${SUB_PORT:-8444}"
-                local sub_token="$SUB_TOKEN"
-                local CERT_MODE="${CERT_MODE:-selfsigned}"
-                local sub_proto
-                sub_proto=$(sub_scheme)
+                set_env_scene
 
                 if ! write_env_config; then
                     echo -e "${RED}写入失败，配置未变更。${PLAIN}"

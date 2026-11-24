@@ -1178,6 +1178,34 @@ else
     bad "25.12 EOF 判断仍重复" "共 ${_dup_lines} 处"
 fi
 
+group "26. env 搬运收敛（set_env_scene）"
+# 26.1 write_env_config 强制非空的每个键，set_env_scene 都必须赋值，否则菜单会写回空串
+_scene=$(awk '/^set_env_scene\(\) \{/,/^}/' "$TARGET")
+_req=$(awk '/for v in node_prefix/,/hy_password sub_port sub_token/' "$TARGET")
+_missing=""
+for _k in node_prefix server_ip vl_port vl_sni user_uuid vl_privkey vl_pubkey vl_shortid hy_port hy_password sub_port sub_token; do
+    grep -qE "^    ${_k}=" <<<"$_scene" || _missing+=" ${_k}"
+done
+[[ -z "$_missing" ]] && ok "26.1 set_env_scene 覆盖 write_env_config 的全部必填字段" \
+    || bad "26.1 set_env_scene 缺字段:${_missing}"
+
+# 26.2 菜单里的三个写入分支不再各自搬运（regen_from_scope 是订阅作用域，另算）
+_menu=$(awk '/^menu_sub_module\(\) \{/,/^\}/' "$TARGET")
+_n=$(grep -c 'local server_ip="\$SERVER_IP"' <<<"$_menu")
+[[ "$_n" -eq 0 ]] && ok "26.2 菜单分支不再手工搬运 env 字段" || bad "26.2 仍有 ${_n} 处手工搬运"
+
+# 26.3 三条写入路径都改走 set_env_scene
+_n=$(grep -c 'set_env_scene' "$TARGET")
+[[ "$_n" -ge 4 ]] && ok "26.3 set_env_scene 定义 + 三处调用（共 ${_n} 处）" \
+    || bad "26.3 调用点不足" "共 ${_n} 处，应为 4"
+
+# 26.4 HY_PASS 等敏感字段不得出现在报错文案里
+if grep -q 'hy_password="\${HY_PASS:-}"' "$TARGET"; then
+    ok "26.4 hy_password 从 HY_PASS 派生"
+else
+    bad "26.4 hy_password 取值路径异常"
+fi
+
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
 ok "临时文件已清理"

@@ -159,6 +159,16 @@ grep -q "^${BBR_MARK}" "$BBR_CONF" || return 0   # 不是自己的，不动
 
 测试这类路径请在没有 sing-box 的机器上做（`/usr/local/share/simple-box` 不存在时走的就是「有新版本」分支），或者先备份 `env.conf`。
 
+## 十三、一个 acme 实例只能存一个 zone 的 token
+
+`acme.sh` 把 Cloudflare 凭证存成 `SAVED_CF_Token`，而它是 **每个 home 一份**，不是每个域名一份：`_saveaccountconf_mutable` 写的是 `$ACCOUNT_CONF_PATH`。
+
+所以同一个 `~/.acme.sh` 里同时挂「接入域（ducto.net）」和「内容域（yuzhaizu.com）」时，**后签的那个会覆盖前者**。表面一切正常（`acme.sh --list` 两个域名都在、续期时间都排好了），到点续期才会失败，而 cron 输出进 `/dev/null`——直接静默。
+
+规则：一个 zone 一个 home。接入域用默认 `~/.acme.sh`，内容域（伪装站）用 `~/.acme.sh-site`，各自有独立 `account.conf` 与 cron 行；token 分别放 `/root/.cf-token`（接入）与 `/root/.cf-token-site`（内容）。`issue_site_cert` 已经这么做了，`acme_site_home_ensure` 负责按需创建 home 并幂等挂 cron。
+
+验证不能只看 `--list`：要拿**每个 home 的 token** 去它声称的 zone 里各写一条 TXT 再删掉。能写才叫「这个 zone 的续期可用」。
+
 ## 验证清单
 
 改完跑这四组，缺一不可：

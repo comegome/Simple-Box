@@ -1935,6 +1935,69 @@ else
     ok "33.5 菜单入口不取锁，只拦写路径"
 fi
 
+# ---------- 34. 内容域证书用独立 acme home（一个 home 只能存一个 zone 的 token） ----------
+group "34. 内容域证书独立 acme home"
+
+_isc34=$(awk '/^issue_site_cert\(\) \{/,/^}/' "$TARGET")
+if grep -q 'acme_site_home_ensure' <<<"$_isc34" && grep -q '\-\-home "\$acme_home"' <<<"$_isc34"; then
+    ok "34.1 issue_site_cert 走独立 home，且每条 acme 调用都带 --home"
+else
+    bad "34.1 issue_site_cert 仍在默认 home 里签内容域证书"
+fi
+
+_stray34=$(grep -c 'local acme_bin="\$HOME/.acme.sh/acme.sh"' "$TARGET")
+[[ "$_stray34" -eq 1 ]] \
+    && ok "34.2 只有接入域（issue_cert_bundle）用默认 home" \
+    || bad "34.2 默认 home 的引用数量异常" "命中 ${_stray34} 处，应为 1"
+
+if grep -q 'ACME_SITE_HOME="\${ACME_SITE_HOME:-\$HOME/.acme.sh-site}"' "$TARGET"; then
+    ok "34.3 site home 路径可覆盖（测试/迁移用）"
+else
+    bad "34.3 site home 不可覆盖"
+fi
+
+if grep -q 'mv "\$HOME/.acme.sh/\${domain}_ecc"' "$TARGET"; then
+    ok "34.4 旧布局证书会就地迁移，不重签"
+else
+    bad "34.4 缺少旧布局迁移逻辑"
+fi
+
+if awk '/^issue_site_cert\(\) \{/,/^}/' "$TARGET" | grep -n 'cf-token-site\|cf-token"' | head -2 | grep -q 'cf-token-site'; then
+    ok "34.9 内容域 token 优先读 /root/.cf-token-site（不与接入域混用）"
+else
+    bad "34.9 内容域仍会误用接入域的 /root/.cf-token"
+fi
+
+# 34.5-34.8 acme_site_home_ensure 真实调用（沙箱 HOME + crontab 桩）
+_h34=$(mktemp -d)
+mkdir -p "$_h34/.acme.sh/dnsapi" "$_h34/bin"
+printf '#!/bin/sh\necho stub\n' > "$_h34/.acme.sh/acme.sh"; chmod 755 "$_h34/.acme.sh/acme.sh"
+printf "ACCOUNT_EMAIL='ops@example.com'\nSAVED_CF_Token='accesstok'\n" > "$_h34/.acme.sh/account.conf"
+cat > "$_h34/bin/crontab" <<'EOF'
+#!/bin/sh
+if [ "$1" = "-l" ]; then cat "$CRON_DB" 2>/dev/null; exit 0; fi
+if [ "$1" = "-" ]; then cat > "$CRON_DB"; exit 0; fi
+EOF
+chmod 755 "$_h34/bin/crontab"
+_s_home34="$HOME"; _s_site34="$ACME_SITE_HOME"; _s_path34="$PATH"; _s_cron34="${CRON_DB-}"
+export CRON_DB="$_h34/cron"
+HOME="$_h34"; ACME_SITE_HOME="$_h34/site"; PATH="$_h34/bin:$PATH"
+_out34=$(acme_site_home_ensure "sitetok")
+[[ -x "$ACME_SITE_HOME/acme.sh" && -d "$ACME_SITE_HOME/dnsapi" ]] \
+    && ok "34.5 site home 由骨架复制创建（不带任何已签域名）" || bad "34.5 site home 创建失败" "${_out34}"
+_acc34=$(stat -c %a "$ACME_SITE_HOME/account.conf" 2>/dev/null)
+[[ "$_acc34" == "600" ]] && grep -q "SAVED_CF_Token='sitetok'" "$ACME_SITE_HOME/account.conf" \
+    && ok "34.6 account.conf 600 且写入内容域 token" || bad "34.6 account.conf 权限/token 异常" "mode=${_acc34}"
+grep -qF -- "--cron --home \"$ACME_SITE_HOME\"" "$CRON_DB" \
+    && ok "34.7 自动挂上 site home 的续期 cron" || bad "34.7 未挂 cron"
+acme_site_home_ensure "othertok" >/dev/null
+[[ "$(grep -c 'othertok' "$ACME_SITE_HOME/account.conf")" -eq 0 && "$(grep -c "$ACME_SITE_HOME" "$CRON_DB")" -eq 1 ]] \
+    && ok "34.8 重复调用幂等（不覆盖已有 home、不重复挂 cron）" \
+    || bad "34.8 非幂等"
+HOME="$_s_home34"; ACME_SITE_HOME="$_s_site34"; PATH="$_s_path34"
+if [[ -n "$_s_cron34" ]]; then CRON_DB="$_s_cron34"; else unset CRON_DB; fi
+rm -rf "$_h34"
+
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
 ok "临时文件已清理"

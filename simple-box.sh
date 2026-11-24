@@ -34,6 +34,36 @@ TEMPLATE_FILE="${CONF_DIR}/template.yaml"
 
 SCRIPT_URL="https://raw.githubusercontent.com/comegome/Simple-Box/main/simple-box.sh"
 
+# acme.sh 的 SAVED_CF_Token 是「每个 home 一份」，不是每个域名一份：同一个 home
+# 里同时挂接入域（ducto.net）和内容域（yuzhaizu.com）时，后签的那个覆盖前者，
+# 另一个 zone 到期续期静默失败（cron 输出进 /dev/null，没人会发现）。
+# 所以内容域证书统一放独立的 site home；接入域继续用默认 home。
+ACME_SITE_HOME="${ACME_SITE_HOME:-$HOME/.acme.sh-site}"
+
+# 按需创建 site home：复制 acme.sh 骨架（不复制任何已签域名），写入本 zone 的
+# token，并幂等挂上自己的 cron。成功时输出 home 路径。
+acme_site_home_ensure() {
+    local token="${1:-}" home="$ACME_SITE_HOME" base="$HOME/.acme.sh" d email
+    if [[ -x "$home/acme.sh" ]]; then printf '%s' "$home"; return 0; fi
+    [[ -f "$base/acme.sh" ]] || return 1
+    mkdir -p "$home" || return 1
+    cp -a "$base/acme.sh" "$home/" 2>/dev/null || return 1
+    for d in dnsapi deploy notify ca; do
+        [[ -e "$base/$d" ]] && cp -a "$base/$d" "$home/" 2>/dev/null
+    done
+    [[ -f "$base/http.header" ]] && cp -a "$base/http.header" "$home/" 2>/dev/null
+    email=$(sed -n "s/^ACCOUNT_EMAIL='\(.*\)'/\1/p" "$base/account.conf" 2>/dev/null | head -1)
+    {
+        printf "ACCOUNT_EMAIL='%s'\n" "${email:-admin@localhost}"
+        [[ -n "$token" ]] && printf "SAVED_CF_Token='%s'\n" "$token"
+    } > "$home/account.conf"
+    chmod 600 "$home/account.conf" 2>/dev/null || true
+    if ! crontab -l 2>/dev/null | grep -qF "$home"; then
+        { crontab -l 2>/dev/null; echo "26 2,8,14,20 * * * \"$home\"/acme.sh --cron --home \"$home\" > /dev/null"; } | crontab - 2>/dev/null || true
+    fi
+    printf '%s' "$home"
+}
+
 # 临时文件兜底：正常路径各自删，异常退出（Ctrl-C / 报错）时由主流程里的 EXIT trap 收尾。
 # 只在入口设置 trap——被 source 时不能往调用方 shell 里塞 trap。
 TMP_CLEANUP=()
@@ -739,14 +769,21 @@ issue_cert_bundle() {
 issue_site_cert() {
     local domain="${1:-}" cf_token="${2:-}"
     local dir="${CERT_SSL_ROOT}/${domain}"
-    local acme_bin="$HOME/.acme.sh/acme.sh"
+    local acme_home="" acme_bin=""
     [[ -n "$domain" ]] || return 1
 
     # 已有证书时这一步只是「部署 + 挂续期钩子」，不需要 Token
     local have_cert=0
-    [[ -f "$HOME/.acme.sh/${domain}_ecc/fullchain.cer" ]] && have_cert=1
+    [[ -f "$ACME_SITE_HOME/${domain}_ecc/fullchain.cer" ]] && have_cert=1
+    # 旧布局（证书还躺在默认 home 里）也算已有，后面就地迁移，不重签
+    [[ "$have_cert" == 0 && -f "$HOME/.acme.sh/${domain}_ecc/fullchain.cer" ]] && have_cert=1
 
     if [[ -z "$cf_token" ]]; then cf_token="${CF_TOKEN:-}"; fi
+    # 内容域的 token 单独放一份：/root/.cf-token 是接入域那个 zone 的，
+    # 拿它去签内容域只会得到 invalid domain。
+    if [[ -z "$cf_token" && -f /root/.cf-token-site ]]; then
+        cf_token=$(tr -d '\r\n' < /root/.cf-token-site)
+    fi
     if [[ -z "$cf_token" && -f /root/.cf-token ]]; then
         cf_token=$(tr -d '\r\n' < /root/.cf-token)
     fi
@@ -755,20 +792,28 @@ issue_site_cert() {
         cf_token="$PROMPTED_CF_TOKEN"
     fi
 
-    if [[ ! -f "$acme_bin" ]]; then
+    if [[ ! -f "$HOME/.acme.sh/acme.sh" ]]; then
         echo -e "安装 acme.sh ..."
         curl -sSL https://get.acme.sh | sh -s email="admin@${domain}" >/dev/null 2>&1 || true
     fi
-    [[ -f "$acme_bin" ]] || { echo -e "${RED}acme.sh 不可用${PLAIN}"; return 1; }
+    [[ -f "$HOME/.acme.sh/acme.sh" ]] || { echo -e "${RED}acme.sh 不可用${PLAIN}"; return 1; }
+
+    # 内容域用独立 home：一个 home 只能存一个 zone 的 token（见文件头说明）
+    acme_home=$(acme_site_home_ensure "$cf_token") || {
+        echo -e "${RED}无法准备内容域证书实例（${ACME_SITE_HOME}）${PLAIN}"; return 1; }
+    acme_bin="$acme_home/acme.sh"
+    if [[ -d "$HOME/.acme.sh/${domain}_ecc" && ! -d "$acme_home/${domain}_ecc" ]]; then
+        mv "$HOME/.acme.sh/${domain}_ecc" "$acme_home/" 2>/dev/null || true
+    fi
 
     export CF_Token="$cf_token"
-    if [[ ! -f "$HOME/.acme.sh/${domain}_ecc/fullchain.cer" ]]; then
+    if [[ ! -f "$acme_home/${domain}_ecc/fullchain.cer" ]]; then
         echo -e "通过 Cloudflare DNS API 申请 ${domain} 的证书（DNS-01）..."
-        "$acme_bin" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
-        "$acme_bin" --issue --dns dns_cf -d "$domain" --dnssleep 20 --keylength ec-256 --force >/dev/null 2>&1 || true
+        "$acme_bin" --home "$acme_home" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
+        "$acme_bin" --home "$acme_home" --issue --dns dns_cf -d "$domain" --dnssleep 20 --keylength ec-256 --force >/dev/null 2>&1 || true
     fi
     install -d -m 755 "$dir" || return 1
-    "$acme_bin" --install-cert -d "$domain" --ecc \
+    "$acme_bin" --home "$acme_home" --install-cert -d "$domain" --ecc \
         --fullchain-file "${dir}/fullchain.cer" \
         --key-file "${dir}/private.key" \
         --reloadcmd "systemctl reload caddy 2>/dev/null || true" >/dev/null 2>&1 || true

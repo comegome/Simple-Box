@@ -181,6 +181,7 @@ simbo
 
 * **内容源**：ESO（天文）/ Wikimedia（开放知识）/ W3C（Web 标准）/ BHL（自然史）。一个站只用一个源，题材与来源一致；站名、版式、文章子集由「域名」派生，不同机器不会撞成同一份。
 * **证书**：优先复用本机已有证书（`/etc/sing-box/cert` 或 `/etc/ssl/<域名>`）；没有就询问 Cloudflare Token 走 DNS-01 现签一张，写 `/etc/ssl/<域名>`，**不会覆盖 Hy2 的证书**。
+* **证书实例分家**：内容域证书用独立 acme 实例 `/root/.acme.sh-site`（token 取 `/root/.cf-token-site`），接入域仍用 `/root/.acme.sh`。acme.sh 的 `SAVED_CF_Token` 是每个实例一份，两 zone 挤在一个实例里会让其中一个续期静默失败——这是 `example.com` 与节点域名分属两个 Cloudflare zone 时的必做项。
 * **挂载**：Caddy 站点只监听 `127.0.0.1:9443`，公网 443 仍归 sing-box；Reality 在跑时自动翻转。
 * **一键接管**：建站完成后会问一句「把该域名设为 Reality 的伪装域名？」，回答回车即完成 SNI 切换 + 配置重建 + 重启，**不需要再去菜单 2 改第二次**。
 

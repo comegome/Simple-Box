@@ -716,6 +716,52 @@ issue_cert_bundle() {
     return 0
 }
 
+# 为「非 Hy2 域名」单独签一张站点证书，写 <CERT_SSL_ROOT>/<域名>，不动 sing-box 的 CERT_DIR。
+# 用于伪装站想用别的域名（菜单 8 / Reality 启用流程）时，该域名此前从未签过证书。
+issue_site_cert() {
+    local domain="${1:-}" cf_token="${2:-}"
+    local dir="${CERT_SSL_ROOT}/${domain}"
+    local acme_bin="$HOME/.acme.sh/acme.sh"
+    [[ -n "$domain" ]] || return 1
+
+    if [[ -z "$cf_token" ]]; then cf_token="${CF_TOKEN:-}"; fi
+    if [[ -z "$cf_token" && -f /root/.cf-token ]]; then
+        cf_token=$(tr -d '\r\n' < /root/.cf-token)
+    fi
+    if [[ -z "$cf_token" ]]; then
+        prompt_cf_token || { echo -e "${YELLOW}没有 CF Token，无法签发 ${domain} 的证书${PLAIN}"; return 1; }
+        cf_token="$PROMPTED_CF_TOKEN"
+    fi
+
+    if [[ ! -f "$acme_bin" ]]; then
+        echo -e "安装 acme.sh ..."
+        curl -sSL https://get.acme.sh | sh -s email="admin@${domain}" >/dev/null 2>&1 || true
+    fi
+    [[ -f "$acme_bin" ]] || { echo -e "${RED}acme.sh 不可用${PLAIN}"; return 1; }
+
+    export CF_Token="$cf_token"
+    if [[ ! -f "$HOME/.acme.sh/${domain}_ecc/fullchain.cer" ]]; then
+        echo -e "通过 Cloudflare DNS API 申请 ${domain} 的证书（DNS-01）..."
+        "$acme_bin" --set-default-ca --server letsencrypt >/dev/null 2>&1 || true
+        "$acme_bin" --issue --dns dns_cf -d "$domain" --dnssleep 20 --keylength ec-256 --force >/dev/null 2>&1 || true
+    fi
+    install -d -m 755 "$dir" || return 1
+    "$acme_bin" --install-cert -d "$domain" --ecc \
+        --fullchain-file "${dir}/fullchain.cer" \
+        --key-file "${dir}/private.key" \
+        --reloadcmd "systemctl reload caddy 2>/dev/null || true" >/dev/null 2>&1 || true
+    chgrp caddy "${dir}/private.key" 2>/dev/null || true
+    chmod 640 "${dir}/private.key" 2>/dev/null || true
+    chmod 644 "${dir}/fullchain.cer" 2>/dev/null || true
+
+    if find_cert_dir "$domain" >/dev/null 2>&1; then
+        echo -e "${GREEN}✓ 已签发并部署 ${domain} 的证书（${dir}）${PLAIN}"
+        return 0
+    fi
+    echo -e "${RED}✗ ${domain} 的证书申请失败（Token 权限 / DNS 记录 / CF 网络）${PLAIN}"
+    return 1
+}
+
 # 仅签发 IP 自签证书（独立函数，供子菜单复用）
 issue_self_signed_cert() {
     local server_ip="${1:-}"
@@ -1038,6 +1084,26 @@ fmt_hy_ports() {
     fi
 }
 
+# 订阅协议由证书模式唯一决定：domain → https，其余（含自签）→ http。
+# 全脚本只在这里判断一次，避免各菜单分支各推一遍、改规则时漏改。
+sub_scheme() {
+    [[ "${CERT_MODE:-selfsigned}" == "domain" ]] && printf 'https' || printf 'http'
+}
+
+# 校验并规整「直连域名后缀」：非法项打警告后丢弃，返回空格分隔的干净串。
+clean_suffixes() {
+    local s out=""
+    for s in $1; do
+        if [[ "$s" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
+            out+="${s} "
+        else
+            echo -e "${YELLOW} 忽略无效域名后缀: ${s}${PLAIN}" >&2
+        fi
+    done
+    printf '%s' "${out% }"
+}
+
+
 # 从当前作用域的变量重建订阅（render_and_reload / install_node / 子菜单共用）
 # 依赖 bash 动态作用域：调用方的 local 变量在函数内可见，无需显式传 13 个参数。
 # 参数错位只可能发生在这里一处，调用点全部是单行。
@@ -1066,6 +1132,41 @@ PROTOCOLS="reality hy2"
 proto_tag()   { case "$1" in reality) echo "vless-reality-in" ;; hy2) echo "hy2-in" ;; esac; }
 proto_human() { case "$1" in reality) echo "Reality" ;; hy2) echo "Hysteria2" ;; esac; }
 proto_label() { case "$1" in reality) echo "VLESS-Reality" ;; hy2) echo "Hysteria2" ;; esac; }
+
+# 取某协议在「直连 / 出口」两种形态下实际监听的端口；该形态未启用则输出空。
+# 订阅生成里原本这段 case 写了四遍，收敛到一处。
+node_port() {
+    local _p="$1" _port=""
+    if [[ "${2:-direct}" == "exit" ]]; then
+        case "$_p" in
+            reality) [[ -n "${vl_port:-}" ]] && _port="${EXIT_ENTRY_VL:-}" ;;
+            hy2)     [[ -n "${hy_port:-}" ]] && _port="${EXIT_ENTRY_HY:-}" ;;
+        esac
+    else
+        case "$_p" in
+            reality) _port="${vl_port:-}" ;;
+            hy2)     _port="${hy_port:-}" ;;
+        esac
+    fi
+    printf '%s' "$_port"
+}
+
+# 按顺序把节点交给回调：先直连协议，再出口协议（出口节点不带端口跳跃）。
+# 用法: emit_nodes <proto_proxy|proto_link> <输出文件>
+emit_nodes() {
+    local cb="$1" out="$2" _p _port
+    for _p in $PROTOCOLS; do
+        _port=$(node_port "$_p" direct)
+        [[ -n "$_port" ]] || continue
+        "$cb" "$_p" "${node_prefix}-$(proto_label "$_p")" "$_port" >> "$out"
+    done
+    [[ "${EXIT_TYPE:-none}" != "none" && -n "${EXIT_SERVER:-}" ]] || return 0
+    for _p in $PROTOCOLS; do
+        _port=$(node_port "$_p" exit)
+        [[ -n "$_port" ]] || continue
+        "$cb" "$_p" "${node_prefix}-$(proto_label "$_p")-${EXIT_LABEL:-SG}" "$_port" "" >> "$out"
+    done
+}
 
 # 订阅 YAML 片段：读调用方的小写局部变量（动态作用域）
 proto_proxy() {
@@ -1253,24 +1354,7 @@ generate_full_client_config() {
 proxies:
 EOF
 
-    local _p _port _name
-    for _p in $PROTOCOLS; do
-        case "$_p" in reality) _port="$vl_port" ;; hy2) _port="$hy_port" ;; esac
-        [[ -n "$_port" ]] || continue
-        proto_proxy "$_p" "${node_prefix}-$(proto_label "$_p")" "$_port" >> "$full_config_file"
-    done
-
-    # 出口中转：同一套模板，加后缀与链式入口端口
-    if [[ "${EXIT_TYPE:-none}" != "none" && -n "${EXIT_SERVER:-}" ]]; then
-        for _p in $PROTOCOLS; do
-            case "$_p" in
-                reality) [[ -n "$vl_port" ]] || continue; _port="${EXIT_ENTRY_VL:-}" ;;
-                hy2)     [[ -n "$hy_port" ]] || continue; _port="${EXIT_ENTRY_HY:-}" ;;
-            esac
-            [[ -n "$_port" ]] || continue
-            proto_proxy "$_p" "${node_prefix}-$(proto_label "$_p")-${EXIT_LABEL:-SG}" "$_port" "" >> "$full_config_file"
-        done
-    fi
+    emit_nodes proto_proxy "$full_config_file"
 
     cat >> "$full_config_file" <<EOF
 
@@ -1297,40 +1381,12 @@ EOF
     local provider_file="${WEB_DIR}/${token}/provider.yaml"
     printf 'proxies:\n' > "$provider_file"
 
-    for _p in $PROTOCOLS; do
-        case "$_p" in reality) _port="$vl_port" ;; hy2) _port="$hy_port" ;; esac
-        [[ -n "$_port" ]] || continue
-        proto_proxy "$_p" "${node_prefix}-$(proto_label "$_p")" "$_port" >> "$provider_file"
-    done
-    if [[ "${EXIT_TYPE:-none}" != "none" && -n "${EXIT_SERVER:-}" ]]; then
-        for _p in $PROTOCOLS; do
-            case "$_p" in
-                reality) [[ -n "$vl_port" ]] || continue; _port="${EXIT_ENTRY_VL:-}" ;;
-                hy2)     [[ -n "$hy_port" ]] || continue; _port="${EXIT_ENTRY_HY:-}" ;;
-            esac
-            [[ -n "$_port" ]] || continue
-            proto_proxy "$_p" "${node_prefix}-$(proto_label "$_p")-${EXIT_LABEL:-SG}" "$_port" "" >> "$provider_file"
-        done
-    fi
+    emit_nodes proto_proxy "$provider_file"
 
     # 3. 组装原生分享链接
     local links_out="${WEB_DIR}/${token}/links.txt"
     : > "$links_out"
-    for _p in $PROTOCOLS; do
-        case "$_p" in reality) _port="$vl_port" ;; hy2) _port="$hy_port" ;; esac
-        [[ -n "$_port" ]] || continue
-        proto_link "$_p" "${node_prefix}-$(proto_label "$_p")" "$_port" >> "$links_out"
-    done
-    if [[ "${EXIT_TYPE:-none}" != "none" && -n "${EXIT_SERVER:-}" ]]; then
-        for _p in $PROTOCOLS; do
-            case "$_p" in
-                reality) [[ -n "$vl_port" ]] || continue; _port="${EXIT_ENTRY_VL:-}" ;;
-                hy2)     [[ -n "$hy_port" ]] || continue; _port="${EXIT_ENTRY_HY:-}" ;;
-            esac
-            [[ -n "$_port" ]] || continue
-            proto_link "$_p" "${node_prefix}-$(proto_label "$_p")-${EXIT_LABEL:-SG}" "$_port" >> "$links_out"
-        done
-    fi
+    emit_nodes proto_link "$links_out"
 
     tidy_proxies "$full_config_file"
     tidy_proxies "$provider_file"
@@ -1893,8 +1949,8 @@ install_node() {
         setup_port_hopping "$hy_port" "$hy_range"
     fi
 
-    local sub_proto="http"
-    [[ "$CERT_MODE" == "domain" ]] && sub_proto="https"
+    local sub_proto
+    sub_proto=$(sub_scheme)
 
     # 自有域名直连（可选）：填了就让客户端配置把这些后缀的流量直连，不绕代理。
     # 典型用途：自建 DERP 中继、管理面板、订阅分发、SSH。留空则不插入任何规则。
@@ -1912,15 +1968,7 @@ install_node() {
     fi
     # 两个分支都要认 "-"：没有旧值时输入它也应静默跳过，不该走到校验里报"无效后缀"
     [[ "$suffixes_input" == "-" ]] && suffixes_input=""
-    local s s_clean=""
-    for s in $suffixes_input; do
-        if [[ "$s" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
-            s_clean+="${s} "
-        else
-            echo -e "${YELLOW} 忽略无效域名后缀: ${s}${PLAIN}"
-        fi
-    done
-    DIRECT_SUFFIXES="${s_clean% }"
+    DIRECT_SUFFIXES=$(clean_suffixes "$suffixes_input")
     [[ -n "$DIRECT_SUFFIXES" ]] && echo -e " ${GREEN}✓${PLAIN} 将直连: ${DIRECT_SUFFIXES}" \
                                 || echo -e " ${GRAY}已跳过（不插入任何直连规则）${PLAIN}"
 
@@ -2474,13 +2522,28 @@ proto_enable_reality() {
         echo -e "${GREEN}✓ 找到本机站点 ${site}${PLAIN}"
         echo -e "  Reality 占用 ${port}，站点回落到 127.0.0.1:${FLIP_PORT:-9443}"
     else
-        echo -e "${YELLOW}本机没有 ${sni} 的站点，按外部伪装域名校验 TLS 1.3 + h2 ...${PLAIN}"
-        if ! probe_external_sni "$sni"; then
-            echo -e "${RED}✗ ${sni} 不支持 TLS 1.3 + h2 或不可达${PLAIN}"
-            echo -e "${YELLOW}  换一个域名，或先在本机建好站点再启用。${PLAIN}"
-            return 1
+        # 域名解析到本机 = 这是自己的域名：可以现场建一个伪装站，比借外部站更自洽
+        if [[ "$interactive" == 1 ]] && check_domain_ip_binding "$sni" "${SERVER_IP:-}" >/dev/null 2>&1; then
+            echo -e "${YELLOW}本机没有 ${sni} 的站点，但该域名解析到本机。${PLAIN}"
+            local want_site=""
+            ask "现在就为它生成一个伪装站点（证书/站点/绑定一次做完）？[y/N]: " want_site
+            if [[ "${want_site,,}" == y* ]]; then
+                build_camo_site "$sni" "$(camo_pick_source "$sni")" "" || true
+                site=$(site_file_for "$sni" 2>/dev/null || true)
+                [[ -n "$site" ]] && echo -e "${GREEN}✓ 站点已就绪：${site}${PLAIN}"
+            fi
         fi
-        echo -e "${GREEN}✓ 外部伪装域名可用${PLAIN}"
+        if [[ -n "$site" ]]; then
+            :
+        else
+            echo -e "${YELLOW}本机没有 ${sni} 的站点，按外部伪装域名校验 TLS 1.3 + h2 ...${PLAIN}"
+            if ! probe_external_sni "$sni"; then
+                echo -e "${RED}✗ ${sni} 不支持 TLS 1.3 + h2 或不可达${PLAIN}"
+                echo -e "${YELLOW}  换一个域名，或先在本机建好站点再启用。${PLAIN}"
+                return 1
+            fi
+            echo -e "${GREEN}✓ 外部伪装域名可用${PLAIN}"
+        fi
     fi
 
     # 检查点 A：端口归属
@@ -2587,7 +2650,6 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
         local opt=""
         ask "请输入选项 [0-3]: " opt
         [[ "$ASK_EOF" == "1" ]] && break
-        [[ "$ASK_EOF" == "1" ]] && break
         case "$opt" in
             1)
                 echo -e "\n${YELLOW}=== Clash 订阅地址参数 ===${PLAIN}"
@@ -2635,8 +2697,8 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 local hy_password="${HY_PASS:-}"
                 local hy_skip_cert="${HY_SKIP_CERT:-true}"
                 # SUB_PROTO 必须由证书模式重新推导，不能沿用旧值（域名/自签切换后会写错协议）
-                local sub_proto="http"
-                [[ "$CERT_MODE" == "domain" ]] && sub_proto="https"
+                local sub_proto
+                sub_proto=$(sub_scheme)
                 local sub_token="$new_token"
                 if ! write_env_config; then
                     echo -e "${RED}订阅参数写入失败，配置未变更。${PLAIN}"
@@ -2687,8 +2749,8 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 local sub_port="${SUB_PORT:-8444}"
                 local sub_token="${SUB_TOKEN}"
                 local CERT_MODE="${CERT_MODE:-selfsigned}"
-                local sub_proto="http"
-                [[ "$CERT_MODE" == "domain" ]] && sub_proto="https"
+                local sub_proto
+                sub_proto=$(sub_scheme)
 
                 if ! write_env_config; then
                     echo -e "${RED}节点前缀写入失败，配置未变更。${PLAIN}"
@@ -2717,15 +2779,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                     continue
                 fi
                 [[ "$suffixes_input" == "-" ]] && suffixes_input=""
-                local s s_clean=""
-                for s in $suffixes_input; do
-                    if [[ "$s" =~ ^([a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?\.)+[a-zA-Z]{2,}$ ]]; then
-                        s_clean+="${s} "
-                    else
-                        echo -e "${YELLOW} 忽略无效域名后缀: ${s}${PLAIN}"
-                    fi
-                done
-                DIRECT_SUFFIXES="${s_clean% }"
+                DIRECT_SUFFIXES=$(clean_suffixes "$suffixes_input")
 
                 local node_prefix="${NODE_PREFIX:-}"
                 local server_ip="$SERVER_IP"
@@ -2744,8 +2798,8 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 local sub_port="${SUB_PORT:-8444}"
                 local sub_token="$SUB_TOKEN"
                 local CERT_MODE="${CERT_MODE:-selfsigned}"
-                local sub_proto="http"
-                [[ "$CERT_MODE" == "domain" ]] && sub_proto="https"
+                local sub_proto
+                sub_proto=$(sub_scheme)
 
                 if ! write_env_config; then
                     echo -e "${RED}写入失败，配置未变更。${PLAIN}"
@@ -3025,6 +3079,14 @@ ensure_camo_generator() {
     return 1
 }
 
+# 域名 → 内容源的确定性映射（同一个域名每次都是同一个源）
+camo_pick_source() {
+    local pool=(eso wikimedia w3c bhl)
+    local n
+    n=$(printf '%s' "${1:-}" | cksum | awk '{print $1}')
+    printf '%s' "${pool[$(( n % ${#pool[@]} ))]}"
+}
+
 # 生成 / 重建站点，并挂到 Caddy；Reality 在跑就同步翻转成 127.0.0.1:FLIP_PORT
 build_camo_site() {
     local domain="$1" source="$2" style="${3:-}"
@@ -3036,9 +3098,10 @@ build_camo_site() {
     }
     cert=$(find_cert_dir "$domain" 2>/dev/null || true)
     if [[ -z "$cert" ]]; then
-        echo -e "${RED}✗ 找不到 ${domain} 的证书${PLAIN}"
-        echo -e "${YELLOW}  先执行菜单 4「订阅地址配置」签发 ${HY_DOMAIN:-该域名} 的证书，再回来生成站点${PLAIN}"
-        return 1
+        echo -e "${YELLOW}${domain} 还没有证书，尝试用 Cloudflare DNS-01 现签一张（不影响 Hy2 的证书）...${PLAIN}"
+        issue_site_cert "$domain" || return 1
+        cert=$(find_cert_dir "$domain" 2>/dev/null || true)
+        [[ -n "$cert" ]] || return 1
     fi
 
     dir="${CAMO_ROOT}/${domain}"
@@ -3114,7 +3177,19 @@ menu_camo() {
                 esac
                 read -r -p "版式 0-7（回车=自动）: " style || return 0
                 [[ "$style" =~ ^[0-7]$ ]] || style=""
-                build_camo_site "$domain" "$source" "$style" || true
+                if build_camo_site "$domain" "$source" "$style"; then
+                    if [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in"; then
+                        local attach=""
+                        ask "把 ${domain} 设为 Reality 的伪装域名（会重启 sing-box，客户端需重拉订阅）？[Y/n]: " attach
+                        if [[ -z "$attach" || "${attach,,}" == y* ]]; then
+                            if proto_enable_reality "${VL_PORT:-443}" "$domain"; then
+                                echo -e "${GREEN}✓ Reality 已切到 ${domain}，伪装站即日起作为回落${PLAIN}"
+                            else
+                                echo -e "${YELLOW}⚠ Reality 切换失败，站点已建好，可稍后在「入站管理」里重试${PLAIN}"
+                            fi
+                        fi
+                    fi
+                fi
                 read -r -p "按回车键继续..." _ || true
                 ;;
             2)

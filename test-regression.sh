@@ -1121,6 +1121,63 @@ fi
 if find_cert_dir "" >/dev/null 2>&1; then bad "23.9 空域名应当失败"; else ok "23.9 空域名返回非 0"; fi
 if grep -q 'menu_camo' "$TARGET" && grep -q '8. 伪装站点' "$TARGET"; then ok "23.8 主菜单已挂载伪装站点入口"; else bad "23.8 菜单入口缺失"; fi
 
+group "25. 订阅生成与证书助手"
+# 25.1/25.2 sub_scheme 由 CERT_MODE 唯一决定
+_ss=$(CERT_MODE=domain sub_scheme); [[ "$_ss" == "https" ]] && ok "25.1 domain → https" || bad "25.1 domain 模式得到 ${_ss}"
+_ss=$(CERT_MODE=selfsigned sub_scheme); [[ "$_ss" == "http" ]] && ok "25.2 selfsigned → http" || bad "25.2 自签模式得到 ${_ss}"
+
+# 25.3/25.4 后缀清洗：非法项丢弃、合法项保留
+_cs=$(clean_suffixes "example.com bad!! corp.net" 2>/dev/null)
+[[ "$_cs" == "example.com corp.net" ]] && ok "25.3 clean_suffixes 过滤非法项" || bad "25.3 清洗结果异常: ${_cs}"
+[[ -z "$(clean_suffixes '' 2>/dev/null)" ]] && ok "25.4 空输入返回空串" || bad "25.4 空输入未返回空"
+
+# 25.5/25.6 node_port：直连取主端口、出口取链式端口，协议停用时为空
+vl_port=443; hy_port=8443; EXIT_ENTRY_VL=2053; EXIT_ENTRY_HY=2054
+[[ "$(node_port reality direct)" == "443" && "$(node_port hy2 exit)" == "2054" ]] \
+    && ok "25.5 node_port 直连/出口取值正确" || bad "25.5 node_port 取值错误"
+vl_port=""; hy_port=""
+[[ -z "$(node_port reality direct)" && -z "$(node_port hy2 exit)" ]] \
+    && ok "25.6 协议停用（端口空）时返回空" || bad "25.6 停用仍返回端口"
+vl_port=443; hy_port=8443
+
+# 25.7 订阅生成只保留一处「取端口 + 发节点」的遍历
+_cnt=$(grep -c 'emit_nodes ' "$TARGET")
+[[ "$_cnt" -eq 4 ]] && ok "25.7 emit_nodes 定义 + 三处调用（proxy/provider/link）" \
+    || bad "25.7 emit_nodes 调用点异常" "共 ${_cnt} 处，应为 4"
+_case_cnt=$(awk '/^generate_full_client_config\(\) \{/,/^}/' "$TARGET" | grep -c 'case "\$_p" in')
+[[ "$_case_cnt" -le 2 ]] && ok "25.8 订阅生成里重复的 case 已收敛（剩 ${_case_cnt} 处）" \
+    || bad "25.8 仍有 ${_case_cnt} 处重复 case"
+
+# 25.9 缺证书时 build_camo_site 会现签，而不是让用户去菜单 4 碰壁
+if awk '/^build_camo_site\(\) \{/,/^}/' "$TARGET" | grep -q 'issue_site_cert'; then
+    ok "25.9 伪装站缺证书时自动签发"
+else
+    bad "25.9 伪装站缺证书时不会签发"
+fi
+
+# 25.10 菜单 8 建站后可直接切 Reality SNI
+if awk '/^menu_camo\(\) \{/,/^}/' "$TARGET" | grep -q 'proto_enable_reality'; then
+    ok "25.10 菜单 8 建站后可一键切换 Reality 伪装域名"
+else
+    bad "25.10 菜单 8 仍未接入 Reality 切换"
+fi
+
+# 25.11 Reality 启用流程里，自有域名可现场建站
+if awk '/^proto_enable_reality\(\) \{/,/^}/' "$TARGET" | grep -q 'build_camo_site'; then
+    ok "25.11 Reality 启用流程可现场生成伪装站"
+else
+    bad "25.11 Reality 启用流程没有建站入口"
+fi
+
+# 25.12 不再有重复的 ASK_EOF 判断
+_dup=$(grep -c 'ASK_EOF" == "1" \]\] && break' "$TARGET")
+_dup_lines=$(grep -n 'ASK_EOF" == "1" \]\] && break' "$TARGET" | wc -l)
+if [[ $(( _dup_lines - $(grep -c 'if \[\[ "\$ASK_EOF"' "$TARGET") )) -le 4 ]]; then
+    ok "25.12 各菜单各一处 EOF 判断（共 ${_dup_lines} 处）"
+else
+    bad "25.12 EOF 判断仍重复" "共 ${_dup_lines} 处"
+fi
+
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
 ok "临时文件已清理"

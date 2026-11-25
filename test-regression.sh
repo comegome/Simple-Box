@@ -1998,6 +1998,65 @@ HOME="$_s_home34"; ACME_SITE_HOME="$_s_site34"; PATH="$_s_path34"
 if [[ -n "$_s_cron34" ]]; then CRON_DB="$_s_cron34"; else unset CRON_DB; fi
 rm -rf "$_h34"
 
+# ---------- 35. 「只能靠记性」的机械不变式 ----------
+group "35. 机械不变式（调用点/顺序/退出保护）"
+
+# 35.1 配置只有一个写入口：write_singbox_config 必须且只能出现在 render_set 里
+_wsw=$(awk '/^[A-Za-z_][A-Za-z0-9_]*\(\) *\{/ { fn=$1; sub(/\(\)/,"",fn) }
+            /^[[:space:]]+write_singbox_config / { print fn }' "$TARGET")
+if [[ "$_wsw" == "render_set" ]]; then
+    ok "35.1 write_singbox_config 只在 render_set 内调用（唯一写入口）"
+else
+    bad "35.1 配置写入绕过 render_set" "调用点所在函数: ${_wsw:-无}"
+fi
+
+# 35.2 render_set 不能单独用：调用它的函数必须接着 apply_exit_config 或 render_and_reload
+_rs_bad=$(awk '
+    /^[A-Za-z_][A-Za-z0-9_]*\(\) *\{/ { fn=$1; sub(/\(\)/,"",fn); next }
+    /^}/ { fn=""; next }
+    fn != "" && /^[[:space:]]+render_set / { call[fn]=1 }
+    fn != "" && /apply_exit_config|render_and_reload/ { guard[fn]=1 }
+    END { bad=""; for (f in call) if (!(f in guard)) bad=bad" "f; print bad }
+' "$TARGET")
+if [[ -z "$_rs_bad" ]]; then
+    ok "35.2 render_set 的调用方都补了中转追加/重载（单独用会抹掉 exit-*-in）"
+else
+    bad "35.2 render_set 被单独调用" "缺 apply_exit_config/render_and_reload:${_rs_bad}"
+fi
+
+# 35.3 写 env 必须清缓存，且只有 write_env_config 一处写 env
+_el=$(awk '/^[A-Za-z_][A-Za-z0-9_]*\(\) *\{/ { fn=$1; sub(/\(\)/,"",fn) }
+           /^[[:space:]]*ENV_LOADED=""$/ { print fn }' "$TARGET" | sed '/^$/d')
+if [[ "$_el" == "write_env_config" ]]; then
+    ok "35.3 ENV_LOADED 的清缓存只在 write_env_config（写后必清）"
+else
+    bad "35.3 env 缓存清理位置异常" "命中: ${_el:-无}"
+fi
+
+# 35.4 新增 mktemp 要登记 TMP_CLEANUP（差值不得超过已知未登记的 4 处）
+_mk=$(grep -c 'mktemp' "$TARGET")
+_reg=$(grep -c 'TMP_CLEANUP+=(' "$TARGET")
+if (( _mk - _reg <= 4 )); then
+    ok "35.4 mktemp 与 TMP_CLEANUP 登记数匹配（${_mk} / ${_reg}）"
+else
+    bad "35.4 有 mktemp 未登记到 TMP_CLEANUP" "mktemp=${_mk} 登记=${_reg}"
+fi
+
+# 35.5 每个菜单循环都要能在 stdin 关闭时退出（ASK_EOF 或 read || return/opt）
+_bad_menu=""
+for _fn in $(grep -oE '^menu[a-z_]*\(\)' "$TARGET" | sed 's/()//'); do
+    _mb=$(awk "/^${_fn}\\(\\) \\{/,/^}/" "$TARGET")
+    grep -q 'while true' <<<"$_mb" || continue
+    grep -q 'ASK_EOF' <<<"$_mb" && continue
+    grep -qE '\|\|[[:space:]]*(return|opt=)' <<<"$_mb" && continue
+    _bad_menu="$_bad_menu $_fn"
+done
+if [[ -z "$_bad_menu" ]]; then
+    ok "35.5 所有菜单循环都能在 stdin 关闭时退出（不会刷屏死循环）"
+else
+    bad "35.5 菜单循环缺退出保护" "${_bad_menu}"
+fi
+
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
 ok "临时文件已清理"

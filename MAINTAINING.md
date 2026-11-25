@@ -181,6 +181,8 @@ sudo bash /tmp/final_verify.sh # 健康与出网，16 项
 
 专项测试按改动内容补充。全部通过才算完成。
 
+第 35 组把几条「机械不变式」变成了红灯，不再靠记性：配置只能从 `render_set` 进 `write_singbox_config`、`render_set` 的调用方必须补 `apply_exit_config`/`render_and_reload`、清 `ENV_LOADED` 只能发生在 `write_env_config`、`mktemp` 要登记 `TMP_CLEANUP`、每个 `menu*` 循环都要能在 stdin 关闭时退出。新增路径时如果踩到这几条，先看断言名字，不要改断言去迁就实现。
+
 ## 提交粒度
 
 一个需求一个提交。`9d0eb5a` 曾把三个缺陷修复、一个新功能、一次文案替换塞进同一个提交，事后回溯「哪个改动对应哪个需求」要翻 diff 才能分清。

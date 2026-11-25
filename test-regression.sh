@@ -2072,6 +2072,18 @@ else
     bad "35.5 菜单循环缺退出保护" "${_bad_menu}"
 fi
 
+# 35.6 install_node 的每个输入循环都要有 ASK_EOF 守卫。
+# 管道喂答案耗尽时没有守卫的循环会空转：域名循环实测刷了 1 万行「必须填域名」，
+# 而端口循环当时已经有守卫——守卫要逐个循环加，不能只加一处。
+_inst35=$(awk '/^install_node\(\) \{/,/^}/' "$TARGET")
+_n_loops=$(grep -c 'while true; do' <<<"$_inst35")
+_n_guard=$(grep -c 'ASK_EOF' <<<"$_inst35")
+if [[ "$_n_loops" -gt 0 && "$_n_guard" -ge "$_n_loops" ]]; then
+    ok "35.6 install_node 的 ${_n_loops} 个输入循环都有 EOF 守卫"
+else
+    bad "35.6 install_node 有输入循环缺 EOF 守卫（喂答案耗尽会空转）" "循环 ${_n_loops} 个 / 守卫 ${_n_guard} 处"
+fi
+
 # ---------- 36. 菜单 8 删除只清自己的产物 ----------
 group "36. 伪装站删除边界"
 

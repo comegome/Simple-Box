@@ -2002,6 +2002,9 @@ install_node() {
             fi
             while true; do
                 ask "请输入 Reality 借壳伪装域名 [默认: ${CYAN}${_site_default}${PLAIN}]: " vl_sni
+                if [[ "${ASK_EOF:-0}" == "1" ]]; then
+                    echo -e "${RED}输入结束，安装中止。${PLAIN}"; return 1
+                fi
                 vl_sni=$(trim_string "$vl_sni")
                 vl_sni=${vl_sni:-$_site_default}
                 if [[ "$vl_sni" == "$server_ip" ]]; then
@@ -2045,6 +2048,9 @@ install_node() {
 
         while true; do
             ask "请输入域名 [回车=IP自签]: " hy_domain
+            if [[ "${ASK_EOF:-0}" == "1" ]]; then
+                echo -e "${RED}输入结束，安装中止。${PLAIN}"; return 1
+            fi
             hy_domain=$(trim_string "$hy_domain")
 
             case "${hy_domain,,}" in
@@ -2105,6 +2111,9 @@ install_node() {
     if proto_in_set hy2; then
         while true; do
             ask_trim "请输入 Hysteria2 主监听 UDP 端口 [默认: ${CYAN}${old_hy_port:-8443}${PLAIN}]: " "${old_hy_port:-8443}" hy_port
+            if [[ "${ASK_EOF:-0}" == "1" ]]; then
+                echo -e "${RED}输入结束，安装中止。${PLAIN}"; return 1
+            fi
             if ! validate_port "$hy_port"; then
                 echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
             fi
@@ -2117,6 +2126,9 @@ install_node() {
     local sub_port
     while true; do
         ask_trim "请输入 Caddy 订阅监听端口 [默认: ${CYAN}${old_sub_port:-8444}${PLAIN}]: " "${old_sub_port:-8444}" sub_port
+        if [[ "${ASK_EOF:-0}" == "1" ]]; then
+            echo -e "${RED}输入结束，安装中止。${PLAIN}"; return 1
+        fi
         if ! validate_port "$sub_port"; then
             echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
         fi

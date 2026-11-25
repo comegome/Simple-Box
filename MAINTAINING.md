@@ -205,6 +205,18 @@ grep -q "^${BBR_MARK}" "$BBR_CONF" || return 0   # 不是自己的，不动
 
 端口循环里加了 `ASK_EOF` 守卫：管道输入耗尽时直接中止，不再空转（旧版遇到占用端口会用「换端口」提示无限循环）。套件 40.1–40.7 守这些行为。
 
+## 十七、协议集合是安装期的常量
+
+`PROTO_SET`（env.conf）= 这台机器装了哪些协议，取值只能是 `PROTOCOLS` 的非空子集。安装向导第一问决定它、重装默认沿用，**运行期没有任何路径改它**。
+
+- 已删除：`proto_enable_reality` / `proto_enable_hy2` / `disable_protocol` / `menu_protocol` / `current_set` / `regen_from_scope`，主菜单不再有「入站管理」（3–8 前移为 2–7）。要增删协议就重跑安装，凭证默认沿用、客户端订阅不用改。
+- 渲染：`render_set` 无参、只读 `PROTO_SET`；`write_singbox_config` 仍是唯一写入口（35.1）。`regen_subscription` 仍以 `config.json` 的 inbound 为准——配置是集合的产物，渲染失败会表现为「订阅少一条」，而不是「订阅指向没人监听的端口」。
+- 安装期检查只有两处，都不写配置：`reality_target_check`（站点证书可用 / 有站点时 Reality 必须占 443 / 无站点时探测外部 SNI 的 TLS 1.3 + h2）、`hy2_cert_sync`（域名模式缺证书即中止，不回退自签）。
+- **换伪装域名、或把 Reality 从集合里去掉时，旧站点必须搬回公网 443。** 翻转是站点块上的状态，不跟 env 走：`install_node` 在写 env 之前比对旧的 `SITE_FILE` / `FLIP_HOST`，不一致就先 `flip_site_toggle off`，否则站点永久留在回环上，公网 443 空着（探测者拿到 connection refused，比不伪装更可疑）。
+- 不在集合里的协议，`SITE_FILE` / `FLIP_HOST` 只是历史残留，`render_set` 不读；面板显示 `[未安装]`，在集合内但配置缺 inbound 显示 `[配置缺失]`（= 渲染失败，重装）。
+- 套件 15.13–15.15（三种集合）、16.x（安装期检查）、27.x（`PROTO_SET` 只由 `ask_proto_set` 与 `write_env_config` 赋值）、35.6 守这些。变异自检：让 `render_set` 无视集合、删掉 env 落库行、让 `hy2_cert_sync` 缺证书放行，三处都应变红。
+- 存量节点（env 里没有 `PROTO_SET`）默认按「两个都装」跑，换脚本不需要改 env；这个字段会在下一次写 env（改订阅参数 / 重装）时补上。
+
 ## 验证清单
 
 改完跑这四组，缺一不可：

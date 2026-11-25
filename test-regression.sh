@@ -189,10 +189,10 @@ fi
 # 6.7 清理逻辑必须在生成订阅文件之前（否则删掉刚建的新目录）
 if [[ -n "$_inst_body" ]]; then
     _rm_line=$(grep -n 'find "\$WEB_DIR"' <<<"$_inst_body" | head -1 | cut -d: -f1)
-    # 订阅实际由 proto_enable_* 内部重建，所以「生成」标记取协议启用调用
-    _gen_line=$(grep -nE 'proto_enable_reality|proto_enable_hy2' <<<"$_inst_body" | head -1 | cut -d: -f1)
+    # 订阅由 render_and_reload 内的 regen_subscription 重建，「生成」标记取它
+    _gen_line=$(grep -n 'render_and_reload' <<<"$_inst_body" | head -1 | cut -d: -f1)
     if [[ -n "$_rm_line" && -n "$_gen_line" && "$_rm_line" -lt "$_gen_line" ]]; then
-        ok "6.7 清理顺序正确（先删旧订阅目录，再启用协议生成新的）"
+        ok "6.7 清理顺序正确（先删旧订阅目录，再渲染并重建订阅）"
     else
         bad "6.7 清理顺序错误" "find 在第 ${_rm_line:-?} 行，generate 在第 ${_gen_line:-?} 行"
     fi
@@ -361,12 +361,13 @@ else
     bad "render_and_reload 缺少发布订阅的关键步骤" "generate=${_has_gen} setup=${_has_setup}"
 fi
 
-# install_node 不再自己写配置/订阅，必须委托给两个协议模块 + 建订阅站
+# install_node 不再自己写配置/订阅：按冻结集合调 render_set，再交给 render_and_reload
 _ibody=$(awk '/^install_node\(\)/ {p=1} p {print} p && /^}/ && NR>1 {exit}' "$TARGET")
-if grep -q 'proto_enable_reality' <<<"$_ibody" && grep -q 'proto_enable_hy2' <<<"$_ibody"; then
-    ok "install_node 委托协议模块（订阅站由 render_and_reload 内部建）"
+if grep -qE '^[[:space:]]+(if ! )?render_set' <<<"$_ibody" && grep -q 'render_and_reload' <<<"$_ibody" \
+   && ! grep -q 'proto_enable_' <<<"$_ibody"; then
+    ok "install_node 按集合渲染一次（订阅站由 render_and_reload 内部建）"
 else
-    bad "install_node 未委托协议模块" "reality=$(grep -c proto_enable_reality <<<"$_ibody") hy2=$(grep -c proto_enable_hy2 <<<"$_ibody")"
+    bad "install_node 写路径不对" "render_set=$(grep -cE '^\s+render_set' <<<"$_ibody") reload=$(grep -cE '^\s+render_and_reload' <<<"$_ibody")"
 fi
 
 # 10.2 端口跳跃已整体移除：订阅里不得再出现 ports / mport
@@ -384,16 +385,14 @@ if [[ "${_producer_calls:-0}" -eq 1 && "${_producer_in_regen:-0}" -eq 1 ]]; then
 else
     bad "订阅生成器存在多处调用" "共 ${_producer_calls} 处，其中在 regen_subscription 内 ${_producer_in_regen} 处"
 fi
-# 会改变节点参数、必须重生成订阅的 5 个触发点：
-#   重载后 / 安装时 / token 轮换 / 节点前缀变更 / 直连后缀变更
+# 会改变节点参数、必须重生成订阅的触发点：
 _regen_calls=$(grep -cE '^\s+regen_subscription' "$TARGET" || true)
-# 4 = 重载后 / token 轮换 / 节点前缀 / 直连后缀；+1 = regen_from_scope（启用/停用共用）
-# 安装不再单独调用：它走 proto_enable_*，最终由 render_and_reload 内的重载触发
-# 6 = show_links 重建 + show_clash_snippet 按需重建
-if [[ "${_regen_calls:-0}" -eq 7 ]]; then
-    ok "regen_subscription 覆盖 7 个触发点"
+# 1 = 重载后；3 = token 轮换 / 节点前缀 / 直连后缀；2 = show_links + show_clash_snippet
+# 安装不单独调用：它走 render_set + render_and_reload，由重载触发
+if [[ "${_regen_calls:-0}" -eq 6 ]]; then
+    ok "regen_subscription 覆盖 6 个触发点"
 else
-    bad "regen_subscription 调用点数量异常" "共 ${_regen_calls} 处，应为 7"
+    bad "regen_subscription 调用点数量异常" "共 ${_regen_calls} 处，应为 6"
 fi
 
 # ---------- 10. 全量回归：危险命令审计 ----------
@@ -656,38 +655,44 @@ cat > "$SB_CONF" <<'EOF'
 EOF
 if set_has "vless-reality-in"; then bad "15.12 缺席 inbound 被误判为启用"; else ok "15.12 缺席 inbound 判定为未启用"; fi
 
-# 15.13 render_set 只写 Reality
+# 15.13-15.15 render_set 无参，按 env 里冻结的集合渲染三种组合
 CERT_DIR="$SB15/cert"; mkdir -p "$CERT_DIR"
 VL_PORT=443; VL_SNI="agisignal.example.com"; VL_UUID="11111111-1111-1111-1111-111111111111"
-VL_PRIVKEY="PRIV"; VL_SHORTID="abcd1234"; VL_HANDSHAKE="127.0.0.1"; VL_HANDSHAKE_PORT=9443
+VL_PRIVKEY="PRIV"; VL_SHORTID="abcd1234"
 HY_PORT=10443; HY_PASS="pass123"
-render_set "reality" && python3 -c "import json;d=json.load(open('$SB_CONF'));print(' '.join(i['tag'] for i in d['inbounds']))" > "$SB15/tags1"
-[[ "$(cat "$SB15/tags1")" == "vless-reality-in" ]] && ok "15.13 render_set 单 Reality 只写一个 inbound" || bad "15.13 render_set Reality 输出异常" "$(cat "$SB15/tags1")"
+_tags15() { python3 -c "import json;print(' '.join(i['tag'] for i in json.load(open('$SB_CONF'))['inbounds']))"; }
 
-# 15.14 render_set 只写 Hy2
-render_set "hy2" && python3 -c "import json;d=json.load(open('$SB_CONF'));print(' '.join(i['tag'] for i in d['inbounds']))" > "$SB15/tags2"
-[[ "$(cat "$SB15/tags2")" == "hy2-in" ]] && ok "15.14 render_set 单 Hy2 只写一个 inbound" || bad "15.14 render_set Hy2 输出异常" "$(cat "$SB15/tags2")"
+PROTO_SET="reality"; render_set
+[[ "$(_tags15)" == "vless-reality-in" ]] && ok "15.13 集合=reality 只写一个 inbound" || bad "15.13 集合=reality 输出异常" "$(_tags15)"
 
-# 15.15 render_set 两个都写，且 Reality 使用翻转的 handshake 目标
-render_set "reality hy2" && python3 - <<PY
-import json
-d=json.load(open("$SB_CONF"))
-tags=[i["tag"] for i in d["inbounds"]]
-hs=[i for i in d["inbounds"] if i["tag"]=="vless-reality-in"][0]["tls"]["reality"]["handshake"]
-print(" ".join(tags)); print(hs["server"], hs["server_port"])
-PY
-_three=$(python3 -c "import json;print(' '.join(i['tag'] for i in json.load(open('$SB_CONF'))['inbounds']))")
-_hs=$(python3 -c "import json;print([i for i in json.load(open('$SB_CONF'))['inbounds'] if i['tag']=='vless-reality-in'][0]['tls']['reality']['handshake']['server'])")
-[[ "$_three" == "vless-reality-in hy2-in" && "$_hs" == "127.0.0.1" ]] && ok "15.15 render_set 双协议 + handshake 指向本机站点" || bad "15.15 render_set 双协议异常" "$_three / $_hs"
+PROTO_SET="hy2"; render_set
+[[ "$(_tags15)" == "hy2-in" ]] && ok "15.14 集合=hy2 只写一个 inbound" || bad "15.14 集合=hy2 输出异常" "$(_tags15)"
 
-# 15.16 静态：旧模块已删除、新模块存在
+PROTO_SET="reality hy2"; render_set
+_three=$(_tags15)
+_hs=$(python3 -c "import json;h=[i for i in json.load(open('$SB_CONF'))['inbounds'] if i['tag']=='vless-reality-in'][0]['tls']['reality']['handshake'];print(h['server'], h['server_port'])")
+[[ "$_three" == "vless-reality-in hy2-in" && "$_hs" == "127.0.0.1 9443" ]] \
+    && ok "15.15 集合=两个都装 + handshake 指向本机站点回环端口" || bad "15.15 双协议渲染异常" "$_three / $_hs"
+
+# 15.16 旧模块已删除
 if grep -qE '^menu_(reality|hy2)_module\(\)' "$TARGET"; then bad "15.16 旧模块函数仍存在"; else ok "15.16 旧模块函数已删除"; fi
-grep -q '^proto_enable_reality()' "$TARGET" && grep -q '^proto_enable_hy2()' "$TARGET" && grep -q '^disable_protocol()' "$TARGET" \
-    && ok "15.17 新协议模块就位" || bad "15.17 新协议模块缺失"
 
-# 15.18 菜单文案
-grep -q 'PROTOCOLS=' "$TARGET" && awk '/^menu_protocol\(\)/,/^}/' "$TARGET" | grep -q 'proto_human' \
-    && ok "15.18 菜单由协议注册表生成" || bad "15.18 菜单未遍历注册表"
+# 15.17 运行期协议开关全部删除：集合只能来自 env
+if grep -qE '^(proto_enable_reality|proto_enable_hy2|disable_protocol|menu_protocol|current_set)\(\)' "$TARGET"; then
+    bad "15.17 运行期协议开关仍存在" "$(grep -nE '^(proto_enable_|disable_protocol|menu_protocol|current_set)' "$TARGET")"
+else
+    ok "15.17 proto_enable_* / disable_protocol / menu_protocol / current_set 已删除"
+fi
+grep -q '^reality_target_check()' "$TARGET" && grep -q '^hy2_cert_sync()' "$TARGET" \
+    && ok "15.17b 安装期检查函数就位（reality_target_check / hy2_cert_sync）" \
+    || bad "15.17b 缺少安装期检查函数"
+
+# 15.18 控制台不再有入站管理入口
+if grep -qE 'menu_protocol|入站管理' "$TARGET"; then
+    bad "15.18 仍残留入站管理入口"
+else
+    ok "15.18 入站管理已从控制台移除"
+fi
 if grep -q '重建 Reality' "$TARGET"; then bad "15.19 菜单仍残留「重建 Reality」"; else ok "15.19 无「重建」残留"; fi
 
 # 15.20 翻转失败必须还原站点文件（真实 caddy validate）
@@ -781,11 +786,12 @@ if grep -q 'write_singbox_config' <<<"$_inst"; then
 else
     ok "16.1 install_node 不再直接调 write_singbox_config"
 fi
+# 16.2 安装的集合来自 ask_proto_set（安装期唯一入口）
 _inst_body=$(awk '/^install_node\(\) \{/,/^\}/' "$TARGET")
-if grep -q 'proto_enable_reality' <<< "$_inst_body" && grep -q 'proto_enable_hy2' <<< "$_inst_body"; then
-    ok "16.2 安装通过 proto_enable_reality / proto_enable_hy2"
+if grep -q 'ask_proto_set' <<<"$_inst_body" && ! grep -q 'proto_enable_' <<<"$_inst_body"; then
+    ok "16.2 安装由 ask_proto_set 决定集合，不再调用运行期开关"
 else
-    bad "16.2 安装未走协议模块"
+    bad "16.2 安装流程仍走运行期协议开关"
 fi
 
 # 16.3c 站点证书不覆盖域名时必须中止（否则回落握手全挂，而配置看起来全对）
@@ -794,8 +800,8 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout "$_bc/k.pem" -out "$_bc/c.pem"
     -subj "/CN=wrong.example.com" >/dev/null 2>&1
 printf 'bad.example.com {\n\ttls %s/c.pem %s/k.pem\n\troot * /var/www/bad\n}\n' "$_bc" "$_bc" > "$SB16/sites/badcert.caddy"
 _cfg_before=$(md5sum "$SB16/config.json" | cut -d' ' -f1)
-if proto_enable_reality 443 bad.example.com < /dev/null > "$SB16/o1c" 2>&1; then
-    bad "16.3c 站点证书不覆盖域名时仍启用 Reality"
+if reality_target_check 443 bad.example.com > "$SB16/o1c" 2>&1; then
+    bad "16.3c 站点证书不覆盖域名时仍判定可用"
 else
     if grep -q '证书不可用' "$SB16/o1c" && [[ "$(md5sum "$SB16/config.json" | cut -d' ' -f1)" == "$_cfg_before" ]]; then
         ok "16.3c 站点证书不可用时中止且不写配置"
@@ -806,7 +812,7 @@ fi
 rm -f "$SB16/sites/badcert.caddy"
 
 # 16.3b 有本机站点时，非 443 端口必须拒绝（否则站点被搬到回环、公网 443 空着）
-if proto_enable_reality 8443 site.example.com < /dev/null > "$SB16/o1b" 2>&1; then
+if reality_target_check 8443 site.example.com > "$SB16/o1b" 2>&1; then
     bad "16.3b 有站点时非 443 端口未被拒绝"
 else
     grep -q '只能监听 443' "$SB16/o1b" \
@@ -815,65 +821,67 @@ else
         || bad "16.3b 拒绝原因或副作用不对" "$(tail -2 "$SB16/o1b")"
 fi
 
-# 16.3 非交互启用 Reality（传参 + stdin 关闭，不应阻塞）
-if proto_enable_reality 443 site.example.com < /dev/null > "$SB16/o1" 2>&1; then
+# 16.3 站点可用时通过，并把回落目标写进 SITE_FILE
+load_env   # 旧流程由 proto_enable_* 读 env，现在由这里显式回读
+if reality_target_check 443 site.example.com > "$SB16/o1" 2>&1; then
+    PROTO_SET="reality hy2"; render_set
     tags=$(python3 -c "import json;print(' '.join(i['tag'] for i in json.load(open('$SB16/config.json'))['inbounds']))")
     hs=$(python3 -c "import json;h=[i for i in json.load(open('$SB16/config.json'))['inbounds'] if i['tag']=='vless-reality-in'][0]['tls']['reality'];print(h['handshake']['server'], h['handshake']['server_port'], [i for i in json.load(open('$SB16/config.json'))['inbounds']][0]['listen_port'])")
-    [[ "$tags" == "vless-reality-in" && "$hs" == "127.0.0.1 9443 443" ]] \
-        && ok "16.3 非交互启用 Reality：端口 443 + 回落 127.0.0.1:9443" \
-        || bad "16.3 启用 Reality 结果异常" "$tags / $hs"
+    [[ "$tags" == "vless-reality-in hy2-in" && "$hs" == "127.0.0.1 9443 443" ]] \
+        && ok "16.3 集合渲染：端口 443 + 回落 127.0.0.1:9443 + 两个 inbound" \
+        || bad "16.3 渲染结果异常" "$tags / $hs"
 else
-    bad "16.3 非交互启用 Reality 失败" "$(tail -3 "$SB16/o1")"
+    bad "16.3 reality_target_check 拒绝了可用站点" "$(tail -3 "$SB16/o1")"
 fi
 
-# 16.4 站点信息落进 env
-grep -q '^SITE_FILE="/tmp' "$SB16/env.conf" 2>/dev/null || grep -q "^SITE_FILE=\"$SB16/sites/site.caddy\"" "$SB16/env.conf" \
-    && ok "16.4 env 记录翻转站点路径" || bad "16.4 SITE_FILE 未写入" "$(grep '^SITE_FILE' "$SB16/env.conf")"
+# 16.4 站点信息由 render_set 派生（不落库，供 flip_site_toggle 用）
+[[ "${SITE_FILE:-}" == "$SB16/sites/site.caddy" && "${FLIP_HOST:-}" == "site.example.com" ]] \
+    && ok "16.4 render_set 派生 SITE_FILE / FLIP_HOST" \
+    || bad "16.4 翻转目标未派生" "SITE_FILE=${SITE_FILE:-空} FLIP_HOST=${FLIP_HOST:-空}"
 
 # 16.5b 域名有值但没有该域名的证书时必须中止（否则 [已启用] 但客户端 x509 失败）
-if proto_enable_hy2 20443 "nocert.example.com" "" < /dev/null > "$SB16/o2b" 2>&1; then
-    bad "16.5b 缺证书时仍启用 Hysteria2"
+if hy2_cert_sync "nocert.example.com" > "$SB16/o2b" 2>&1; then
+    bad "16.5b 缺证书时仍判定可用"
 else
     grep -q '没有 nocert.example.com 的可用证书' "$SB16/o2b" \
-        && ok "16.5b 缺证书时中止启用 Hysteria2" || bad "16.5b 中止原因不明确" "$(tail -2 "$SB16/o2b")"
+        && ok "16.5b 缺证书时中止" || bad "16.5b 中止原因不明确" "$(tail -2 "$SB16/o2b")"
 fi
 
-# 16.5 非交互启用 Hy2：两个 inbound 共存
-if proto_enable_hy2 10443 "" "" < /dev/null > "$SB16/o2" 2>&1; then
-    n=$(python3 -c "import json;print(len(json.load(open('$SB16/config.json'))['inbounds']))")
-    [[ "$n" == "2" ]] && ok "16.5 启用 Hy2 后两个 inbound 共存" || bad "16.5 inbound 数量异常" "$n"
-else
-    bad "16.5 非交互启用 Hy2 失败" "$(tail -3 "$SB16/o2")"
-fi
+# 16.5 IP 自签模式（域名为空）不需要额外证书，直接通过
+hy2_cert_sync "" > "$SB16/o2" 2>&1 && ok "16.5 IP 自签模式不要求域名证书" || bad "16.5 IP 自签模式被误拦" "$(tail -2 "$SB16/o2")"
 
 # 16.5c 证书模式不可中途切换：无证书一律中止，不再为存量 skip 节点开例外
-_ph16=$(awk '/^proto_enable_hy2\(\) \{/,/^}/' "$TARGET")
+_ph16=$(awk '/^hy2_cert_sync\(\) \{/,/^\}/' "$TARGET")
 if ! grep -q 'HY_SKIP_CERT' <<<"$_ph16" && grep -q '证书模式不可中途切换' <<<"$_ph16"; then
     ok "16.5c 无证书时一律中止（不再按旧 skip 标记放行）"
 else
     bad "16.5c 仍在为存量 skip 节点开例外"
 fi
 
-# 16.6 停用 Hy2 只摘自己
-disable_protocol hy2 > /dev/null 2>&1
-tags=$(python3 -c "import json;print(' '.join(i['tag'] for i in json.load(open('$SB16/config.json'))['inbounds']))")
-[[ "$tags" == "vless-reality-in" ]] && ok "16.6 停用 Hy2 保留 Reality" || bad "16.6 停用 Hy2 结果异常" "$tags"
+# 16.6 PROTO_SET 落库并规范成注册表顺序
+( ENV_FILE="$SB16/env2.conf"
+  node_prefix=SB; server_ip=203.0.113.11; vl_port=443; vl_sni=site.example.com
+  user_uuid="11111111-1111-1111-1111-111111111111"; vl_privkey=K; vl_pubkey=P; vl_shortid=ab
+  hy_port=8443; hy_password=pw; sub_port=8444; sub_token=tok16
+  hy_domain=""; target_host=203.0.113.11
+  PROTO_SET="hy2 reality"; write_env_config 2>/dev/null
+)
+grep -qx 'PROTO_SET="reality hy2"' "$SB16/env2.conf" 2>/dev/null \
+    && ok "16.6 PROTO_SET 落库并规范成注册表顺序" \
+    || bad "16.6 PROTO_SET 未按预期落库" "$(grep '^PROTO_SET' "$SB16/env2.conf" 2>/dev/null)"
 
-# 16.7 停用 Reality 摘干净
-disable_protocol reality > /dev/null 2>&1
-n=$(python3 -c "import json;print(len(json.load(open('$SB16/config.json'))['inbounds']))")
-[[ "$n" == "0" ]] && ok "16.7 停用 Reality 后无 inbound" || bad "16.7 停用 Reality 残留" "$n"
+# 16.7 非法集合（含未知协议名）拒绝写 env，不留半套配置
+( ENV_FILE="$SB16/env3.conf"
+  node_prefix=SB; server_ip=203.0.113.11; vl_port=443; vl_sni=site.example.com
+  user_uuid="11111111-1111-1111-1111-111111111111"; vl_privkey=K; vl_pubkey=P; vl_shortid=ab
+  hy_port=8443; hy_password=pw; sub_port=8444; sub_token=tok16
+  hy_domain=""; target_host=203.0.113.11
+  PROTO_SET="reality vless"; write_env_config 2>/dev/null
+)
+[[ ! -f "$SB16/env3.conf" ]] && ok "16.7 非法 PROTO_SET 拒绝写 env" || bad "16.7 非法集合仍写入了 env"
 
-# 16.8 订阅重建发生在 render 之前拿到新值（静态检查 sync_env_locals 在 render_and_reload 前）
-awk '/^proto_enable_reality\(\) \{/,/^\}/' "$TARGET" | grep -n "sync_env_locals\|render_and_reload" | awk -F: '$2 ~ /sync_env_locals/ {s=$1} $2 ~ /render_and_reload/ {r=$1} END{exit !(s && r && s<r)}' \
-    && ok "16.8 Reality 启用前同步小写作用域" || bad "16.8 未在 render 前同步 env 变量"
+# 16.8 / 16.9 随 proto_enable_* 删除（安装期检查已在 16.3/16.5 覆盖）
 
-# 16.9 proto 传参分支内不得再有 read
-if awk '/^proto_enable_reality\(\) \{/,/^\}/' "$TARGET" | grep -A14 'interactive" == 1' | grep -q 'ask'; then
-    ok "16.9 交互提问被限制在 interactive 分支内"
-else
-    bad "16.9 未找到 interactive 分支"
-fi
 
 
 # ---------- 17. 出口中转 ----------
@@ -1022,7 +1030,7 @@ _n=$(python3 -c "import json;print(len(json.load(open('$CONF_FILE'))['inbounds']
 [[ "$_n" == "2" ]] && ok "17.9 关闭出口后只剩两个 inbound" || bad "17.9 关闭出口残留" "$_n"
 
 # 17.10 菜单入口
-grep -q '3. 出站管理' "$TARGET" && grep -q '^menu_exit()' "$TARGET" && ok "17.10 菜单含出站管理" || bad "17.10 菜单缺少出站管理"
+grep -q '2. 出站管理' "$TARGET" && grep -q '^menu_exit()' "$TARGET" && ok "17.10 菜单含出站管理" || bad "17.10 菜单缺少出站管理"
 
 
 # ---------- 18. 出口导入与自检 ----------
@@ -1104,7 +1112,7 @@ _n_ipv6=$(grep -ci 'ipv6' "$TARGET" || true)
 
 grep -q 'print_io_status' "$TARGET" && ok "20.2 面板使用入站/出站状态块" || bad "20.2 面板未使用状态块"
 _missing=""
-for _kw in '[已启用]' '[未启用]' '[未安装]' '[已停用]'; do
+for _kw in '[已启用]' '[配置缺失]' '[未安装]' '[已停用]'; do
     grep -qF "$_kw" "$TARGET" || _missing+=" $_kw"
 done
 [[ -z "$_missing" ]] && ok "20.3 状态词齐全" || bad "20.3 缺少状态词" "$_missing"
@@ -1147,12 +1155,12 @@ if openssl req -x509 -newkey rsa:2048 -nodes -keyout "$CTD/k" -out "$CTD/c" -day
 else
     printf '  \033[33m-\033[0m openssl 生成测试证书失败，跳过 22.2/22.3\n'
 fi
-if grep -q 'return 2' "$TARGET" && grep -q '已中止启用 Hysteria2' "$TARGET"; then
-    ok "22.4 证书不匹配时中止启用（不再静默沿用旧证书）"
+if grep -q 'return 2' "$TARGET" && grep -q '证书与域名不匹配，已中止安装' "$TARGET"; then
+    ok "22.4 证书不匹配时中止安装（不再静默沿用旧证书）"
 else
     bad "22.4 缺少不匹配中止路径"
 fi
-if grep -q 'sync_hy2_cert "\$domain" || cert_rc=\$?' "$TARGET"; then
+if grep -q 'sync_hy2_cert "\$domain" || rc=\$?' "$TARGET"; then
     ok "22.5 退出码被显式捕获（set -e 下不会误退出）"
 else
     bad "22.5 退出码未捕获，set -e 可能直接退出"
@@ -1295,20 +1303,20 @@ else
     bad "25.9 伪装站缺证书时不会签发"
 fi
 
-# 25.10 菜单 8 建站后可直接切 Reality SNI
+# 25.10 建站菜单不再运行期切换 Reality SNI（集合冻结后换伪装域名只能重装）
 _mc=$(awk '/^menu_camo\(\) \{/,/^}/' "$TARGET")
 if grep -q 'proto_enable_reality' <<<"$_mc"; then
-    ok "25.10 菜单 8 建站后可一键切换 Reality 伪装域名"
+    bad "25.10 建站菜单仍残留运行期 SNI 切换"
 else
-    bad "25.10 菜单 8 仍未接入 Reality 切换"
+    ok "25.10 建站菜单不含运行期 SNI 切换"
 fi
 
-# 25.11 Reality 启用流程里，自有域名可现场建站
-_per=$(awk '/^proto_enable_reality\(\) \{/,/^}/' "$TARGET")
-if grep -q 'build_camo_site' <<<"$_per"; then
-    ok "25.11 Reality 启用流程可现场生成伪装站"
+# 25.11 Reality 的伪装目标由安装期检查统一判定（站点/外部 SNI 一处收口）
+_per=$(awk '/^reality_target_check\(\) \{/,/^}/' "$TARGET")
+if grep -q 'site_cert_problem' <<<"$_per" && grep -q 'probe_external_sni' <<<"$_per"; then
+    ok "25.11 安装期检查同时覆盖本机站点与外部 SNI"
 else
-    bad "25.11 Reality 启用流程没有建站入口"
+    bad "25.11 安装期检查缺站点或外部 SNI 校验"
 fi
 
 # 25.12 不再有重复的 ASK_EOF 判断
@@ -1348,24 +1356,30 @@ else
     bad "26.4 hy_password 取值路径异常"
 fi
 
-group "27. 协议启用复用不丢域"
-_h2=$(awk '/^proto_enable_hy2\(\) \{/,/^}/' "$TARGET")
-if grep -q 'port="\${HY_PORT:-}"; domain="\${HY_DOMAIN:-}"' <<<"$_h2"; then
-    ok "27.1 Hy2 交互复用前从 env 取回 port/domain/range"
+group "27. 协议集合是安装期常量"
+
+# 27.1 PROTO_SET 的赋值只出现在安装向导（ask_proto_set）与落库（write_env_config）
+_ps_all=$(grep -c 'PROTO_SET="' "$TARGET")
+_ps_ask=$(awk '/^ask_proto_set\(\) \{/,/^}/' "$TARGET" | grep -c 'PROTO_SET="')
+_ps_write=$(awk '/^write_env_config\(\) \{/,/^}/' "$TARGET" | grep -c 'PROTO_SET="')
+# +1 = 文件顶部的默认值（PROTO_SET="${PROTO_SET:-reality hy2}"，load_env 会覆盖它）
+if [[ "$_ps_all" -eq $(( _ps_ask + _ps_write + 1 )) && "$_ps_ask" -ge 3 && "$_ps_write" -ge 1 ]]; then
+    ok "27.1 PROTO_SET 只由安装向导与 write_env_config 赋值（${_ps_all} 处）"
 else
-    bad "27.1 Hy2 复用路径没有回填 domain（会静默降级 IP 自签）"
+    bad "27.1 运行期仍在改协议集合" "全脚本 ${_ps_all} 处，向导 ${_ps_ask}，落库 ${_ps_write}"
 fi
-if grep -q 'HY_DOMAIN="\$domain"' <<<"$_h2"; then
-    ok "27.2 HY_DOMAIN 仍由 domain 变量写入（单一来源）"
+
+# 27.2 render_set 不接受参数：集合只能来自 env，调用方无法传一个集合进来
+if awk '/^render_set\(\) \{/,/^}/' "$TARGET" | grep -q '\$1'; then
+    bad "27.2 render_set 仍读位置参数"
 else
-    bad "27.2 HY_DOMAIN 赋值点变了"
+    ok "27.2 render_set 无参（集合只从 env 派生）"
 fi
-_r2=$(awk '/^proto_enable_reality\(\) \{/,/^}/' "$TARGET")
-if grep -q 'port="\${port:-\${VL_PORT' <<<"$_r2" && grep -q 'sni="\${sni:-\${VL_SNI' <<<"$_r2"; then
-    ok "27.3 Reality 复用路径仍以 env 兜底"
-else
-    bad "27.3 Reality 复用路径缺少 env 兜底"
-fi
+
+# 27.3 集合派生只有 proto_in_set 一处
+_n_in=$(grep -c 'proto_in_set ' "$TARGET")
+[[ "$_n_in" -ge 4 ]] && ok "27.3 proto_in_set 是集合判定的唯一入口（${_n_in} 处）" \
+    || bad "27.3 集合判定没有收口" "proto_in_set 出现 ${_n_in} 处"
 
 group "28. 卸载清理伪装站"
 _un=$(awk '/^uninstall_all\(\) \{/,/^\}/' "$TARGET")
@@ -1388,12 +1402,8 @@ fi
 
 group "29. 证书与中转单元不被静默抹掉"
 
-_dp=$(awk '/^disable_protocol\(\) \{/,/^}/' "$TARGET" | sed '/^[[:space:]]*#/d')
-if grep -q 'sync_env_locals' <<<"$_dp" && grep -q 'apply_exit_config' <<<"$_dp"; then
-    ok "29.1 停用协议时重建中转单元（含 EXIT_* 派生）"
-else
-    bad "29.1 disable_protocol 没调 apply_exit_config（停用任一协议会把 2053/2054 抹掉）"
-fi
+# 29.1 已随 disable_protocol 删除：集合冻结后运行期没有停用路径，
+# 「停用协议把中转单元抹掉」这条失败路径不复存在；渲染路径的守卫见 30.6 / 35.2。
 
 _c1=$(grep -n 'cert_covers_host "${CERT_DIR}/fullchain.cer"' "$TARGET" | cut -d: -f1 | head -1)
 _c2=$(grep -n 'for _c in "/etc/ssl/${HY_DOMAIN:-}"' "$TARGET" | cut -d: -f1 | head -1)
@@ -1590,12 +1600,16 @@ _slots_active=$( (unset EXIT_SERVER EXIT_PORT EXIT_PASS EXIT_SNI EXIT_UUID EXIT_
   node_prefix=SB; server_ip=203.0.113.11; vl_port=443; vl_sni=gh.example.com
   user_uuid="11111111-1111-1111-1111-111111111111"; vl_privkey=K; vl_pubkey=P; vl_shortid=ab
   hy_port=8443; hy_password=pw; sub_port=8444; sub_token=tok31
+  hy_domain=""; target_host=203.0.113.11
   unset EXIT2_SERVER EXIT2_PORT EXIT2_LABEL EXIT2_ENTRY_VL EXIT2_ENTRY_HY
   write_env_config 2>/dev/null || true
 )
 _n31=$(grep -c '^EXIT2_' "$SB31/env2.conf" 2>/dev/null || true)
-[[ "$_n31" == "8" ]] && ok "31.3 env 写回全部 8 个 EXIT2_* 字段（空值）" \
-    || bad "31.3 env 缺少 EXIT2_* 字段" "共 ${_n31:-0} 个"
+if [[ "$_n31" == "8" ]] && grep -q '^NODE_PREFIX="SB"' "$SB31/env2.conf" 2>/dev/null; then
+    ok "31.3 env 写回全部 8 个 EXIT2_* 字段（空值）"
+else
+    bad "31.3 env 缺少 EXIT2_* 字段或主字段没写出" "EXIT2=${_n31:-0} 个"
+fi
 
 # 31.4 桥接断言：入口端口有值但落点不完整时拒绝写 env
 ( ENV_FILE="$SB31/env3.conf"
@@ -1604,6 +1618,7 @@ _n31=$(grep -c '^EXIT2_' "$SB31/env2.conf" 2>/dev/null || true)
   hy_port=8443; hy_password=pw; sub_port=8444; sub_token=tok31
   EXIT2_ENTRY_HY=2064; EXIT2_ENTRY_VL=2063
   EXIT2_SERVER=""; EXIT2_PORT=""; EXIT2_PASS=""
+  hy_domain=""; target_host=203.0.113.11
   write_env_config 2>/dev/null || true
 )
 if [[ ! -f "$SB31/env3.conf" ]]; then
@@ -1870,13 +1885,13 @@ exit_slot_set 3 SERVER ""
 unset EXIT3_LABEL EXIT3_SERVER EXIT3_PORT
 
 # 32.17-32.20 exit_entry_ports_ok：相同端口 / 撞直连 / 撞订阅 / 合法
-_o_vl="$VL_PORT"; _o_hy="$HY_PORT"; _o_sp="$SUB_PORT"
+_o_vl="${VL_PORT:-}"; _o_hy="${HY_PORT:-}"; _o_sp="${SUB_PORT:-}"
 VL_PORT=443; HY_PORT=8443; SUB_PORT=8444
 exit_entry_ports_ok 1 39181 39181 >/dev/null 2>&1 && bad "32.17 两个入口端口相同未拦" || ok "32.17 两端口相同被拒"
 exit_entry_ports_ok 1 443 39182 >/dev/null 2>&1 && bad "32.18 入口端口撞 VL_PORT 未拦" || ok "32.18 撞直连端口被拒"
 exit_entry_ports_ok 1 39181 8444 >/dev/null 2>&1 && bad "32.19 入口端口撞 SUB_PORT 未拦" || ok "32.19 撞订阅端口被拒"
 exit_entry_ports_ok 1 39181 39182 >/dev/null 2>&1 && ok "32.20 合法端口组合通过" || bad "32.20 合法组合被误拒"
-VL_PORT="$_o_vl"; HY_PORT="$_o_hy"; SUB_PORT="$_o_sp"
+VL_PORT="${_o_vl:-443}"; HY_PORT="${_o_hy:-8443}"; SUB_PORT="${_o_sp:-8444}"
 
 # 32.21-32.23 证书归属护栏：站点引用 CERT_DIR 时，证书降级必须能被发现
 mkdir -p "$_t32/sites" "$_t32/cert"

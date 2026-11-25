@@ -759,7 +759,7 @@ issue_cert_bundle() {
 }
 
 # 为「非 Hy2 域名」单独签一张站点证书，写 <CERT_SSL_ROOT>/<域名>，不动 sing-box 的 CERT_DIR。
-# 用于伪装站想用别的域名（菜单 8 / Reality 启用流程）时，该域名此前从未签过证书。
+# 用于伪装站想用别的域名（菜单「伪装站点」/ 安装向导）时，该域名此前从未签过证书。
 issue_site_cert() {
     local domain="${1:-}" cf_token="${2:-}"
     local dir="${CERT_SSL_ROOT}/${domain}"
@@ -999,7 +999,7 @@ setup_caddy_subscription() {
         echo -e "${RED}Caddy 不可用，订阅地址无法访问。${PLAIN}"
         echo -e "${YELLOW}节点本身是好的：Reality / Hysteria2 照常可用，原生链接也不受影响，${PLAIN}"
         echo -e "${YELLOW}只有 http://<地址>:${sub_port}/ 这个订阅端点不会响应。${PLAIN}"
-        echo -e "${YELLOW}装好 Caddy 后重跑菜单 4「Clash 订阅地址配置」即可补上，不用重装节点。${PLAIN}"
+        echo -e "${YELLOW}装好 Caddy 后重跑菜单 3「Clash 订阅地址配置」即可补上，不用重装节点。${PLAIN}"
         return 1
     fi
 
@@ -1108,8 +1108,11 @@ print_io_status() {
     # ---- 入站（两个协议固定占位）----
     for _p in $PROTOCOLS; do
         local name; name=$(proto_human "$_p")
-        local cred=""
-        case "$_p" in reality) cred="${VL_UUID:-}" ;; hy2) cred="${HY_PASS:-}" ;; esac
+        # 集合是安装期常量：不在集合里就是「没装」，在集合里但配置缺 inbound 说明渲染失败
+        if ! proto_in_set "$_p"; then
+            printf ' 入站 %-14s %s\n' "$name" "${GRAY}[未安装]${PLAIN}"
+            continue
+        fi
         if set_has "$(proto_tag "$_p")"; then
             st="${GREEN}[已启用]${PLAIN}"
             case "$_p" in
@@ -1117,10 +1120,8 @@ print_io_status() {
                 hy2)     printf ' 入站 %-14s %s  UDP %s  %s\n' "$name" "$st" "${HY_PORT:-8443}" \
                             "${HY_DOMAIN:-$SERVER_IP}";;
             esac
-        elif [[ -n "$cred" ]]; then
-            printf ' 入站 %-14s %s\n' "$name" "${YELLOW}[未启用]${PLAIN}"
         else
-            printf ' 入站 %-14s %s\n' "$name" "${GRAY}[未安装]${PLAIN}"
+            printf ' 入站 %-14s %s\n' "$name" "${RED}[配置缺失]${PLAIN}"
         fi
     done
 
@@ -1189,9 +1190,24 @@ regen_subscription() {
 # 组装客户端订阅与独立链接
 
 # ==================== 协议注册表 ====================
-# 加新协议：在 PROTOCOLS 里加名字，再补 proto_<name>_* 的四个小函数即可，
-# 订阅生成、菜单、启用/停用都从这里遍历，不需要再改别处。
+# 加新协议：在 PROTOCOLS 里加名字，再补 proto_tag/human/label 与渲染分支。
+# PROTOCOLS = 本脚本支持哪些协议；PROTO_SET（写在 env.conf）= 这台机器装了哪些。
+# 后者是**安装期常量**：运行期没有任何代码路径改它，要换集合只能重跑安装向导。
 PROTOCOLS="reality hy2"
+PROTO_SET="${PROTO_SET:-reality hy2}"
+
+proto_in_set() { [[ " ${PROTO_SET:-reality hy2} " == *" $1 "* ]]; }
+
+# 规范成 PROTOCOLS 顺序；空集或含未知协议名时返回 1
+proto_set_canon() {
+    local s="" p t
+    for t in $1; do
+        case " $PROTOCOLS " in *" $t "*) ;; *) return 1 ;; esac
+    done
+    for p in $PROTOCOLS; do [[ " $1 " == *" $p "* ]] && s+="$p "; done
+    [[ -n "$s" ]] || return 1
+    printf '%s' "${s% }"
+}
 
 proto_tag()   { case "$1" in reality) echo "vless-reality-in" ;; hy2) echo "hy2-in" ;; esac; }
 proto_human() { case "$1" in reality) echo "Reality" ;; hy2) echo "Hysteria2" ;; esac; }
@@ -1497,7 +1513,7 @@ fetch_latest_script() {
     mv -f "$tmp" "$dest"
 }
 
-# 主菜单选项 6：先取仓库最新脚本，有更新就切换过去再用新版继续安装
+# 主菜单选项 5：先取仓库最新脚本，有更新就切换过去再用新版继续安装
 # 这样「重装」同时承担了「升级脚本」的职责，用户无需手动 curl 覆盖
 reinstall_with_latest() {
     local share_dir="/usr/local/share/simple-box"
@@ -1663,6 +1679,14 @@ write_env_config() {
         return 1
     fi
 
+    # 协议集合是安装期常量：只允许 PROTOCOLS 的非空子集，写库前统一成规范顺序
+    local _canon
+    _canon=$(proto_set_canon "${PROTO_SET:-reality hy2}") || {
+        echo -e "${RED}内部错误: PROTO_SET 取值非法 (${PROTO_SET:-空})，已中止写入 ${ENV_FILE}。${PLAIN}" >&2
+        return 1
+    }
+    PROTO_SET="$_canon"
+
     # 槽 n>1 的桥接断言：入口端口写了就必须有完整落点，否则配置里会出现
     # 一个连向空地址的出口（sing-box check 能过，客户端连上就断）。
     local _n _f _v
@@ -1705,6 +1729,7 @@ HY_PASS="${hy_password}"
 SUB_PORT="${sub_port}"
 SUB_TOKEN="${sub_token}"
 CERT_MODE="${CERT_MODE:-selfsigned}"
+PROTO_SET="${PROTO_SET}"
 DIRECT_SUFFIXES="${direct_suffixes}"
 FLIP_HOST="${FLIP_HOST:-}"
 SITE_FILE="${SITE_FILE:-}"
@@ -1806,6 +1831,31 @@ detect_public_ip() {
     return 1
 }
 
+# 安装向导第一问：装哪些协议。结果写进 PROTO_SET（安装期常量）。
+# 重装时默认沿用 env 里现有集合；stdin 关闭时返回 1，由调用方中止安装。
+ask_proto_set() {
+    local def="1" opt=""
+    case "${PROTO_SET:-reality hy2}" in
+        reality) def="2" ;;
+        hy2)     def="3" ;;
+    esac
+    echo -e " 1. Reality + Hysteria2"
+    echo -e " 2. 只装 Reality"
+    echo -e " 3. 只装 Hysteria2"
+    echo -e "${GRAY} 集合装完即固定：以后要增删协议只能重跑安装，客户端需重取订阅${PLAIN}"
+    while true; do
+        ask "请输入选项 [默认: ${def}]: " opt
+        [[ "${ASK_EOF:-0}" == "1" ]] && return 1
+        opt=$(trim_string "$opt"); opt="${opt:-$def}"
+        case "$opt" in
+            1) PROTO_SET="reality hy2"; return 0 ;;
+            2) PROTO_SET="reality"; return 0 ;;
+            3) PROTO_SET="hy2"; return 0 ;;
+            *) echo -e "${RED}无效选项，请输入 1-3${PLAIN}" ;;
+        esac
+    done
+}
+
 install_node() {
     require_os >/dev/null || return 1
     require_arch >/dev/null || return 1
@@ -1827,6 +1877,7 @@ install_node() {
     # 既有凭据：重装默认沿用，客户端订阅不用改；显式选轮换才重新生成
     local keep_uuid="" keep_privkey="" keep_pubkey="" keep_shortid="" keep_hypass="" keep_token=""
     local old_vl_port="" old_vl_sni="" old_hy_port="" old_sub_port="" old_prefix="" old_domain=""
+    local old_site="" old_flip_host=""
     if [[ -f "$ENV_FILE" ]]; then
         load_env
         old_vl_port="$VL_PORT"; old_vl_sni="$VL_SNI"; old_hy_port="$HY_PORT"
@@ -1834,6 +1885,7 @@ install_node() {
         old_domain="${HY_DOMAIN:-}"
         keep_uuid="${VL_UUID:-}"; keep_privkey="${VL_PRIVKEY:-}"; keep_pubkey="${VL_PUBKEY:-}"
         keep_shortid="${VL_SHORTID:-}"; keep_hypass="${HY_PASS:-}"; keep_token="${SUB_TOKEN:-}"
+        old_site="${SITE_FILE:-}"; old_flip_host="${FLIP_HOST:-}"
         # 若 env.conf 中无域名记录，探测 acme.sh 目录中是否曾签发过历史域名证书
         if [[ -z "$old_domain" ]] && [[ -d "$HOME/.acme.sh" ]]; then
             local acme_d
@@ -1857,103 +1909,115 @@ install_node() {
         return 1
     fi
 
-    echo -e "\n${GRAY}──────── ${BOLD}[1/3] VLESS-Reality${PLAIN}"
-    local vl_port vl_sni handover_domain=""
+    # 协议集合：安装期唯一一次选择。重装默认沿用 env 里的现有集合。
+    echo -e "\n${GRAY}──────── ${BOLD}协议集合${PLAIN}"
+    ask_proto_set || { echo -e "${RED}输入结束，安装中止。${PLAIN}"; return 1; }
+
+    # 集合是安装期常量：不在集合里的协议连参数都不问，也不校验端口
+    local vl_port="${old_vl_port:-443}" vl_sni="" handover_domain=""
     local local_sites=() _site_default
     mapfile -t local_sites < <(local_site_domains)
 
-    while true; do
-        ask_trim "请输入 Reality 监听端口 [默认: ${CYAN}${old_vl_port:-443}${PLAIN}]: " "${old_vl_port:-443}" vl_port
-        if [[ "${ASK_EOF:-0}" == "1" ]]; then
-            echo -e "${RED}输入结束，安装中止。${PLAIN}"; return 1
-        fi
-        if ! validate_port "$vl_port"; then
-            echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
-        fi
-
-        local _holder=""
-        _holder=$(port_holder "$vl_port" tcp 2>/dev/null || true)
-
-        # 端口被本机 Caddy 站点占着：把站点搬到回环，腾出端口给 Reality（伪装站交接）
-        if [[ "$_holder" == *caddy* ]]; then
-            if (( ${#local_sites[@]} == 0 )); then
-                echo -e "${RED}${vl_port} 被 Caddy 占用，但 /etc/caddy/sites 里没有可接管的站点块。${PLAIN}"
-                echo -e "${YELLOW}  请先停掉占用该端口的服务，或换一个 Reality 端口。${PLAIN}"
-                continue
-            fi
-            local _pick="" _i=1 _d
-            if (( ${#local_sites[@]} == 1 )); then
-                _pick="${local_sites[0]}"
-            else
-                echo -e "${GREEN}检测到本机站点：${PLAIN}"
-                for _d in "${local_sites[@]}"; do echo -e "   ${_i}) ${_d}"; _i=$((_i+1)); done
-                ask "用哪个站点做伪装？[1-${#local_sites[@]}]：" _pick
-                [[ "$_pick" =~ ^[0-9]+$ ]] && (( _pick >= 1 && _pick <= ${#local_sites[@]} )) || _pick=1
-                _pick="${local_sites[$((_pick-1))]}"
-            fi
-            local _site=""
-            if ! _site=$(site_file_for "$_pick"); then
-                echo -e "${RED}✗ 找不到 ${_pick} 的站点文件，无法接管。${PLAIN}"; continue
-            fi
-            echo -e "${YELLOW}${vl_port} 现在由 Caddy 的 ${_pick} 占用，将搬到 127.0.0.1:${FLIP_PORT:-9443}，把 ${vl_port} 让给 Reality。${PLAIN}"
-            if ! site_handover_to_loopback "$_site" "$_pick" "${FLIP_PORT:-9443}"; then
-                echo -e "${RED}✗ 站点迁移失败（Caddy 校验 / 重载 / 回环 HTTPS 探测未通过），已还原。${PLAIN}"
-                echo -e "${YELLOW}  请手工把站点改到 127.0.0.1:${FLIP_PORT:-9443}，或换一个 Reality 端口。${PLAIN}"
-                continue
-            fi
-            handover_domain="$_pick"
-            echo -e "${GREEN}✓ ${_pick} 已搬到 127.0.0.1:${FLIP_PORT:-9443}，伪装域名将固定为它${PLAIN}"
-            check_port_conflict "$vl_port" "tcp" "vless" && break
-            continue
-        fi
-
-        if [[ -n "$_holder" && "$_holder" != *sing-box* ]]; then
-            echo -e "${RED}检测到 ${_holder} 占用 ${vl_port}，本脚本只接管 Caddy 站点。${PLAIN}"
-            echo -e "${YELLOW}  请手工把它挪到 127.0.0.1:${FLIP_PORT:-9443}，或换一个 Reality 端口。${PLAIN}"
-            continue
-        fi
-
-        check_port_conflict "$vl_port" "tcp" "vless" && break
-    done
-    # 写入全局，供后续 hy_port / sub_port 的冲突校验比较（新建时 env.conf 里还没有值）
-    VL_PORT="$vl_port"
-
-    if [[ -n "$handover_domain" ]]; then
-        # 站点已经搬到回环当回落目标，SNI 必须就是它，否则回落会打到别的域名上
-        vl_sni="$handover_domain"
-        echo -e "${GREEN}✓ 伪装域名: ${vl_sni}${PLAIN}"
+    if ! proto_in_set reality; then
+        echo -e "\n${GRAY}──────── ${BOLD}[1/3] VLESS-Reality 未安装（跳过）${PLAIN}"
     else
-        if (( ${#local_sites[@]} )); then
-            if (( ${#local_sites[@]} == 1 )); then
-                echo -e "${GREEN}✓ 检测到本机站点: ${local_sites[0]}${PLAIN}"
-                echo -e "${GRAY}  用它做伪装域名，探测者访问该域名看到的是真实站点，伪装效果最好。${PLAIN}"
-            else
-                echo -e "${GREEN}✓ 检测到本机站点:${PLAIN}"
-                local _i=1 _d
-                for _d in "${local_sites[@]}"; do echo -e "   ${_i}) ${_d}"; _i=$((_i+1)); done
-            fi
-        fi
-        _site_default="${local_sites[0]:-}"
-        if [[ -z "$old_vl_sni" && -n "$_site_default" ]]; then
-            _site_default="$_site_default"
-        else
-            _site_default="${old_vl_sni:-www.icloud.com}"
-        fi
-        while true; do
-            ask "请输入 Reality 借壳伪装域名 [默认: ${CYAN}${_site_default}${PLAIN}]: " vl_sni
-            vl_sni=$(trim_string "$vl_sni")
-            vl_sni=${vl_sni:-$_site_default}
-            if [[ "$vl_sni" == "$server_ip" ]]; then
-                echo -e "${RED}Reality 伪装域名不能是本机 IP，请重新输入！${PLAIN}"; continue
-            fi
-            if ! validate_domain "$vl_sni"; then
-                echo -e "${RED}域名格式非法（示例: www.icloud.com），请重新输入！${PLAIN}"; continue
-            fi
-            break
-        done
-    fi
+        echo -e "\n${GRAY}──────── ${BOLD}[1/3] VLESS-Reality${PLAIN}"
 
-    echo -e "\n${GRAY}──────── ${BOLD}[2/3] Hysteria2${PLAIN}"
+        while true; do
+            ask_trim "请输入 Reality 监听端口 [默认: ${CYAN}${old_vl_port:-443}${PLAIN}]: " "${old_vl_port:-443}" vl_port
+            if [[ "${ASK_EOF:-0}" == "1" ]]; then
+                echo -e "${RED}输入结束，安装中止。${PLAIN}"; return 1
+            fi
+            if ! validate_port "$vl_port"; then
+                echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
+            fi
+
+            local _holder=""
+            _holder=$(port_holder "$vl_port" tcp 2>/dev/null || true)
+
+            # 端口被本机 Caddy 站点占着：把站点搬到回环，腾出端口给 Reality（伪装站交接）
+            if [[ "$_holder" == *caddy* ]]; then
+                if (( ${#local_sites[@]} == 0 )); then
+                    echo -e "${RED}${vl_port} 被 Caddy 占用，但 /etc/caddy/sites 里没有可接管的站点块。${PLAIN}"
+                    echo -e "${YELLOW}  请先停掉占用该端口的服务，或换一个 Reality 端口。${PLAIN}"
+                    continue
+                fi
+                local _pick="" _i=1 _d
+                if (( ${#local_sites[@]} == 1 )); then
+                    _pick="${local_sites[0]}"
+                else
+                    echo -e "${GREEN}检测到本机站点：${PLAIN}"
+                    for _d in "${local_sites[@]}"; do echo -e "   ${_i}) ${_d}"; _i=$((_i+1)); done
+                    ask "用哪个站点做伪装？[1-${#local_sites[@]}]：" _pick
+                    [[ "$_pick" =~ ^[0-9]+$ ]] && (( _pick >= 1 && _pick <= ${#local_sites[@]} )) || _pick=1
+                    _pick="${local_sites[$((_pick-1))]}"
+                fi
+                local _site=""
+                if ! _site=$(site_file_for "$_pick"); then
+                    echo -e "${RED}✗ 找不到 ${_pick} 的站点文件，无法接管。${PLAIN}"; continue
+                fi
+                echo -e "${YELLOW}${vl_port} 现在由 Caddy 的 ${_pick} 占用，将搬到 127.0.0.1:${FLIP_PORT:-9443}，把 ${vl_port} 让给 Reality。${PLAIN}"
+                if ! site_handover_to_loopback "$_site" "$_pick" "${FLIP_PORT:-9443}"; then
+                    echo -e "${RED}✗ 站点迁移失败（Caddy 校验 / 重载 / 回环 HTTPS 探测未通过），已还原。${PLAIN}"
+                    echo -e "${YELLOW}  请手工把站点改到 127.0.0.1:${FLIP_PORT:-9443}，或换一个 Reality 端口。${PLAIN}"
+                    continue
+                fi
+                handover_domain="$_pick"
+                echo -e "${GREEN}✓ ${_pick} 已搬到 127.0.0.1:${FLIP_PORT:-9443}，伪装域名将固定为它${PLAIN}"
+                check_port_conflict "$vl_port" "tcp" "vless" && break
+                continue
+            fi
+
+            if [[ -n "$_holder" && "$_holder" != *sing-box* ]]; then
+                echo -e "${RED}检测到 ${_holder} 占用 ${vl_port}，本脚本只接管 Caddy 站点。${PLAIN}"
+                echo -e "${YELLOW}  请手工把它挪到 127.0.0.1:${FLIP_PORT:-9443}，或换一个 Reality 端口。${PLAIN}"
+                continue
+            fi
+
+            check_port_conflict "$vl_port" "tcp" "vless" && break
+        done
+        # 写入全局，供后续 hy_port / sub_port 的冲突校验比较（新建时 env.conf 里还没有值）
+        VL_PORT="$vl_port"
+
+        if [[ -n "$handover_domain" ]]; then
+            # 站点已经搬到回环当回落目标，SNI 必须就是它，否则回落会打到别的域名上
+            vl_sni="$handover_domain"
+            echo -e "${GREEN}✓ 伪装域名: ${vl_sni}${PLAIN}"
+        else
+            if (( ${#local_sites[@]} )); then
+                if (( ${#local_sites[@]} == 1 )); then
+                    echo -e "${GREEN}✓ 检测到本机站点: ${local_sites[0]}${PLAIN}"
+                    echo -e "${GRAY}  用它做伪装域名，探测者访问该域名看到的是真实站点，伪装效果最好。${PLAIN}"
+                else
+                    echo -e "${GREEN}✓ 检测到本机站点:${PLAIN}"
+                    local _i=1 _d
+                    for _d in "${local_sites[@]}"; do echo -e "   ${_i}) ${_d}"; _i=$((_i+1)); done
+                fi
+            fi
+            _site_default="${local_sites[0]:-}"
+            if [[ -z "$old_vl_sni" && -n "$_site_default" ]]; then
+                _site_default="$_site_default"
+            else
+                _site_default="${old_vl_sni:-www.icloud.com}"
+            fi
+            while true; do
+                ask "请输入 Reality 借壳伪装域名 [默认: ${CYAN}${_site_default}${PLAIN}]: " vl_sni
+                vl_sni=$(trim_string "$vl_sni")
+                vl_sni=${vl_sni:-$_site_default}
+                if [[ "$vl_sni" == "$server_ip" ]]; then
+                    echo -e "${RED}Reality 伪装域名不能是本机 IP，请重新输入！${PLAIN}"; continue
+                fi
+                if ! validate_domain "$vl_sni"; then
+                    echo -e "${RED}域名格式非法（示例: www.icloud.com），请重新输入！${PLAIN}"; continue
+                fi
+                break
+            done
+        fi
+    fi
+    # 没装 Reality 时 VL_SNI 只是 env 的占位值（订阅与回落都不用），优先沿用旧值
+    [[ -n "$vl_sni" ]] || vl_sni="${old_vl_sni:-}"
+
+    echo -e "\n${GRAY}──────── ${BOLD}[2/3] 域名与证书${PLAIN}"
 
     local hy_domain=""
 
@@ -2031,14 +2095,22 @@ install_node() {
         fi
     fi
 
-    local hy_port="8443"
-    while true; do
-        ask_trim "请输入 Hysteria2 主监听 UDP 端口 [默认: ${CYAN}${old_hy_port:-8443}${PLAIN}]: " "${old_hy_port:-8443}" hy_port
-        if ! validate_port "$hy_port"; then
-            echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
-        fi
-        check_port_conflict "$hy_port" "udp" "hy2" && break
-    done
+    # Reality 的伪装目标在签证书前先判掉：站点证书坏了 / 有站点却不是 443 / 外部 SNI 不通，
+    # 这三条都会让「配置、进程、订阅全绿但所有客户端握手失败」。通过时写入 SITE_FILE/FLIP_HOST。
+    if proto_in_set reality; then
+        reality_target_check "$vl_port" "$vl_sni" || return 1
+    fi
+
+    local hy_port="${old_hy_port:-8443}"
+    if proto_in_set hy2; then
+        while true; do
+            ask_trim "请输入 Hysteria2 主监听 UDP 端口 [默认: ${CYAN}${old_hy_port:-8443}${PLAIN}]: " "${old_hy_port:-8443}" hy_port
+            if ! validate_port "$hy_port"; then
+                echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
+            fi
+            check_port_conflict "$hy_port" "udp" "hy2" && break
+        done
+    fi
     HY_PORT="$hy_port"
 
     echo -e "\n${GRAY}──────── ${BOLD}[3/3] 订阅与节点${PLAIN}"
@@ -2074,6 +2146,15 @@ install_node() {
         target_host="$server_ip"
         hy_domain=""
     fi
+    # Hy2 是证书的消费者：域名模式下证书必须覆盖该域名，否则中止（不回退自签）
+    if proto_in_set hy2; then
+        hy2_cert_sync "$hy_domain" || {
+            systemctl start sing-box 2>/dev/null || true
+            return 1
+        }
+    fi
+    # 没装 Reality 时 VL_SNI 只占位；优先沿用旧值，其次用域名/本机 IP（env 要求非空）
+    [[ -n "$vl_sni" ]] || vl_sni="${hy_domain:-$server_ip}"
 
     # 生成密钥凭证（任一步失败都必须中止，否则空值会写进配置导致服务起不来）
     local key_pair vl_privkey vl_pubkey vl_shortid user_uuid hy_password sub_token
@@ -2146,6 +2227,20 @@ install_node() {
     [[ -n "$DIRECT_SUFFIXES" ]] && echo -e " ${GREEN}✓${PLAIN} 将直连: ${DIRECT_SUFFIXES}" \
                                 || echo -e " ${GRAY}已跳过（不插入任何直连规则）${PLAIN}"
 
+    # 换伪装域名 / 去掉 Reality 时，旧站点必须从回环搬回公网 443：
+    # 翻转是「站点块」上的状态，不跟着 env 走，漏了这一步站点会永久消失。
+    if [[ -n "$old_site" && -f "$old_site" ]] \
+       && { ! proto_in_set reality || [[ "$old_flip_host" != "$vl_sni" ]]; }; then
+        local _ns="${SITE_FILE:-}" _nh="${FLIP_HOST:-}"
+        SITE_FILE="$old_site"; FLIP_HOST="$old_flip_host"
+        if flip_site_toggle off; then
+            echo -e "${GREEN}✓ 旧站点 ${old_flip_host:-} 已搬回公网 443${PLAIN}"
+        else
+            echo -e "${YELLOW}⚠ 旧站点 ${old_flip_host:-} 未能搬回公网，请手工检查 ${old_site}${PLAIN}"
+        fi
+        SITE_FILE="$_ns"; FLIP_HOST="$_nh"
+    fi
+
     if ! write_env_config; then
         echo -e "${RED}环境配置写入失败，安装中止。${PLAIN}"
         return 1
@@ -2183,14 +2278,24 @@ EOF
     # 订阅站不在安装层单独建：render_and_reload 内部按「先写文件、再写站点、再自检」的顺序做，
     # 安装层提前建一次会拿旧 token 去自检，导致一次无意义的 404 告警。
 
-    # 两个协议走同一套模块（非交互入口），安装里不再另写一份配置
-    if ! proto_enable_reality "$vl_port" "$vl_sni"; then
-        echo -e "${RED}Reality 启用失败，安装中止（Hysteria2 未启用）。${PLAIN}"
+    # 大写字段一律从刚落盘的 env 回读：内存里再维护一套赋值，漏一行就会写坏订阅。
+    load_env || { echo -e "${RED}回读 ${ENV_FILE} 失败，安装中止。${PLAIN}"; return 1; }
+
+    # 按冻结的集合一次渲染（不再分协议各渲染一次、各重启一次）
+    if ! render_set; then
+        echo -e "${RED}配置生成失败，安装中止。${PLAIN}"
         return 1
     fi
-    if ! proto_enable_hy2 "$hy_port" "$hy_domain"; then
-        echo -e "${YELLOW}Hysteria2 启用失败，Reality 已可用。${PLAIN}"
-        echo -e "${YELLOW}修复后执行: simbo → 协议管理 → 启用 Hysteria2${PLAIN}"
+    # 站点必须在 sing-box 抢 443 之前让出端口（Caddy 还占着时重启会 bind 失败）
+    if proto_in_set reality && [[ -n "${SITE_FILE:-}" ]]; then
+        if ! flip_site_toggle on; then
+            echo -e "${RED}✗ 伪装站点未能让出 443，安装中止（站点文件已还原）${PLAIN}"
+            return 1
+        fi
+    fi
+    if ! render_and_reload; then
+        echo -e "${RED}配置应用失败，安装中止。${PLAIN}"
+        return 1
     fi
 
     echo -e "\n${GRAY}====================================================${PLAIN}"
@@ -2720,15 +2825,6 @@ sync_env_locals() {
     sub_token="$SUB_TOKEN"
 }
 
-# 当前已在 config.json 里的协议集合（供菜单/出口重建使用）。
-# 注意：不能在「即将启用某协议」的路径里用，那一刻它还没写进配置。
-current_set() {
-    local set=""
-    set_has "vless-reality-in" && set="reality"
-    set_has "hy2-in" && set="${set:+$set }hy2"
-    printf '%s\n' "$set"
-}
-
 # 出口连通性自检 + 结果播报（三态）
 report_exit_health() {
     exit_health_check "${1:-1}"
@@ -2744,20 +2840,20 @@ report_exit_health() {
 apply_exit_reload() {
     sync_env_locals
     write_env_config || return 1
-    render_set "$(current_set)" || return 1
+    render_set || return 1
     sync_env_locals
     render_and_reload
 }
 
-# 按启用集合写 config.json；集合来自 config.json 本身，不另设开关
+# 按 env.conf 里冻结的集合写 config.json。集合是安装期常量，这里只读不判断开关。
 render_set() {
-    local set=" $1 " vl_p="" hy_p=""
-    [[ "$set" == *" reality "* ]] && vl_p="$VL_PORT"
-    [[ "$set" == *" hy2 "* ]] && hy_p="$HY_PORT"
+    local vl_p="" hy_p=""
+    proto_in_set reality && vl_p="$VL_PORT"
+    proto_in_set hy2 && hy_p="$HY_PORT"
     # 翻转不落库：VL_SNI 在本机 Caddy 里有站点块 → 回落 127.0.0.1:FLIP_PORT，
     # 否则直接用该域名（外部 SNI）。只有这一个判据。
     local hs="${VL_SNI:-}" hsp="443"
-    if [[ -n "${VL_SNI:-}" ]] && site_file_for "$VL_SNI" >/dev/null 2>&1; then
+    if proto_in_set reality && [[ -n "${VL_SNI:-}" ]] && site_file_for "$VL_SNI" >/dev/null 2>&1; then
         hs="127.0.0.1"; hsp="${FLIP_PORT:-9443}"
         SITE_FILE="$(site_file_for "$VL_SNI")"; FLIP_HOST="$VL_SNI"
     fi
@@ -2765,178 +2861,65 @@ render_set() {
         "$hy_p" "${HY_PASS:-}" "$hs" "$hsp"
 }
 
-proto_enable_reality() {
-    # 传参 = 非交互（安装向导用）；不传参 = 交互（协议菜单用）
-    local port="${1:-}" sni="${2:-}" interactive=1
-    if [[ $# -gt 0 ]]; then interactive=0; fi
-    load_env || { echo -e "${RED}未检测到已安装的配置${PLAIN}"; return 1; }
-    ensure_reality_creds || return 1
+# ---------------------------------------------------------------- 安装期的协议检查
+# 协议集合冻结后，这两个函数是「启用某协议」唯一剩下的检查入口：只在 install_node
+# 里调用，运行期没有第二次机会（要改就重跑安装）。两者都只检查、不写配置。
 
-    if [[ "$interactive" == 1 ]]; then
-        if [[ -n "${VL_PORT:-}" && -n "${VL_SNI:-}" ]]; then
-            echo -e " 当前参数: 端口 ${CYAN}${VL_PORT}${PLAIN} / 伪装域名 ${CYAN}${VL_SNI}${PLAIN}"
-            local okp=""
-            ask "沿用这组参数？[Y/n]: " okp
-            if [[ "${okp,,}" == "n" ]]; then
-                ask_trim "请输入 Reality 监听端口 [默认: ${CYAN}${VL_PORT}${PLAIN}]: " "${VL_PORT}" port
-                ask_trim "请输入 Reality 伪装域名 [默认: ${CYAN}${VL_SNI}${PLAIN}]: " "${VL_SNI}" sni
-            fi
-        else
-            ask_trim "请输入 Reality 监听端口 [默认: ${CYAN}${VL_PORT:-443}${PLAIN}]: " "${VL_PORT:-443}" port
-            ask_trim "请输入 Reality 伪装域名 [默认: ${CYAN}${VL_SNI:-www.icloud.com}${PLAIN}]: " "${VL_SNI:-www.icloud.com}" sni
-        fi
-    fi
-    port="${port:-${VL_PORT:-443}}"; sni="${sni:-${VL_SNI:-www.icloud.com}}"
-    validate_port "$port" || return 1
-    validate_domain "$sni" || return 1
-
-    # 检查点 B：这个域名在本机有没有站点
-    local site=""
+# Reality 的伪装目标必须可用：本机站点（证书有效且 Reality 只能占 443）或外部 SNI。
+# 通过时把站点信息写进 SITE_FILE / FLIP_HOST，供 render_set 与 flip_site_toggle 用。
+reality_target_check() {
+    local port="$1" sni="$2" site="" why=""
     if site=$(site_file_for "$sni"); then
-        echo -e "${GREEN}✓ 找到本机站点 ${site}${PLAIN}"
         # 站点是 Reality 的回落目标：它出示的证书坏了，所有客户端握手都会失败，
         # 而配置、进程、订阅看起来全绿。显式 tls 的站点能在启用前就判掉。
-        local _cert_why
-        if ! _cert_why=$(site_cert_problem "$site" "$sni"); then
-            echo -e "${RED}✗ 本机站点 ${site} 的证书不可用：${_cert_why}${PLAIN}"
+        if ! why=$(site_cert_problem "$site" "$sni"); then
+            echo -e "${RED}✗ 本机站点 ${site} 的证书不可用：${why}${PLAIN}"
             echo -e "${YELLOW}  站点是 Reality 的回落目标，证书坏了会让所有客户端握手失败，已中止${PLAIN}"
-            echo -e "${YELLOW}  续期或重签该域名的证书后重试（simbo → 8. 伪装站点 / 证书签发）${PLAIN}"
+            echo -e "${YELLOW}  续期或重签该域名的证书后重跑安装${PLAIN}"
             return 1
         fi
-        echo -e "  Reality 占用 ${port}，站点回落到 127.0.0.1:${FLIP_PORT:-9443}"
-    else
-        # 域名解析到本机 = 这是自己的域名：可以现场建一个伪装站，比借外部站更自洽
-        if [[ "$interactive" == 1 ]] && check_domain_ip_binding "$sni" "${SERVER_IP:-}" >/dev/null 2>&1; then
-            echo -e "${YELLOW}本机没有 ${sni} 的站点，但该域名解析到本机。${PLAIN}"
-            local want_site=""
-            ask "现在就为它生成一个伪装站点（证书/站点/绑定一次做完）？[y/N]: " want_site
-            if [[ "${want_site,,}" == y* ]]; then
-                build_camo_site "$sni" "$(camo_pick_source "$sni")" "" || true
-                site=$(site_file_for "$sni" 2>/dev/null || true)
-                [[ -n "$site" ]] && echo -e "${GREEN}✓ 站点已就绪：${site}${PLAIN}"
-            fi
-        fi
-        if [[ -n "$site" ]]; then
-            :
-        else
-            echo -e "${YELLOW}本机没有 ${sni} 的站点，按外部伪装域名校验 TLS 1.3 + h2 ...${PLAIN}"
-            if ! probe_external_sni "$sni"; then
-                echo -e "${RED}✗ ${sni} 不支持 TLS 1.3 + h2 或不可达${PLAIN}"
-                echo -e "${YELLOW}  换一个域名，或先在本机建好站点再启用。${PLAIN}"
-                return 1
-            fi
-            echo -e "${GREEN}✓ 外部伪装域名可用${PLAIN}"
-        fi
-    fi
-
-    # 检查点 A：端口归属
-    local holder; holder=$(port_holder "$port" tcp)
-    if [[ -n "$holder" && "$holder" != *sing-box* ]]; then
-        if [[ "$holder" == *caddy* && -n "$site" ]]; then
-            echo -e "${YELLOW}${port} 现在由 Caddy 的站点占用，将迁移到 127.0.0.1:${FLIP_PORT:-9443}${PLAIN}"
-        else
-            echo -e "${RED}✗ ${port} 已被 ${holder} 占用，无法启用 Reality${PLAIN}"
+        # 有本机站点时，只能把站点搬到回环、由 Reality 在 443 上代它回落。
+        # Reality 换到非 443 端口时 443 会彻底空着，站点从此在公网消失（比不伪装更可疑）。
+        # 宁可直接拒绝，也不做这种「成功了一半」的迁移。
+        if [[ "$port" != "443" ]]; then
+            echo -e "${RED}✗ ${sni} 在本机有站点（${site}），Reality 只能监听 443 才能让它继续对外服务${PLAIN}"
+            echo -e "${YELLOW}  二选一：① Reality 端口用 443；② 伪装域名换成外部借壳域名（如 www.icloud.com）${PLAIN}"
             return 1
         fi
+        SITE_FILE="$site"; FLIP_HOST="$sni"
+        echo -e "${GREEN}✓ 本机站点 ${site} 作为回落目标（9443）${PLAIN}"
+        return 0
     fi
-
-    # 有本机站点时，只能把站点搬到回环、由 Reality 在 443 上代它回落。
-    # Reality 换到非 443 端口时 443 会彻底空着，站点从此在公网消失（比不伪装更可疑）。
-    # 宁可直接拒绝，也不做这种「成功了一半」的迁移。
-    if [[ -n "$site" && "$port" != "443" ]]; then
-        echo -e "${RED}✗ ${sni} 在本机有站点（${site}），Reality 只能监听 443 才能让它继续对外服务${PLAIN}"
-        echo -e "${YELLOW}  二选一：① Reality 端口用 443；② 伪装域名换成外部借壳域名（如 www.icloud.com）${PLAIN}"
+    echo -e "${YELLOW}本机没有 ${sni} 的站点，按外部伪装域名校验 TLS 1.3 + h2 ...${PLAIN}"
+    if ! probe_external_sni "$sni"; then
+        echo -e "${RED}✗ ${sni} 不支持 TLS 1.3 + h2 或不可达${PLAIN}"
+        echo -e "${YELLOW}  换一个域名，或先用菜单「伪装站点」在本机建好站点再重跑安装${PLAIN}"
         return 1
     fi
-
-    VL_PORT="$port"; VL_SNI="$sni"
-    SITE_FILE="$site"; FLIP_HOST="${site:+$sni}"; FLIP_PORT="${FLIP_PORT:-9443}"
-
-    # Reality 此刻还没写进 config.json，current_set 会漏掉自己，这里显式拼
-    local set="reality"
-    set_has "hy2-in" && set="reality hy2"
-    render_set "$set" || return 1
-    sync_env_locals; write_env_config || return 1
-
-    [[ -n "$site" ]] && { flip_site_toggle on || return 1; }
-    sync_env_locals   # render_and_reload 里的 regen_subscription 读小写变量
-    render_and_reload || return 1
-    echo -e "${GREEN}✓ Reality 已启用${PLAIN}"
+    echo -e "${GREEN}✓ 外部伪装域名可用${PLAIN}"
 }
 
-proto_enable_hy2() {
-    # 传参 = 非交互（安装向导用）；不传参 = 交互（协议菜单用）
-    local port="" domain="" interactive=1
-    if [[ $# -gt 0 ]]; then
-        interactive=0; port="${1:-}"; domain="${2:-}"
-    fi
-    load_env || { echo -e "${RED}未检测到已安装的配置${PLAIN}"; return 1; }
-
-    if [[ "$interactive" == 1 ]]; then
-        # 三样都先从 env 取当前值：reuse 分支不重新赋值，漏掉 domain 就会在
-        # 「沿用」之后把 HY_DOMAIN 写成空串，等于中途换了证书模式。
-        port="${HY_PORT:-}"; domain="${HY_DOMAIN:-}"
-        echo -e " 当前参数: 端口 ${CYAN}${HY_PORT:-—}${PLAIN} / 域名 ${CYAN}${HY_DOMAIN:-无}${PLAIN}"
-        local okh=""
-        ask "沿用这组参数？[Y/n]: " okh
-        if [[ "${okh,,}" == "n" ]]; then
-            # 证书模式在安装时定死：域名模式不许留空，自签模式不许填域名。
-            local _dmode="${CERT_MODE:-selfsigned}" _newd=""
-            while true; do
-                ask_trim "请输入 Hysteria2 域名 [默认: ${CYAN}${HY_DOMAIN:-留空}${PLAIN}]: " "${HY_DOMAIN:-}" _newd
-                if [[ "$_dmode" == "domain" && -z "$_newd" ]]; then
-                    echo -e "${RED}本机是域名证书模式，域名不能为空。要改用 IP 自签只能重跑安装向导。${PLAIN}"; continue
-                fi
-                if [[ "$_dmode" != "domain" && -n "$_newd" ]]; then
-                    echo -e "${RED}本机是 IP 自签模式，不能填域名。要改用域名证书只能重跑安装向导。${PLAIN}"; continue
-                fi
-                break
-            done
-            domain="$_newd"
-            ask_trim "请输入 Hysteria2 端口 [默认: ${CYAN}${HY_PORT:-10443}${PLAIN}]: " "${HY_PORT:-10443}" port
-        fi
-    fi
-    port="${port:-${HY_PORT:-10443}}"
-    validate_port "$port" || return 1
-
-    # 端口已被本机 sing-box 占用 = 就是这条协议自己在跑，跳过"被占用"判定（幂等重启）
-    local holder; holder=$(port_holder "$port" udp)
-    if [[ -z "$holder" || "$holder" != *sing-box* ]]; then
-        check_port_conflict "$port" "udp" "hy2" || return 1
-    fi
-
-    HY_DOMAIN="$domain"; HY_PORT="$port"
-    [[ -z "${HY_PASS:-}" ]] && HY_PASS=$(/usr/local/bin/sing-box generate rand --base64 16)
-    # 初值必须是 0：写成 1 时「成功」路径不会赋值，分支永远走到「未找到证书」，
-    # 结果是把有效域名证书的节点标成 skip-cert-verify（真实故障，不只是提示错）。
-    local cert_rc=0
-    if [[ -n "$domain" ]]; then
-        sync_hy2_cert "$domain" || cert_rc=$?
-    fi
-    if [[ "$cert_rc" -eq 2 ]]; then
-        echo -e "${RED}证书与域名不匹配，已中止启用 Hysteria2（换证书或改域名后重试）${PLAIN}"
-        return 1
-    elif [[ "$cert_rc" -eq 0 ]]; then
-        echo -e "${GREEN}✓ 已同步 ${domain} 的证书${PLAIN}"
-    else
-        # 域名有值却找不到该域名的证书：CERT_DIR 里躺的是别的证书（旧域名 / IP 自签）。
-        # 证书模式不可中途切换，一律中止，避免发出「已启用但客户端 x509 失败」的状态。
-        echo -e "${RED}✗ 没有 ${domain} 的可用证书，已中止启用 Hysteria2${PLAIN}"
-        echo -e "${YELLOW}  先让本机拥有该域名的证书（重跑安装向导，或菜单 8 建站时自动签发）${PLAIN}"
+# Hy2 证书必须覆盖该域名。证书模式不可中途切换：找不到就中止，不回退自签
+# （回退的后果是「域名客户端全部 x509 失败，而日志说节点可用」）。
+hy2_cert_sync() {
+    local domain="${1:-}" rc=0
+    [[ -n "$domain" ]] || return 0        # IP 自签模式：CERT_DIR 里就是要用的自签证书
+    sync_hy2_cert "$domain" || rc=$?
+    if [[ "$rc" -eq 2 ]]; then
+        echo -e "${RED}证书与域名不匹配，已中止安装（换证书或改域名后重试）${PLAIN}"
         return 1
     fi
-
-    local set="hy2"; set_has "vless-reality-in" && set="reality hy2"
-    render_set "$set" || return 1
-    sync_env_locals; write_env_config || return 1
-    sync_env_locals
-    render_and_reload || return 1
-    echo -e "${GREEN}✓ Hysteria2 已启用${PLAIN}"
+    if [[ "$rc" -ne 0 ]]; then
+        echo -e "${RED}✗ 没有 ${domain} 的可用证书，已中止安装${PLAIN}"
+        echo -e "${YELLOW}  证书模式不可中途切换：先让本机拥有该域名的证书（重跑安装，或菜单「伪装站点」建站时自动签发）${PLAIN}"
+        return 1
+    fi
+    echo -e "${GREEN}✓ 已同步 ${domain} 的证书${PLAIN}"
 }
 
 menu_sub_module() {
     if [[ ! -f "$ENV_FILE" ]]; then
-        echo -e "${RED}未检测到已安装的配置，请先运行选项 6 重新安装Simple-Box！${PLAIN}"
+        echo -e "${RED}未检测到已安装的配置，请先运行选项 5 重新安装 Simple-Box！${PLAIN}"
         read -r -p "按回车键返回..." dummy || true
         return 0
     fi
@@ -3114,19 +3097,7 @@ menu_singbox_manage() {
     done
 }
 
-# 用当前 env 变量重建订阅；端口传空表示该协议未启用，SNI 可选覆盖
-regen_from_scope() {
-    # 注意用 ${1-...} 而不是 ${1:-...}：空串表示「该协议未启用」，不能被默认值顶回来
-    local vl_p="${1-$VL_PORT}" hy_p="${2-$HY_PORT}" vl_s="${3:-$VL_SNI}"
-    local server_ip="$SERVER_IP" target_host="${TARGET_HOST:-$HY_DOMAIN}" sub_token="$SUB_TOKEN"
-    local node_prefix="$NODE_PREFIX" vl_port="$vl_p" user_uuid="$VL_UUID" vl_sni="$vl_s"
-    local vl_pubkey="$VL_PUBKEY" vl_shortid="$VL_SHORTID" hy_port="$hy_p"
-    local hy_password="${HY_PASS}" direct_suffixes="${DIRECT_SUFFIXES:-}"
-    regen_subscription "$sub_token" >/dev/null 2>&1 || true
-}
-
-
-# ---------------------------------------------------------------- 协议停用 / 启用
+# ---------------------------------------------------------------- 站点翻转
 # 翻转：把伪装站搬到 127.0.0.1:9443（on）或搬回公网 443（off）
 flip_site_toggle() {
     local mode="$1"
@@ -3213,45 +3184,6 @@ else:
 p.write_text(s)
 PYEOF
 }
-
-# 停用某个协议：从 config 移除 inbound，重建订阅；Reality 还要退出翻转
-disable_protocol() {
-    local which="$1"
-    load_env || { echo -e "${RED}未检测到已安装的配置${PLAIN}"; return 1; }
-    # EXIT_SERVER/PORT 是运行时派生字段；不 sync 的话 apply_exit_config 会因
-    # EXIT_SERVER 为空直接返回，中转单元照样被抹掉
-    sync_env_locals
-    local label tag keep
-    label="$(proto_human "$which")"; tag="$(proto_tag "$which")"
-    keep="hy2"; [[ "$which" == "hy2" ]] && keep="reality"
-
-    if ! set_has "$tag"; then
-        echo -e "${YELLOW}${label} 当前未启用${PLAIN}"
-        return 0
-    fi
-
-    local set="$keep"
-    set_has "$(proto_tag "$keep")" || set=""
-    render_set "$set" || return 1
-    # render_set 只写主 inbound；中转单元由 apply_exit_config 追加，漏了这一步
-    # 停用任一协议都会把 exit-*-in / exit-out 从配置里抹掉，链式入口静默变死端口
-    apply_exit_config
-    systemctl restart sing-box || return 1
-
-    # Reality 停用后 443 空出来，把站点搬回去；SITE_FILE 缺失时按域名重新发现
-    if [[ "$which" == "reality" ]]; then
-        [[ -z "${SITE_FILE:-}" && -n "${VL_SNI:-}" ]] && SITE_FILE="$(site_file_for "$VL_SNI" 2>/dev/null || true)"
-        [[ -n "${SITE_FILE:-}" ]] && { FLIP_HOST="${VL_SNI:-}"; flip_site_toggle off || return 1; }
-    fi
-
-    local vp="$VL_PORT" hp="$HY_PORT"
-    [[ "$which" == "reality" ]] && vp=""
-    [[ "$which" == "hy2" ]] && hp=""
-    regen_from_scope "$vp" "$hp"
-    echo -e "${GREEN}✓ 已停用 ${label}${PLAIN}"
-    echo -e "  恢复：simbo → 协议管理 → 启用 ${label}"
-}
-
 
 # 从订阅 URL（provider.yaml）导入出口参数；打印 KEY<TAB>VALUE 供白名单赋值
 # $2 = 槽位号：1（缺省）输出历史的 EXIT_HY_*；n>1 输出 EXIT<n>_SERVER/PORT/PASS/SNI。
@@ -3398,7 +3330,7 @@ build_camo_site() {
     # 而且会把全局 SITE_FILE 指到这个站，后续停用 Reality 会翻错站点、把真正的站点留在回环上。
     if [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in" && [[ "$domain" != "${VL_SNI:-}" ]]; then
         echo -e "${RED}✗ Reality 正在 443 上用 ${VL_SNI} 伪装，${domain} 无法同时对外服务${PLAIN}"
-        echo -e "${YELLOW}  先把 ${domain} 设为 Reality 的伪装域名（菜单 2 → 启用 Reality），或先停用 Reality 再建站${PLAIN}"
+        echo -e "${YELLOW}  要让它对外服务，只能重跑安装向导把 Reality 的伪装域名填成 ${domain}${PLAIN}"
         return 1
     fi
     # 同一域名已有站点块时不能再写 camo-<域名>.caddy：Caddy 会因同一个地址出现两次而加载失败
@@ -3503,19 +3435,7 @@ menu_camo() {
                 esac
                 read -r -p "版式 0-7（回车=自动）: " style || return 0
                 [[ "$style" =~ ^[0-7]$ ]] || style=""
-                if build_camo_site "$domain" "$source" "$style"; then
-                    if [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in"; then
-                        local attach=""
-                        ask "把 ${domain} 设为 Reality 的伪装域名（会重启 sing-box，客户端需重拉订阅）？[Y/n]: " attach
-                        if [[ -z "$attach" || "${attach,,}" == y* ]]; then
-                            if proto_enable_reality "${VL_PORT:-443}" "$domain"; then
-                                echo -e "${GREEN}✓ Reality 已切到 ${domain}，伪装站即日起作为回落${PLAIN}"
-                            else
-                                echo -e "${YELLOW}⚠ Reality 切换失败，站点已建好，可稍后在「入站管理」里重试${PLAIN}"
-                            fi
-                        fi
-                    fi
-                fi
+                build_camo_site "$domain" "$source" "$style" || true
                 read -r -p "按回车键继续..." _ || true
                 ;;
             2)
@@ -3526,7 +3446,7 @@ menu_camo() {
                 # 一个已经没人监听的 9443，探测者拿到的是连接重置，比不伪装更可疑。
                 if [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in" && [[ "${VL_SNI:-}" == "$domain" ]]; then
                     echo -e "${RED}✗ ${domain} 正被 Reality 当作伪装域名，不能直接删除${PLAIN}"
-                    echo -e "${YELLOW}  先到「入站管理」把 Reality 的伪装域名换成别的（或先停用 Reality），再回来删${PLAIN}"
+                    echo -e "${YELLOW}  先重跑安装向导把伪装域名换成别的，再回来删${PLAIN}"
                     read -r -p "按回车键继续..." _ || true
                     continue
                 fi
@@ -3864,37 +3784,6 @@ menu_exit() {
     done
 }
 
-menu_protocol() {
-    while true; do
-        [ -t 1 ] && clear
-        echo -e "${GRAY}=================== 入站管理 ===================${PLAIN}"
-        local i=1 p state
-        for p in $PROTOCOLS; do
-            if set_has "$(proto_tag "$p")"; then state="${GREEN}当前启用${PLAIN}"; else state="${GRAY}当前停用${PLAIN}"; fi
-            echo -e " $i. 启用/停用 $(proto_human "$p")  ${state}"
-            i=$((i+1))
-        done
-        echo " 0. 返回主菜单"
-        echo -e "${GRAY}================================================${PLAIN}"
-        local opt="" ok=""
-        ask "请输入选项 [0-$((i-1))]: " opt
-        [[ "$ASK_EOF" == "1" ]] && break
-        if [[ "$opt" == "0" ]]; then break; fi
-        if [[ "$opt" =~ ^[0-9]+$ ]] && (( opt >= 1 && opt < i )); then
-            p=$(echo $PROTOCOLS | cut -d' ' -f"$opt")
-            if set_has "$(proto_tag "$p")"; then
-                read -r -p "确认停用 $(proto_human "$p")？[y/N]: " ok || ok=""
-                [[ "$ok" == [yY]* ]] && disable_protocol "$p"
-            else
-                "proto_enable_${p}"
-            fi
-            read -r -p "按回车返回..." _ || true
-        else
-            echo -e "${RED}无效选项${PLAIN}"; sleep 1
-        fi
-    done
-}
-
 menu() {
     while true; do
         [ -t 1 ] && clear
@@ -3988,33 +3877,31 @@ menu() {
 
         echo -e "${GRAY}----------------------------------------------------${PLAIN}"
         echo -e " 1. 原始订阅信息"
-        echo -e " 2. 入站管理"
-        echo -e " 3. 出站管理"
-        echo -e " 4. 订阅地址配置"
-        echo -e " 5. sing-box 内核管理"
-        echo -e " 6. 脚本升级"
-        echo -e " 7. 脚本卸载"
-        echo -e " 8. 伪装站点"
+        echo -e " 2. 出站管理"
+        echo -e " 3. 订阅地址配置"
+        echo -e " 4. sing-box 内核管理"
+        echo -e " 5. 脚本升级"
+        echo -e " 6. 脚本卸载"
+        echo -e " 7. 伪装站点"
         echo -e " 0. 退出控制台"
         echo -e "${GRAY}====================================================${PLAIN}"
         
         local opt=""
-        read -r -p "请输入选项 [0-8]: " opt || opt="0"
+        read -r -p "请输入选项 [0-7]: " opt || opt="0"
         case "$opt" in
             1) show_links || true ;;
-            2) menu_protocol || true ;;
-            3) menu_exit || true ;;
-            4) menu_sub_module || true ;;
-            5) menu_singbox_manage || true ;;
-            6) reinstall_with_latest || true ;;
-            7)
+            2) menu_exit || true ;;
+            3) menu_sub_module || true ;;
+            4) menu_singbox_manage || true ;;
+            5) reinstall_with_latest || true ;;
+            6)
                 uninstall_all || true
                 # 卸载已彻底完成：脚本与配置目录均被删除，直接退出
                 if [[ "${UNINSTALL_DONE:-false}" == "true" ]]; then
                     exit 0
                 fi
                 ;;
-            8) menu_camo || true ;;
+            7) menu_camo || true ;;
             0) echo -e "${GREEN}已退出。随时输入 simbo 即可重新打开面板。${PLAIN}"; exit 0 ;;
             *) echo -e "${RED}无效选项！${PLAIN}"; sleep 1 ;;
         esac

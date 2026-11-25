@@ -3441,6 +3441,14 @@ menu_camo() {
                     continue
                 fi
                 local d="${CAMO_ROOT}/${domain}" f="/etc/caddy/sites/camo-${domain}.caddy"
+                # 只删自己生成的东西：手工维护的站点（如 o1 的 signal.caddy）不归 simbo 管，
+                # 目标都不存在时不能说「已删除」——那会让人以为站点没了。
+                if [[ ! -f "$f" && ! -d "$d" ]]; then
+                    echo -e "${YELLOW}未找到 simbo 生成的 ${domain} 站点（${f}）${PLAIN}"
+                    echo -e "${GRAY}  本机这份站点可能是手工维护的，请在 Caddy 里改；simbo 不删不属于自己的文件${PLAIN}"
+                    read -r -p "按回车键继续..." _ || true
+                    continue
+                fi
                 rm -f "$f"
                 rm -rf "$d"
                 reload_caddy_safe || true

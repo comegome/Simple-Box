@@ -2057,6 +2057,21 @@ else
     bad "35.5 菜单循环缺退出保护" "${_bad_menu}"
 fi
 
+# ---------- 36. 菜单 8 删除只清自己的产物 ----------
+group "36. 伪装站删除边界"
+
+_del36=$(awk '/^menu_camo\(\) \{/,/^}/' "$TARGET")
+if grep -q '未找到 simbo 生成的' <<<"$_del36" && grep -q '\[\[ ! -f "\$f" && ! -d "\$d" \]\]' <<<"$_del36"; then
+    ok "36.1 手工维护的站点（非 camo-*.caddy）不会被误报为「已删除」"
+else
+    bad "36.1 删除分支仍会对手工站点假报成功"
+fi
+if grep -q 'simbo 不删不属于自己的文件' <<<"$_del36"; then
+    ok "36.2 提示语说明「不删不属于自己的文件」"
+else
+    bad "36.2 缺少归属提示"
+fi
+
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
 ok "临时文件已清理"

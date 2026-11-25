@@ -343,7 +343,7 @@ grep -q 'caddy_installed_by_script' "$TARGET" && ok "Caddy 配置带归属标记
 
 # 10.1 Caddy reload 只能在「负责改 Caddy 配置」的几个函数里调用（不按次数，按归属）
 _reload_fns=$(awk '/^[a-z_0-9]+\(\) \{/{fn=$1; sub(/\(\)/,"",fn)} /reload_caddy_safe/{if(fn!="")print fn}' "$TARGET" | sort -u)
-_reload_allowed=$(printf '%s\n' build_camo_site flip_site_toggle menu_camo reload_caddy_safe setup_caddy_subscription site_handover_to_loopback | sort -u)
+_reload_allowed=$(printf '%s\n' build_camo_site flip_site menu_camo reload_caddy_safe setup_caddy_subscription site_handover_to_loopback | sort -u)
 _reload_stray=$(comm -23 <(printf '%s\n' "$_reload_fns") <(printf '%s\n' "$_reload_allowed"))
 if [[ -z "$_reload_stray" ]]; then
     ok "Caddy reload 只出现在负责改 Caddy 配置的函数里"
@@ -702,8 +702,7 @@ if [[ -n "$CADDY_BIN" ]]; then
     export PATH="$(dirname "$CADDY_BIN"):$PATH"
     _bad="$SB15/sites/bad.caddy"; printf 'broken.example.com {\n\troot * /x\n' > "$_bad"
     _b1=$(sha256sum "$_bad" | cut -d' ' -f1)
-    SITE_FILE="$_bad"; FLIP_HOST="broken.example.com"; FLIP_PORT=9443
-    if flip_site_toggle on >/dev/null 2>&1; then bad "15.20 非法配置未被拦截"; else
+    if flip_site on broken.example.com >/dev/null 2>&1; then bad "15.20 非法配置未被拦截"; else
         _b2=$(sha256sum "$_bad" | cut -d' ' -f1)
         [[ "$_b1" == "$_b2" ]] && ok "15.20 validate 失败后站点文件已还原" || bad "15.20 失败后文件未还原"
     fi
@@ -711,8 +710,7 @@ if [[ -n "$CADDY_BIN" ]]; then
 
     # 15.21 合法站点：validate 通过后文件变成翻转形态
     _good="$SB15/sites/signal.caddy"
-    SITE_FILE="$_good"; FLIP_HOST="agisignal.example.com"; FLIP_PORT=9443
-    flip_site_toggle on >/dev/null 2>&1 || true   # 无 caddy 服务时 restart 失败不影响文件断言
+    flip_site on agisignal.example.com >/dev/null 2>&1 || true   # 无 caddy 服务时 reload 失败不影响文件断言
     grep -q '^https://agisignal.example.com:9443 {' "$_good" && grep -q 'bind 127.0.0.1' "$_good" \
         && ok "15.21 合法站点翻转成功" || bad "15.21 合法站点翻转失败"
     flip_transform "$_good" "agisignal.example.com" 9443 off >/dev/null 2>&1
@@ -764,9 +762,6 @@ SUB_PORT="8444"
 SUB_TOKEN="token16"
 CERT_MODE="selfsigned"
 DIRECT_SUFFIXES=""
-FLIP_HOST=""
-SITE_FILE=""
-FLIP_PORT="9443"
 VL_HANDSHAKE=""
 VL_HANDSHAKE_PORT=""
 EOF
@@ -777,7 +772,7 @@ ENV_FILE="$SB16/env.conf"; CONF_FILE="$SB16/config.json"; CERT_DIR="$SB16/cert"
 CADDY_SITES_DIR="$SB16/sites"
 ENV_LOADED=""
 render_and_reload() { return 0; }
-flip_site_toggle() { return 0; }
+flip_site() { return 0; }
 
 # 16.1 安装不再自己写配置
 _inst=$(awk '/^install_node\(\) \{/,/^\}/' "$TARGET")
@@ -821,7 +816,7 @@ else
         || bad "16.3b 拒绝原因或副作用不对" "$(tail -2 "$SB16/o1b")"
 fi
 
-# 16.3 站点可用时通过，并把回落目标写进 SITE_FILE
+# 16.3 站点可用时通过
 load_env   # 旧流程由 proto_enable_* 读 env，现在由这里显式回读
 if reality_target_check 443 site.example.com > "$SB16/o1" 2>&1; then
     PROTO_SET="reality hy2"; render_set
@@ -834,10 +829,12 @@ else
     bad "16.3 reality_target_check 拒绝了可用站点" "$(tail -3 "$SB16/o1")"
 fi
 
-# 16.4 站点信息由 render_set 派生（不落库，供 flip_site_toggle 用）
-[[ "${SITE_FILE:-}" == "$SB16/sites/site.caddy" && "${FLIP_HOST:-}" == "site.example.com" ]] \
-    && ok "16.4 render_set 派生 SITE_FILE / FLIP_HOST" \
-    || bad "16.4 翻转目标未派生" "SITE_FILE=${SITE_FILE:-空} FLIP_HOST=${FLIP_HOST:-空}"
+# 16.4 翻转状态不落库：env 里没有 SITE_FILE / FLIP_HOST / FLIP_PORT，翻转目标现场解析
+if grep -qE '^(SITE_FILE|FLIP_HOST)=' "$TARGET"; then
+    bad "16.4 env 仍在落库翻转字段" "$(grep -nE '^(SITE_FILE|FLIP_HOST)=' "$TARGET")"
+else
+    ok "16.4 env 不再落库翻转字段（目标恒为 VL_SNI 的站点块）"
+fi
 
 # 16.5b 域名有值但没有该域名的证书时必须中止（否则 [已启用] 但客户端 x509 失败）
 if hy2_cert_sync "nocert.example.com" > "$SB16/o2b" 2>&1; then
@@ -1375,6 +1372,13 @@ if awk '/^render_set\(\) \{/,/^}/' "$TARGET" | grep -q '\$1'; then
 else
     ok "27.2 render_set 无参（集合只从 env 派生）"
 fi
+
+# 27.4 翻转端口是常量，翻转状态不落库（没有 SITE_FILE / FLIP_HOST）
+_n_fp=$(grep -c '^FLIP_PORT=' "$TARGET")
+_n_sf=$(grep -c 'SITE_FILE\|FLIP_HOST' "$TARGET")
+[[ "$_n_fp" == "1" && "$_n_sf" == "0" ]] \
+    && ok "27.4 FLIP_PORT 是常量 9443，翻转状态不落库" \
+    || bad "27.4 翻转状态仍有落库或常量被改写" "FLIP_PORT 赋值 ${_n_fp} 处 / 翻转字段 ${_n_sf} 处"
 
 # 27.3 集合派生只有 proto_in_set 一处
 _n_in=$(grep -c 'proto_in_set ' "$TARGET")

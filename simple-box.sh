@@ -1198,6 +1198,9 @@ PROTO_SET="${PROTO_SET:-reality hy2}"
 
 proto_in_set() { [[ " ${PROTO_SET:-reality hy2} " == *" $1 "* ]]; }
 
+# Reality 占 443 时，本机伪装站退到回环的这个端口。安装期常量，不再进 env。
+FLIP_PORT=9443
+
 # 规范成 PROTOCOLS 顺序；空集或含未知协议名时返回 1
 proto_set_canon() {
     local s="" p t
@@ -1731,9 +1734,6 @@ SUB_TOKEN="${sub_token}"
 CERT_MODE="${CERT_MODE:-selfsigned}"
 PROTO_SET="${PROTO_SET}"
 DIRECT_SUFFIXES="${direct_suffixes}"
-FLIP_HOST="${FLIP_HOST:-}"
-SITE_FILE="${SITE_FILE:-}"
-FLIP_PORT="${FLIP_PORT:-9443}"
 EXIT_TYPE="${EXIT_TYPE:-none}"
 EXIT_HY_SERVER="${EXIT_HY_SERVER:-}"
 EXIT_HY_PORT="${EXIT_HY_PORT:-}"
@@ -1877,7 +1877,6 @@ install_node() {
     # 既有凭据：重装默认沿用，客户端订阅不用改；显式选轮换才重新生成
     local keep_uuid="" keep_privkey="" keep_pubkey="" keep_shortid="" keep_hypass="" keep_token=""
     local old_vl_port="" old_vl_sni="" old_hy_port="" old_sub_port="" old_prefix="" old_domain=""
-    local old_site="" old_flip_host=""
     if [[ -f "$ENV_FILE" ]]; then
         load_env
         old_vl_port="$VL_PORT"; old_vl_sni="$VL_SNI"; old_hy_port="$HY_PORT"
@@ -1885,7 +1884,6 @@ install_node() {
         old_domain="${HY_DOMAIN:-}"
         keep_uuid="${VL_UUID:-}"; keep_privkey="${VL_PRIVKEY:-}"; keep_pubkey="${VL_PUBKEY:-}"
         keep_shortid="${VL_SHORTID:-}"; keep_hypass="${HY_PASS:-}"; keep_token="${SUB_TOKEN:-}"
-        old_site="${SITE_FILE:-}"; old_flip_host="${FLIP_HOST:-}"
         # 若 env.conf 中无域名记录，探测 acme.sh 目录中是否曾签发过历史域名证书
         if [[ -z "$old_domain" ]] && [[ -d "$HOME/.acme.sh" ]]; then
             local acme_d
@@ -1956,21 +1954,21 @@ install_node() {
                 if ! _site=$(site_file_for "$_pick"); then
                     echo -e "${RED}✗ 找不到 ${_pick} 的站点文件，无法接管。${PLAIN}"; continue
                 fi
-                echo -e "${YELLOW}${vl_port} 现在由 Caddy 的 ${_pick} 占用，将搬到 127.0.0.1:${FLIP_PORT:-9443}，把 ${vl_port} 让给 Reality。${PLAIN}"
-                if ! site_handover_to_loopback "$_site" "$_pick" "${FLIP_PORT:-9443}"; then
+                echo -e "${YELLOW}${vl_port} 现在由 Caddy 的 ${_pick} 占用，将搬到 127.0.0.1:$FLIP_PORT，把 ${vl_port} 让给 Reality。${PLAIN}"
+                if ! site_handover_to_loopback "$_site" "$_pick" "$FLIP_PORT"; then
                     echo -e "${RED}✗ 站点迁移失败（Caddy 校验 / 重载 / 回环 HTTPS 探测未通过），已还原。${PLAIN}"
-                    echo -e "${YELLOW}  请手工把站点改到 127.0.0.1:${FLIP_PORT:-9443}，或换一个 Reality 端口。${PLAIN}"
+                    echo -e "${YELLOW}  请手工把站点改到 127.0.0.1:$FLIP_PORT，或换一个 Reality 端口。${PLAIN}"
                     continue
                 fi
                 handover_domain="$_pick"
-                echo -e "${GREEN}✓ ${_pick} 已搬到 127.0.0.1:${FLIP_PORT:-9443}，伪装域名将固定为它${PLAIN}"
+                echo -e "${GREEN}✓ ${_pick} 已搬到 127.0.0.1:$FLIP_PORT，伪装域名将固定为它${PLAIN}"
                 check_port_conflict "$vl_port" "tcp" "vless" && break
                 continue
             fi
 
             if [[ -n "$_holder" && "$_holder" != *sing-box* ]]; then
                 echo -e "${RED}检测到 ${_holder} 占用 ${vl_port}，本脚本只接管 Caddy 站点。${PLAIN}"
-                echo -e "${YELLOW}  请手工把它挪到 127.0.0.1:${FLIP_PORT:-9443}，或换一个 Reality 端口。${PLAIN}"
+                echo -e "${YELLOW}  请手工把它挪到 127.0.0.1:$FLIP_PORT，或换一个 Reality 端口。${PLAIN}"
                 continue
             fi
 
@@ -2102,7 +2100,7 @@ install_node() {
     fi
 
     # Reality 的伪装目标在签证书前先判掉：站点证书坏了 / 有站点却不是 443 / 外部 SNI 不通，
-    # 这三条都会让「配置、进程、订阅全绿但所有客户端握手失败」。通过时写入 SITE_FILE/FLIP_HOST。
+    # 这三条都会让「配置、进程、订阅全绿但所有客户端握手失败」。
     if proto_in_set reality; then
         reality_target_check "$vl_port" "$vl_sni" || return 1
     fi
@@ -2241,16 +2239,13 @@ install_node() {
 
     # 换伪装域名 / 去掉 Reality 时，旧站点必须从回环搬回公网 443：
     # 翻转是「站点块」上的状态，不跟着 env 走，漏了这一步站点会永久消失。
-    if [[ -n "$old_site" && -f "$old_site" ]] \
-       && { ! proto_in_set reality || [[ "$old_flip_host" != "$vl_sni" ]]; }; then
-        local _ns="${SITE_FILE:-}" _nh="${FLIP_HOST:-}"
-        SITE_FILE="$old_site"; FLIP_HOST="$old_flip_host"
-        if flip_site_toggle off; then
-            echo -e "${GREEN}✓ 旧站点 ${old_flip_host:-} 已搬回公网 443${PLAIN}"
+    if [[ -n "$old_vl_sni" ]] && site_file_for "$old_vl_sni" >/dev/null 2>&1 \
+       && { ! proto_in_set reality || [[ "$old_vl_sni" != "$vl_sni" ]]; }; then
+        if flip_site off "$old_vl_sni"; then
+            echo -e "${GREEN}✓ 旧站点 ${old_vl_sni} 已搬回公网 443${PLAIN}"
         else
-            echo -e "${YELLOW}⚠ 旧站点 ${old_flip_host:-} 未能搬回公网，请手工检查 ${old_site}${PLAIN}"
+            echo -e "${YELLOW}⚠ 旧站点 ${old_vl_sni} 未能搬回公网，请手工检查${PLAIN}"
         fi
-        SITE_FILE="$_ns"; FLIP_HOST="$_nh"
     fi
 
     if ! write_env_config; then
@@ -2299,8 +2294,8 @@ EOF
         return 1
     fi
     # 站点必须在 sing-box 抢 443 之前让出端口（Caddy 还占着时重启会 bind 失败）
-    if proto_in_set reality && [[ -n "${SITE_FILE:-}" ]]; then
-        if ! flip_site_toggle on; then
+    if proto_in_set reality; then
+        if ! flip_site on "$vl_sni"; then
             echo -e "${RED}✗ 伪装站点未能让出 443，安装中止（站点文件已还原）${PLAIN}"
             return 1
         fi
@@ -2866,8 +2861,7 @@ render_set() {
     # 否则直接用该域名（外部 SNI）。只有这一个判据。
     local hs="${VL_SNI:-}" hsp="443"
     if proto_in_set reality && [[ -n "${VL_SNI:-}" ]] && site_file_for "$VL_SNI" >/dev/null 2>&1; then
-        hs="127.0.0.1"; hsp="${FLIP_PORT:-9443}"
-        SITE_FILE="$(site_file_for "$VL_SNI")"; FLIP_HOST="$VL_SNI"
+        hs="127.0.0.1"; hsp="$FLIP_PORT"
     fi
     write_singbox_config "$vl_p" "${VL_SNI:-}" "${VL_UUID:-}" "${VL_PRIVKEY:-}" "${VL_SHORTID:-}" \
         "$hy_p" "${HY_PASS:-}" "$hs" "$hsp"
@@ -2878,7 +2872,7 @@ render_set() {
 # 里调用，运行期没有第二次机会（要改就重跑安装）。两者都只检查、不写配置。
 
 # Reality 的伪装目标必须可用：本机站点（证书有效且 Reality 只能占 443）或外部 SNI。
-# 通过时把站点信息写进 SITE_FILE / FLIP_HOST，供 render_set 与 flip_site_toggle 用。
+# 通过时不记录任何状态：翻转目标恒为 VL_SNI 的站点块（由 site_file_for 现场解析）。
 reality_target_check() {
     local port="$1" sni="$2" site="" why=""
     if site=$(site_file_for "$sni"); then
@@ -2898,8 +2892,7 @@ reality_target_check() {
             echo -e "${YELLOW}  二选一：① Reality 端口用 443；② 伪装域名换成外部借壳域名（如 www.icloud.com）${PLAIN}"
             return 1
         fi
-        SITE_FILE="$site"; FLIP_HOST="$sni"
-        echo -e "${GREEN}✓ 本机站点 ${site} 作为回落目标（9443）${PLAIN}"
+        echo -e "${GREEN}✓ 本机站点 ${site} 作为回落目标（${FLIP_PORT}）${PLAIN}"
         return 0
     fi
     echo -e "${YELLOW}本机没有 ${sni} 的站点，按外部伪装域名校验 TLS 1.3 + h2 ...${PLAIN}"
@@ -3110,11 +3103,12 @@ menu_singbox_manage() {
 }
 
 # ---------------------------------------------------------------- 站点翻转
-# 翻转：把伪装站搬到 127.0.0.1:9443（on）或搬回公网 443（off）
-flip_site_toggle() {
-    local mode="$1"
-    local site="${SITE_FILE:-}" domain="${FLIP_HOST:-}" port="${FLIP_PORT:-9443}"
-    [[ -n "$site" && -f "$site" && -n "$domain" ]] || return 0
+# 把某个域名的站点块在「公网 443」与「127.0.0.1:9443」之间搬动（on / off）。
+# 目标只有一处来源：该域名的站点文件。没有站点（外部 SNI）时什么都不做、返回 0。
+flip_site() {
+    local mode="${1:-}" domain="${2:-}" site port="$FLIP_PORT"
+    [[ "$mode" == "on" || "$mode" == "off" ]] && [[ -n "$domain" ]] || return 1
+    site=$(site_file_for "$domain" 2>/dev/null) || return 0
     local backup; backup=$(mktemp /tmp/caddy-site.XXXXXX)
     cp -f "$site" "$backup" || return 1
     if ! flip_transform "$site" "$domain" "$port" "$mode"; then
@@ -3339,7 +3333,7 @@ build_camo_site() {
     local gen dir caddy_file cert
     # Reality 在跑时 443 归 sing-box，只有「当前伪装域名」能通过它的回落对外服务。
     # 给别的域名建站只能把它搬到回环，公网 443 上仍是 Reality 的回落目标——站点等于不存在，
-    # 而且会把全局 SITE_FILE 指到这个站，后续停用 Reality 会翻错站点、把真正的站点留在回环上。
+    # 而且会让翻转目标指向这个站，真正的回落站点会留在回环上。
     if [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in" && [[ "$domain" != "${VL_SNI:-}" ]]; then
         echo -e "${RED}✗ Reality 正在 443 上用 ${VL_SNI} 伪装，${domain} 无法同时对外服务${PLAIN}"
         echo -e "${YELLOW}  要让它对外服务，只能重跑安装向导把 Reality 的伪装域名填成 ${domain}${PLAIN}"
@@ -3388,10 +3382,7 @@ build_camo_site() {
     camo_caddy_block "$domain" "$dir" "$cert" > "$caddy_file" || return 1
 
     if [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in"; then
-        SITE_FILE="$caddy_file"
-        FLIP_HOST="$domain"
-        FLIP_PORT="${FLIP_PORT:-9443}"
-        flip_site_toggle on || { echo -e "${RED}✗ Caddy 重载失败${PLAIN}"; return 1; }
+        flip_site on "$domain" || { echo -e "${RED}✗ Caddy 重载失败${PLAIN}"; return 1; }
     else
         reload_caddy_safe || { echo -e "${RED}✗ Caddy 重载失败${PLAIN}"; return 1; }
     fi
@@ -3399,7 +3390,7 @@ build_camo_site() {
     # 自检：真的取到页面才算成功（配置写错 / 端口被占 都表现为「服务在跑但 404」）
     # 只有「Reality 在跑、站点已翻转」时才在回环高位端口上；否则站点就在公网 443
     local port="443" code="000"
-    if [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in"; then port="${FLIP_PORT:-9443}"; fi
+    if [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in"; then port="$FLIP_PORT"; fi
     sleep 1
     code=$(curl -s -o /dev/null -k -m 8 -w '%{http_code}' --resolve "${domain}:${port}:127.0.0.1" \
         "https://${domain}:${port}/" 2>/dev/null || echo 000)

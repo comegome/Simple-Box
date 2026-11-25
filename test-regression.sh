@@ -755,7 +755,6 @@ HY_PORT="10443"
 HY_PASS="hy16pass"
 HY_SKIP_CERT="false"
 SUB_PORT="8444"
-SUB_PROTO="https"
 SUB_TOKEN="token16"
 CERT_MODE="selfsigned"
 DIRECT_SUFFIXES=""
@@ -2070,6 +2069,28 @@ if grep -q 'simbo 不删不属于自己的文件' <<<"$_del36"; then
     ok "36.2 提示语说明「不删不属于自己的文件」"
 else
     bad "36.2 缺少归属提示"
+fi
+
+# ---------- 37. 订阅协议由 CERT_MODE 唯一派生（不再落库） ----------
+group "37. 派生值不落库"
+
+if [[ "$(grep -c 'SUB_PROTO' "$TARGET")" -eq 0 ]]; then
+    ok "37.1 env 不再写 SUB_PROTO（协议由 CERT_MODE 派生）"
+else
+    bad "37.1 SUB_PROTO 仍在落库或引用" "命中 $(grep -c 'SUB_PROTO' "$TARGET") 处"
+fi
+
+_panel37=$(awk '/^menu\(\) \{/,/^}/' "$TARGET")
+if grep -q 'proto=\$(sub_scheme)' <<<"$_panel37"; then
+    ok "37.2 面板订阅地址直接用 sub_scheme 派生"
+else
+    bad "37.2 面板仍读旧的 SUB_PROTO"
+fi
+
+if grep -q '^sub_proto=' "$TARGET"; then
+    bad "37.3 仍有函数派生并保存 sub_proto"
+else
+    ok "37.3 没有函数把 sub_proto 存成状态"
 fi
 
 group "14. 清理"

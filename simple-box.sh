@@ -1652,7 +1652,6 @@ set_env_scene() {
     sub_port="${SUB_PORT:-8444}"
     sub_token="$SUB_TOKEN"
     CERT_MODE="${CERT_MODE:-selfsigned}"
-    sub_proto=$(sub_scheme)
 }
 
 write_env_config() {
@@ -1710,7 +1709,6 @@ HY_PORT="${hy_port}"
 HY_PASS="${hy_password}"
 HY_SKIP_CERT="${hy_skip_cert}"
 SUB_PORT="${sub_port}"
-SUB_PROTO="${sub_proto}"
 SUB_TOKEN="${sub_token}"
 CERT_MODE="${CERT_MODE:-selfsigned}"
 DIRECT_SUFFIXES="${direct_suffixes}"
@@ -2058,9 +2056,6 @@ install_node() {
     # 4.0 起不再使用端口跳跃：旧 iptables REDIRECT 只在这里清理一次，
     # 否则升级后那条规则会继续把 UDP 段重定向到旧端口。
     cleanup_legacy_port_hopping
-
-    local sub_proto
-    sub_proto=$(sub_scheme)
 
     # 自有域名直连（可选）：填了就让客户端配置把这些后缀的流量直连，不绕代理。
     # 典型用途：自建 DERP 中继、管理面板、订阅分发、SSH。留空则不插入任何规则。
@@ -2657,7 +2652,7 @@ sync_env_locals() {
     hy_domain="${HY_DOMAIN:-}"; target_host="${TARGET_HOST:-$SERVER_IP}"
     hy_port="$HY_PORT"; hy_password="$HY_PASS"
     hy_skip_cert="${HY_SKIP_CERT:-false}"; sub_port="$SUB_PORT"
-    sub_proto=$(sub_scheme); sub_token="$SUB_TOKEN"
+    sub_token="$SUB_TOKEN"
 }
 
 # 当前已在 config.json 里的协议集合（供菜单/出口重建使用）。
@@ -2933,7 +2928,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 verify_caddy_listening "$SUB_PORT" || true
 
                 echo -e "\n${GREEN}✓ 在线订阅地址已成功更新！${PLAIN}"
-                echo -e "当前在线订阅: ${CYAN}${sub_proto}://${target_host}:${SUB_PORT}/${new_token}/config.yaml${PLAIN}"
+                echo -e "当前在线订阅: ${CYAN}$(sub_scheme)://${target_host}:${SUB_PORT}/${new_token}/config.yaml${PLAIN}"
                 echo -e "${YELLOW}提示: 订阅参数已更新，请在客户端 (如 ClashX.Meta) 中修改端口或更新订阅 URL。${PLAIN}"
                 read -r -p "按回车键返回..." dummy || true
                 load_env
@@ -3882,7 +3877,8 @@ menu() {
             echo -e "${GRAY}----------------------------------------------------${PLAIN}"
             print_io_status
             
-            local proto=${SUB_PROTO:-http}
+            local proto
+            proto=$(sub_scheme)
             local host=${TARGET_HOST:-${HY_DOMAIN:-$SERVER_IP}}
             local port=${SUB_PORT:-8444}
             echo -e "${GRAY}----------------------------------------------------${PLAIN}"

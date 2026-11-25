@@ -674,7 +674,9 @@ issue_cert_bundle() {
             echo -e "${GREEN}TLS 证书已就绪: ${CERT_DIR} (模式: ${CERT_MODE})${PLAIN}"
             return 0
         fi
-        echo -e "${YELLOW}本地无覆盖 ${domain} 的有效证书，且未提供 CF Token，将降级为 IP 自签。${PLAIN}"
+        echo -e "${RED}本地无覆盖 ${domain} 的有效证书，且未提供 CF Token，已中止（未改动任何证书）。${PLAIN}"
+        echo -e "${YELLOW}  提供 Token 后重试；或输入 ip 改用 IP 自签。${PLAIN}"
+        return 1
     fi
 
     # 模式 A: 自有域名 + CF Token，走 DNS-01 申请 Let's Encrypt
@@ -711,7 +713,7 @@ issue_cert_bundle() {
             if [[ -n "$d_crt_pub" && "$d_crt_pub" == "$d_key_pub" ]]; then
                 ok=true
             else
-                echo -e "${RED}域名证书与私钥不配对（acme 写入异常），将降级为自签证书。${PLAIN}"
+                echo -e "${RED}域名证书与私钥不配对（acme 写入异常）。${PLAIN}"
             fi
         fi
     fi
@@ -719,32 +721,24 @@ issue_cert_bundle() {
     # 域名证书还必须真的覆盖该域名，否则视为申请失败（防止 acme 返回旧证书/空证书）
     if [[ "$ok" == true && -n "$domain" ]]; then
         if ! openssl x509 -in "${CERT_DIR}/fullchain.cer" -noout -checkhost "$domain" 2>/dev/null | grep -q "does match"; then
-            echo -e "${RED}已签发的证书未覆盖域名 ${domain}，将降级为自签证书。${PLAIN}"
+            echo -e "${RED}已签发的证书未覆盖域名 ${domain}。${PLAIN}"
             ok=false
         fi
     fi
 
-    if [[ "$ok" == true && -n "$domain" && -n "$cf_token" ]]; then
+    if [[ -n "$domain" ]]; then
+        if [[ "$ok" != true ]]; then
+            # 证书没就绪就中止：降级成 IP 自签会让「域名客户端」全部 x509 失败，
+            # 而安装日志还会说节点可用。宁可失败得响一点。
+            echo -e "${RED}✗ ${domain} 的证书未就绪，安装中止（未改动任何证书）。${PLAIN}"
+            echo -e "${YELLOW}  检查 Token 权限 / 域名拼写 / CF 网络后重试；要 IP 自签请在安装向导里输入 ip。${PLAIN}"
+            return 1
+        fi
         CERT_MODE="domain"
         echo -e "${GREEN}域名证书部署成功: ${domain}${PLAIN}"
     else
-        [[ -n "$domain" ]] && {
-            echo -e "${RED}域名证书申请失败（Token 权限、域名拼写或 CF 网络问题）。${PLAIN}"
-        }
-        # 伪装站 / 接入域站点用的就是 CERT_DIR 里这份证书。此时写 IP 自签会让站点与
-        # Reality 回落一起失效（客户端 x509 域名不匹配），而安装日志还会说「节点可用」。
-        # 按「不破坏原有站点」优先的规则：直接中止，一个字节都不改。
-        local _cert_users
-        _cert_users=$(sites_using_cert_dir)
-        if [[ -n "$_cert_users" ]]; then
-            echo -e "${RED}✗ 本机站点正在使用 ${CERT_DIR} 的证书：${PLAIN}"
-            printf '    %s\n' $_cert_users
-            echo -e "${YELLOW}  改成 IP 自签会让这些站点与 Reality 回落一起失效，已中止（未改动任何证书）。${PLAIN}"
-            echo -e "${YELLOW}  修好 Token / DNS 后重跑安装；或先停用 Reality、移走站点再装。${PLAIN}"
-            return 1
-        fi
-        echo -e "${YELLOW}已自动降级为 10 年期 IP 自签证书，保证节点立即可用。${PLAIN}"
-        # 模式 B: 为公网 IP 生成 10 年自签 ECC 证书（含公私钥配对严格校验）
+        # 模式 B: 安装时显式选择 IP 自签，为公网 IP 生成 10 年 ECC 证书
+        echo -e "${YELLOW}使用 IP 自签证书（10 年期 ECC，仅 IP 直连可用）${PLAIN}"
         if ! issue_self_signed_cert "$server_ip"; then
             echo -e "${RED}自签证书生成失败。${PLAIN}"
             return 1
@@ -1189,7 +1183,7 @@ regen_subscription() {
     generate_full_client_config \
         "${target_host:-}" "$_token" "${node_prefix:-}" "${server_ip:-}" \
         "${vl_port:-}" "${user_uuid:-}" "${vl_sni:-}" "${vl_pubkey:-}" "${vl_shortid:-}" \
-        "${hy_port:-}" "${hy_password:-}" "${hy_skip_cert:-}"
+        "${hy_port:-}" "${hy_password:-}"
 }
 
 # 组装客户端订阅与独立链接
@@ -1339,7 +1333,9 @@ generate_full_client_config() {
     local vl_shortid="${9:-}"
     local hy_port="${10}"
     local hy_password="${11}"
-    local hy_skip_cert="${12}"
+    # 证书模式在安装时确定、之后不可变；skip 直接由它推出，不再单独存字段
+    local hy_skip_cert="false"
+    [[ "${CERT_MODE:-selfsigned}" != "domain" ]] && hy_skip_cert="true"
 
     # 入参校验：这些字段任一为空都会生成一份「看起来正常但连不上」的订阅，
     # 且 mihomo -t 照样通过（空 server / 空 uuid 都是合法 YAML）。必须显式拦截。
@@ -1648,7 +1644,6 @@ set_env_scene() {
     target_host="${TARGET_HOST:-$server_ip}"
     hy_port="${HY_PORT:-8443}"
     hy_password="${HY_PASS:-}"
-    hy_skip_cert="${HY_SKIP_CERT:-true}"
     sub_port="${SUB_PORT:-8444}"
     sub_token="$SUB_TOKEN"
     CERT_MODE="${CERT_MODE:-selfsigned}"
@@ -1707,7 +1702,6 @@ HY_DOMAIN="${hy_domain}"
 TARGET_HOST="${target_host}"
 HY_PORT="${hy_port}"
 HY_PASS="${hy_password}"
-HY_SKIP_CERT="${hy_skip_cert}"
 SUB_PORT="${sub_port}"
 SUB_TOKEN="${sub_token}"
 CERT_MODE="${CERT_MODE:-selfsigned}"
@@ -1903,8 +1897,6 @@ install_node() {
     done
 
     echo -e "\n${GRAY}──────── ${BOLD}[2/3] Hysteria2${PLAIN}"
-    local hy_skip_cert="false"
-    local cert_fell_back=""
 
     local hy_domain=""
 
@@ -1924,7 +1916,8 @@ install_node() {
 
     # 2. 若无已配置域名，或用户输入 n 放弃沿用，则提示输入
     if [[ -z "$hy_domain" ]]; then
-        echo -e "${GRAY}域名需在 Cloudflare 指向 ${server_ip}（仅限 DNS，小黄云会断 UDP）；回车 = IP 自签${PLAIN}"
+        echo -e "${GRAY}域名需在 Cloudflare 指向 ${server_ip}（仅限 DNS，小黄云会断 UDP）${PLAIN}"
+        echo -e "${GRAY}证书模式在安装时确定：填域名 = Let's Encrypt 证书；输入 ip = IP 自签（之后要换只能重跑安装）${PLAIN}"
         if (( ${#local_sites[@]} )); then
             echo -e "${GRAY}本机站点 ${local_sites[0]} 可复用现成证书（推荐）${PLAIN}"
         fi
@@ -1934,7 +1927,8 @@ install_node() {
             hy_domain=$(trim_string "$hy_domain")
 
             case "${hy_domain,,}" in
-                ""|ip|self|selfsigned) hy_domain=""; break ;;
+                "") echo -e "${RED}必须填域名；确实要用 IP 自签请输入 ip（自签只适用于 IP 直连，不推荐）${PLAIN}"; continue ;;
+                ip|self|selfsigned) hy_domain=""; break ;;
             esac
 
             if ! validate_domain "$hy_domain"; then
@@ -1942,7 +1936,7 @@ install_node() {
                 continue
             fi
             if ! check_domain_ip_binding "$hy_domain" "$server_ip"; then
-                echo -e "${YELLOW}请重新输入域名，或直接回车使用 IP 自签。${PLAIN}"
+                echo -e "${YELLOW}请重新输入域名（或输入 ip 使用 IP 自签）。${PLAIN}"
                 continue
             fi
             break
@@ -1953,12 +1947,11 @@ install_node() {
     local cf_token=""
 
     if [[ -z "$hy_domain" ]]; then
-        echo -e "${YELLOW}未输入域名，自动启用自签证书模式 (IP 直连 + skip-cert-verify)。${PLAIN}"
+        echo -e "${YELLOW}已选择 IP 自签证书模式 (IP 直连 + skip-cert-verify)；之后要改用域名需重跑安装。${PLAIN}"
         target_host="$server_ip"
-        hy_skip_cert="true"
     else
         target_host="$hy_domain"
-        # 支持预置 CF_TOKEN 环境变量（无人值守部署）；必须同步到局部变量，否则会静默降级为自签
+        # 支持预置 CF_TOKEN 环境变量（无人值守部署）；必须同步到局部变量，否则会误判为「没 Token」
         if [[ -n "${CF_TOKEN:-}" ]]; then
             cf_token="$CF_TOKEN"
         fi
@@ -1974,11 +1967,9 @@ install_node() {
             if prompt_cf_token; then
                 cf_token="$PROMPTED_CF_TOKEN"
             else
-                cf_token=""
-                target_host="$server_ip"
-                hy_skip_cert="true"
-                hy_domain=""
-                cert_fell_back="true"
+                echo -e "${RED}未提供 CF Token，无法为 ${hy_domain} 签发证书，安装中止。${PLAIN}"
+                echo -e "${YELLOW}  重跑安装并填 Token；或输入 ip 改用 IP 自签。${PLAIN}"
+                return 1
             fi
         fi
     fi
@@ -2021,15 +2012,10 @@ install_node() {
         return 1
     fi
     if [[ "$CERT_MODE" == "domain" ]]; then
-        hy_skip_cert="false"
         target_host="$hy_domain"
     else
-        hy_skip_cert="true"
         target_host="$server_ip"
-        if [[ -n "$hy_domain" ]]; then
-            hy_domain=""          # 已降级，清除域名避免后续误用
-            cert_fell_back="true"
-        fi
+        hy_domain=""
     fi
 
     # 生成密钥凭证（任一步失败都必须中止，否则空值会写进配置导致服务起不来）
@@ -2122,10 +2108,6 @@ EOF
     if ! proto_enable_hy2 "$hy_port" "$hy_domain"; then
         echo -e "${YELLOW}Hysteria2 启用失败，Reality 已可用。${PLAIN}"
         echo -e "${YELLOW}修复后执行: simbo → 协议管理 → 启用 Hysteria2${PLAIN}"
-    fi
-
-    if [[ "${cert_fell_back:-}" == "true" ]]; then
-        echo -e "${YELLOW}证书申请失败，已回退 IP 自签（客户端已自动跳过校验）。${PLAIN}"
     fi
 
     echo -e "\n${GRAY}====================================================${PLAIN}"
@@ -2651,7 +2633,7 @@ sync_env_locals() {
     vl_privkey="$VL_PRIVKEY"; vl_pubkey="$VL_PUBKEY"; vl_shortid="$VL_SHORTID"
     hy_domain="${HY_DOMAIN:-}"; target_host="${TARGET_HOST:-$SERVER_IP}"
     hy_port="$HY_PORT"; hy_password="$HY_PASS"
-    hy_skip_cert="${HY_SKIP_CERT:-false}"; sub_port="$SUB_PORT"
+    sub_port="$SUB_PORT"
     sub_token="$SUB_TOKEN"
 }
 
@@ -2809,13 +2791,25 @@ proto_enable_hy2() {
 
     if [[ "$interactive" == 1 ]]; then
         # 三样都先从 env 取当前值：reuse 分支不重新赋值，漏掉 domain 就会在
-        # 「沿用」之后把 HY_DOMAIN 写成空串，静默降级成 IP 自签（协议看着仍启用）。
+        # 「沿用」之后把 HY_DOMAIN 写成空串，等于中途换了证书模式。
         port="${HY_PORT:-}"; domain="${HY_DOMAIN:-}"
         echo -e " 当前参数: 端口 ${CYAN}${HY_PORT:-—}${PLAIN} / 域名 ${CYAN}${HY_DOMAIN:-无}${PLAIN}"
         local okh=""
         ask "沿用这组参数？[Y/n]: " okh
         if [[ "${okh,,}" == "n" ]]; then
-            ask_trim "请输入 Hysteria2 域名 [默认: ${CYAN}${HY_DOMAIN:-留空=IP自签}${PLAIN}]: " "${HY_DOMAIN:-}" domain
+            # 证书模式在安装时定死：域名模式不许留空，自签模式不许填域名。
+            local _dmode="${CERT_MODE:-selfsigned}" _newd=""
+            while true; do
+                ask_trim "请输入 Hysteria2 域名 [默认: ${CYAN}${HY_DOMAIN:-留空}${PLAIN}]: " "${HY_DOMAIN:-}" _newd
+                if [[ "$_dmode" == "domain" && -z "$_newd" ]]; then
+                    echo -e "${RED}本机是域名证书模式，域名不能为空。要改用 IP 自签只能重跑安装向导。${PLAIN}"; continue
+                fi
+                if [[ "$_dmode" != "domain" && -n "$_newd" ]]; then
+                    echo -e "${RED}本机是 IP 自签模式，不能填域名。要改用域名证书只能重跑安装向导。${PLAIN}"; continue
+                fi
+                break
+            done
+            domain="$_newd"
             ask_trim "请输入 Hysteria2 端口 [默认: ${CYAN}${HY_PORT:-10443}${PLAIN}]: " "${HY_PORT:-10443}" port
         fi
     fi
@@ -2840,19 +2834,13 @@ proto_enable_hy2() {
         echo -e "${RED}证书与域名不匹配，已中止启用 Hysteria2（换证书或改域名后重试）${PLAIN}"
         return 1
     elif [[ "$cert_rc" -eq 0 ]]; then
-        HY_SKIP_CERT="false"
         echo -e "${GREEN}✓ 已同步 ${domain} 的证书${PLAIN}"
     else
-        # 域名有值却找不到该域名的证书：CERT_DIR 里躺的是别的证书（旧域名 / IP 自签），
-        # 继续启用只会得到「[已启用] 但客户端 x509 域名不匹配」。只有已明确 skip 的
-        # 存量节点才放行（否则会打断一台本来能用的机器），其余一律中止。
-        if [[ "${HY_SKIP_CERT:-false}" == "true" ]]; then
-            echo -e "${YELLOW}未找到 ${domain} 的证书，沿用现有证书并保持 skip-cert-verify=true${PLAIN}"
-        else
-            echo -e "${RED}✗ 没有 ${domain} 的可用证书，已中止启用 Hysteria2${PLAIN}"
-            echo -e "${YELLOW}  先让本机拥有该域名的证书（重跑安装向导，或菜单 8 建站时自动签发），或把域名留空改用 IP 自签${PLAIN}"
-            return 1
-        fi
+        # 域名有值却找不到该域名的证书：CERT_DIR 里躺的是别的证书（旧域名 / IP 自签）。
+        # 证书模式不可中途切换，一律中止，避免发出「已启用但客户端 x509 失败」的状态。
+        echo -e "${RED}✗ 没有 ${domain} 的可用证书，已中止启用 Hysteria2${PLAIN}"
+        echo -e "${YELLOW}  先让本机拥有该域名的证书（重跑安装向导，或菜单 8 建站时自动签发）${PLAIN}"
+        return 1
     fi
 
     local set="hy2"; set_has "vless-reality-in" && set="reality hy2"
@@ -2911,8 +2899,8 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
 
                 SUB_PORT="$sub_port"
                 SUB_TOKEN="$new_token"
-                # 证书模式以 env.conf 持久化的 CERT_MODE 为准（旧逻辑用 HY_SKIP_CERT 推断，
-                # 在「仅 Reality」的 skip 模式下会误判成 domain，把自签证书配成 HTTPS 导致客户端导入失败）
+                # 证书模式以 env.conf 持久化的 CERT_MODE 为准（安装时确定，运行期不可变；
+                # 订阅里的 skip-cert-verify 与 scheme 都由它派生）
                 set_env_scene
                 sub_token="$new_token"
                 if ! write_env_config; then
@@ -3050,7 +3038,7 @@ regen_from_scope() {
     local server_ip="$SERVER_IP" target_host="${TARGET_HOST:-$HY_DOMAIN}" sub_token="$SUB_TOKEN"
     local node_prefix="$NODE_PREFIX" vl_port="$vl_p" user_uuid="$VL_UUID" vl_sni="$vl_s"
     local vl_pubkey="$VL_PUBKEY" vl_shortid="$VL_SHORTID" hy_port="$hy_p"
-    local hy_password="$HY_PASS" hy_skip_cert="$HY_SKIP_CERT" direct_suffixes="${DIRECT_SUFFIXES:-}"
+    local hy_password="${HY_PASS}" direct_suffixes="${DIRECT_SUFFIXES:-}"
     regen_subscription "$sub_token" >/dev/null 2>&1 || true
 }
 

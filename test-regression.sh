@@ -753,7 +753,6 @@ HY_DOMAIN=""
 TARGET_HOST="203.0.113.10"
 HY_PORT="10443"
 HY_PASS="hy16pass"
-HY_SKIP_CERT="false"
 SUB_PORT="8444"
 SUB_TOKEN="token16"
 CERT_MODE="selfsigned"
@@ -845,12 +844,12 @@ else
     bad "16.5 非交互启用 Hy2 失败" "$(tail -3 "$SB16/o2")"
 fi
 
-# 16.5c 已明确 skip=true 的存量节点不得被中止（否则会打断一台本来能用的机器）
+# 16.5c 证书模式不可中途切换：无证书一律中止，不再为存量 skip 节点开例外
 _ph16=$(awk '/^proto_enable_hy2\(\) \{/,/^}/' "$TARGET")
-if grep -q 'skip-cert-verify=true' <<<"$_ph16"; then
-    ok "16.5c 已有 skip=true 时沿用而不是中止"
+if ! grep -q 'HY_SKIP_CERT' <<<"$_ph16" && grep -q '证书模式不可中途切换' <<<"$_ph16"; then
+    ok "16.5c 无证书时一律中止（不再按旧 skip 标记放行）"
 else
-    bad "16.5c skip=true 的存量节点被一刀切中止"
+    bad "16.5c 仍在为存量 skip 节点开例外"
 fi
 
 # 16.6 停用 Hy2 只摘自己
@@ -887,7 +886,7 @@ HY_PORT=8443; HY_PASS="hypass17"
 VL_HANDSHAKE="127.0.0.1"; VL_HANDSHAKE_PORT=9443
 CONF_FILE="$SB17/cfg.json"; CERT_DIR="$SB17/cert"
 NODE_PREFIX="FN"; SERVER_IP="203.0.113.11"; TARGET_HOST="fn.example.com"
-HY_DOMAIN="fn.example.com"; HY_SKIP_CERT="false"; SUB_TOKEN="tok17"
+HY_DOMAIN="fn.example.com"; CERT_MODE="domain"; SUB_TOKEN="tok17"
 
 render_set "reality hy2"
 _md5_none=$(md5sum "$CONF_FILE" | cut -d' ' -f1)
@@ -918,12 +917,12 @@ EXIT_TYPE="hy2"; EXIT_HY_SERVER="isif.example.com"; EXIT_HY_PORT="8443"
 EXIT_ENTRY_VL="2053"; EXIT_ENTRY_HY="2054"; EXIT_LABEL="SG"
 VL_PORT=443; HY_PORT=8443; VL_SNI="gh.example.com"; SERVER_IP="203.0.113.11"
 user_uuid="11111111-1111-1111-1111-111111111111"; vl_pubkey="PBK17"; vl_shortid="ab12cd34"
-hy_password="hypass17"; hy_skip_cert="false"; node_prefix="FN"; token="tok17"
+hy_password="hypass17"; CERT_MODE="domain"; node_prefix="FN"; token="tok17"
 domain_or_ip="fn.example.com"; vl_port=443; hy_port=8443
 hy_ports_display="8443"; server_ip="203.0.113.11"; vl_sni="gh.example.com"
 WEB_DIR="$SB17/web"; mkdir -p "$WEB_DIR/tok17"
 generate_full_client_config "fn.example.com" tok17 FN 203.0.113.11 443 \
-  11111111-1111-1111-1111-111111111111 gh.example.com PBK17 ab12cd34 8443 8443 hypass17 false
+  11111111-1111-1111-1111-111111111111 gh.example.com PBK17 ab12cd34 8443 8443 hypass17
 grep -q 'FN-VLESS-Reality-SG' "$WEB_DIR/tok17/config.yaml" && grep -q 'FN-Hysteria2-SG' "$WEB_DIR/tok17/config.yaml" \
     && ok "17.4 订阅 config.yaml 含两条链式节点" || bad "17.4 订阅缺少链式节点"
 grep -q 'port: 2053' "$WEB_DIR/tok17/provider.yaml" && grep -q 'port: 2054' "$WEB_DIR/tok17/provider.yaml" \
@@ -1656,10 +1655,10 @@ fi
   render_set "reality hy2"; apply_exit_config
   node_prefix="SB"; server_ip="203.0.113.11"; vl_port=443; hy_port=8443
   user_uuid="11111111-1111-1111-1111-111111111111"; vl_sni="gh.example.com"
-  vl_pubkey="PBK"; vl_shortid="ab12cd34"; hy_password="hp"; hy_skip_cert="false"
+  vl_pubkey="PBK"; vl_shortid="ab12cd34"; hy_password="hp"; CERT_MODE="domain"
   WEB_DIR="$SB31/web"; mkdir -p "$WEB_DIR/tok31"
   generate_full_client_config "sb.example.com" tok31 SB 203.0.113.11 443 \
-    "11111111-1111-1111-1111-111111111111" gh.example.com PBK ab12cd34 8443 8443 hp false
+    "11111111-1111-1111-1111-111111111111" gh.example.com PBK ab12cd34 8443 8443 hp
   grep -c '://' "$WEB_DIR/tok31/links.txt" > "$SB31/nlinks"
   grep -c '^  - name:' "$WEB_DIR/tok31/provider.yaml" > "$SB31/nnodes"
 )
@@ -1674,10 +1673,10 @@ fi
   mk31cfg "$CONF_FILE"; render_set "reality hy2"; apply_exit_config
   node_prefix="SB"; server_ip="203.0.113.11"; vl_port=443; hy_port=8443
   user_uuid="11111111-1111-1111-1111-111111111111"; vl_sni="gh.example.com"
-  vl_pubkey="PBK"; vl_shortid="ab12cd34"; hy_password="hp"; hy_skip_cert="false"
+  vl_pubkey="PBK"; vl_shortid="ab12cd34"; hy_password="hp"; CERT_MODE="domain"
   WEB_DIR="$SB31/webB"; mkdir -p "$WEB_DIR/tok31b"
   generate_full_client_config "sb.example.com" tok31b SB 203.0.113.11 443 \
-    "11111111-1111-1111-1111-111111111111" gh.example.com PBK ab12cd34 8443 8443 hp false
+    "11111111-1111-1111-1111-111111111111" gh.example.com PBK ab12cd34 8443 8443 hp
   grep -c '^  - name:' "$WEB_DIR/tok31b/provider.yaml" > "$SB31/nnodes_before"
 )
 [[ "$(cat "$SB31/nnodes_before" 2>/dev/null)" == "6" && "$(cat "$SB31/nlinks" 2>/dev/null)" == "4" \
@@ -1735,10 +1734,10 @@ fi
   render_set "reality hy2"; apply_exit_config
   node_prefix="SB"; server_ip="203.0.113.11"; vl_port=443; hy_port=8443
   user_uuid="11111111-1111-1111-1111-111111111111"; vl_sni="gh.example.com"
-  vl_pubkey="PBK"; vl_shortid="ab12cd34"; hy_password="hp"; hy_skip_cert="false"
+  vl_pubkey="PBK"; vl_shortid="ab12cd34"; hy_password="hp"; CERT_MODE="domain"
   WEB_DIR="$SB31/web2"; mkdir -p "$WEB_DIR/tok32"
   generate_full_client_config "sb.example.com" tok32 SB 203.0.113.11 443 \
-    "11111111-1111-1111-1111-111111111111" gh.example.com PBK ab12cd34 8443 8443 hp false
+    "11111111-1111-1111-1111-111111111111" gh.example.com PBK ab12cd34 8443 8443 hp
 )
 _ok31=1
 for _nm in "SB-Hysteria2-ISIF" "SB-Hysteria2-SL"; do
@@ -2091,6 +2090,59 @@ if grep -q '^sub_proto=' "$TARGET"; then
     bad "37.3 仍有函数派生并保存 sub_proto"
 else
     ok "37.3 没有函数把 sub_proto 存成状态"
+fi
+
+# ---------- 38. 证书模式安装期定死：skip 由 CERT_MODE 派生 ----------
+group "38. 证书模式不可变"
+
+if [[ "$(grep -cE '^[[:space:]]*HY_SKIP_CERT=' "$TARGET")" -eq 0 ]]; then
+    ok "38.1 env 不再持久化 HY_SKIP_CERT"
+else
+    bad "38.1 仍在写 HY_SKIP_CERT"
+fi
+
+_gen38=$(awk '/^generate_full_client_config\(\) \{/,/^}/' "$TARGET")
+if grep -q 'CERT_MODE:-selfsigned' <<<"$_gen38" && ! grep -q 'local hy_skip_cert="\${12}"' <<<"$_gen38"; then
+    ok "38.2 生成器从 CERT_MODE 派生 skip（不再收位置参数）"
+else
+    bad "38.2 生成器仍依赖外部传入 skip"
+fi
+
+SB38=$(mktemp -d)
+(
+  CERT_MODE="domain"
+  node_prefix="SB"; server_ip="203.0.113.11"; vl_port=443; hy_port=8443
+  vl_sni="gh.example.com"; vl_pubkey="PBK"; vl_shortid="ab12cd34"; hy_password="hp"
+  WEB_DIR="$SB38/web"; mkdir -p "$WEB_DIR/tok38"
+  generate_full_client_config "sb.example.com" tok38 SB 203.0.113.11 443 \
+    "11111111-1111-1111-1111-111111111111" gh.example.com PBK ab12cd34 8443 hp
+)
+if grep -q 'skip-cert-verify: false' "$SB38/web/tok38/provider.yaml" && ! grep -q 'insecure=1' "$SB38/web/tok38/links.txt"; then
+    ok "38.3 domain 模式：不跳过校验、链接不带 insecure"
+else
+    bad "38.3 domain 模式仍标记 skip" "$(grep -h 'skip-cert-verify' "$SB38/web/tok38/provider.yaml" 2>/dev/null)"
+fi
+(
+  CERT_MODE="selfsigned"
+  node_prefix="SB"; server_ip="203.0.113.11"; vl_port=443; hy_port=8443
+  vl_sni="gh.example.com"; vl_pubkey="PBK"; vl_shortid="ab12cd34"; hy_password="hp"
+  WEB_DIR="$SB38/web2"; mkdir -p "$WEB_DIR/tok38"
+  generate_full_client_config "203.0.113.11" tok38 SB 203.0.113.11 443 \
+    "11111111-1111-1111-1111-111111111111" gh.example.com PBK ab12cd34 8443 hp
+)
+if grep -q 'skip-cert-verify: true' "$SB38/web2/tok38/provider.yaml" && grep -q 'insecure=1' "$SB38/web2/tok38/links.txt"; then
+    ok "38.4 selfsigned 模式：跳过校验、链接带 insecure=1"
+else
+    bad "38.4 selfsigned 模式未标记 skip"
+fi
+rm -rf "$SB38"
+
+_asis=$(grep -cE 'CERT_MODE="(domain|selfsigned)"' "$TARGET")
+_inissue=$(awk '/^issue_cert_bundle\(\) \{/,/^}/' "$TARGET" | grep -cE 'CERT_MODE="(domain|selfsigned)"')
+if [[ "$_asis" -eq "$_inissue" && "$_asis" -gt 0 ]]; then
+    ok "38.5 CERT_MODE 只在 issue_cert_bundle 内被赋值（write-once）"
+else
+    bad "38.5 有运行期代码改证书模式" "全部=${_asis} 安装内=${_inissue}"
 fi
 
 group "14. 清理"

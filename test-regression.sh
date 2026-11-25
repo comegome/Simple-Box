@@ -341,12 +341,14 @@ fi
 # Caddy 归属标记
 grep -q 'caddy_installed_by_script' "$TARGET" && ok "Caddy 配置带归属标记" || bad "Caddy 缺少归属标记"
 
-# 10.1 Caddy reload 只在 setup_caddy_subscription 内部做一次，调用方不得重复
-_setup_reload=$(grep -c 'reload_caddy_safe' "$TARGET")
-if [[ "$_setup_reload" -eq 5 ]]; then
-    ok "Caddy reload 只出现在五个既定位置（定义 + 订阅 setup + 伪装站生成/删除 + 站点翻转）"
+# 10.1 Caddy reload 只能在「负责改 Caddy 配置」的几个函数里调用（不按次数，按归属）
+_reload_fns=$(awk '/^[a-z_0-9]+\(\) \{/{fn=$1; sub(/\(\)/,"",fn)} /reload_caddy_safe/{if(fn!="")print fn}' "$TARGET" | sort -u)
+_reload_allowed=$(printf '%s\n' build_camo_site flip_site_toggle menu_camo reload_caddy_safe setup_caddy_subscription site_handover_to_loopback | sort -u)
+_reload_stray=$(comm -23 <(printf '%s\n' "$_reload_fns") <(printf '%s\n' "$_reload_allowed"))
+if [[ -z "$_reload_stray" ]]; then
+    ok "Caddy reload 只出现在负责改 Caddy 配置的函数里"
 else
-    bad "Caddy reload 调用点异常" "共 ${_setup_reload} 处，应为 5"
+    bad "Caddy reload 调用点异常" "越界函数: $(echo $_reload_stray)"
 fi
 
 # 10.2 发布订阅的动作序列：render_and_reload 自己生成；install_node 委托给协议模块
@@ -2180,6 +2182,65 @@ if [[ "$(grep -c '所有客户端配置都会失效\|并更换订阅 token' "$TA
 else
     bad "39.5 菜单文案仍说重装必然轮换"
 fi
+
+# ---------- 40. 443 已被 Caddy 站点占用时的接管 ----------
+group "40. 安装期站点交接"
+
+if grep -q '^site_handover_to_loopback()' "$TARGET"; then
+    ok "40.1 存在站点交接函数"
+else
+    bad "40.1 缺少站点交接函数"
+fi
+
+_h40=$(awk '/^site_handover_to_loopback\(\)/,/^}/' "$TARGET")
+if grep -q 'caddy validate' <<<"$_h40" && grep -q -- '--resolve' <<<"$_h40" \
+   && grep -q 'flip_transform "\$site" "\$domain" "\$port" off' <<<"$_h40"; then
+    ok "40.2 交接含校验、回环探测与失败还原"
+else
+    bad "40.2 交接缺少校验/探活/还原"
+fi
+
+_inst40=$(awk '/^install_node\(\) \{/,/^}/' "$TARGET")
+if grep -q 'site_handover_to_loopback "\$_site" "\$_pick"' <<<"$_inst40"; then
+    ok "40.3 安装流程在 443 被 Caddy 占用时调用交接"
+else
+    bad "40.3 安装流程没有接入交接"
+fi
+
+if grep -q '本脚本只接管 Caddy 站点' <<<"$_inst40"; then
+    ok "40.4 非 Caddy 占用时明确拒绝接管"
+else
+    bad "40.4 非 Caddy 占用没有明确提示"
+fi
+
+if grep -q 'vl_sni="\$handover_domain"' <<<"$_inst40"; then
+    ok "40.5 交接后伪装域名固定为被搬走的站点"
+else
+    bad "40.5 交接后 SNI 仍可填成别的域名"
+fi
+
+# 沙箱行为：flip 幂等 + 反向还原
+SB40=$(mktemp -d)
+cat > "$SB40/site.caddy" <<'EOF2'
+https://sb40.example.com {
+	root * /var/www/sb40
+	file_server
+}
+EOF2
+flip_transform "$SB40/site.caddy" sb40.example.com 9443 on >/dev/null 2>&1
+_after_on=$(head -1 "$SB40/site.caddy")
+_after_bind=$(sed -n '2p' "$SB40/site.caddy")
+flip_transform "$SB40/site.caddy" sb40.example.com 9443 on >/dev/null 2>&1
+_idem=$(head -1 "$SB40/site.caddy")
+if [[ "$_after_on" == "https://sb40.example.com:9443 {" && "$_after_bind" == *"bind 127.0.0.1"* && "$_idem" == "$_after_on" ]]; then
+    ok "40.6 交接改写块首行并加 bind，重复执行幂等"
+else
+    bad "40.6 flip 输出不符合预期" "$_after_on | $_after_bind"
+fi
+flip_transform "$SB40/site.caddy" sb40.example.com 9443 off >/dev/null 2>&1
+_back=$(head -1 "$SB40/site.caddy")
+[[ "$_back" == "sb40.example.com {" ]] && ok "40.7 反向翻回原样（不留 bind）" || bad "40.7 反向还原异常" "$_back"
+rm -rf "$SB40"
 
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null

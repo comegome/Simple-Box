@@ -1858,47 +1858,100 @@ install_node() {
     fi
 
     echo -e "\n${GRAY}──────── ${BOLD}[1/3] VLESS-Reality${PLAIN}"
-    local vl_port
+    local vl_port vl_sni handover_domain=""
+    local local_sites=() _site_default
+    mapfile -t local_sites < <(local_site_domains)
+
     while true; do
         ask_trim "请输入 Reality 监听端口 [默认: ${CYAN}${old_vl_port:-443}${PLAIN}]: " "${old_vl_port:-443}" vl_port
+        if [[ "${ASK_EOF:-0}" == "1" ]]; then
+            echo -e "${RED}输入结束，安装中止。${PLAIN}"; return 1
+        fi
         if ! validate_port "$vl_port"; then
             echo -e "${RED}端口非法（应为 1-65535 的整数），请重新输入。${PLAIN}"; continue
         fi
+
+        local _holder=""
+        _holder=$(port_holder "$vl_port" tcp 2>/dev/null || true)
+
+        # 端口被本机 Caddy 站点占着：把站点搬到回环，腾出端口给 Reality（伪装站交接）
+        if [[ "$_holder" == *caddy* ]]; then
+            if (( ${#local_sites[@]} == 0 )); then
+                echo -e "${RED}${vl_port} 被 Caddy 占用，但 /etc/caddy/sites 里没有可接管的站点块。${PLAIN}"
+                echo -e "${YELLOW}  请先停掉占用该端口的服务，或换一个 Reality 端口。${PLAIN}"
+                continue
+            fi
+            local _pick="" _i=1 _d
+            if (( ${#local_sites[@]} == 1 )); then
+                _pick="${local_sites[0]}"
+            else
+                echo -e "${GREEN}检测到本机站点：${PLAIN}"
+                for _d in "${local_sites[@]}"; do echo -e "   ${_i}) ${_d}"; _i=$((_i+1)); done
+                ask "用哪个站点做伪装？[1-${#local_sites[@]}]：" _pick
+                [[ "$_pick" =~ ^[0-9]+$ ]] && (( _pick >= 1 && _pick <= ${#local_sites[@]} )) || _pick=1
+                _pick="${local_sites[$((_pick-1))]}"
+            fi
+            local _site=""
+            if ! _site=$(site_file_for "$_pick"); then
+                echo -e "${RED}✗ 找不到 ${_pick} 的站点文件，无法接管。${PLAIN}"; continue
+            fi
+            echo -e "${YELLOW}${vl_port} 现在由 Caddy 的 ${_pick} 占用，将搬到 127.0.0.1:${FLIP_PORT:-9443}，把 ${vl_port} 让给 Reality。${PLAIN}"
+            if ! site_handover_to_loopback "$_site" "$_pick" "${FLIP_PORT:-9443}"; then
+                echo -e "${RED}✗ 站点迁移失败（Caddy 校验 / 重载 / 回环 HTTPS 探测未通过），已还原。${PLAIN}"
+                echo -e "${YELLOW}  请手工把站点改到 127.0.0.1:${FLIP_PORT:-9443}，或换一个 Reality 端口。${PLAIN}"
+                continue
+            fi
+            handover_domain="$_pick"
+            echo -e "${GREEN}✓ ${_pick} 已搬到 127.0.0.1:${FLIP_PORT:-9443}，伪装域名将固定为它${PLAIN}"
+            check_port_conflict "$vl_port" "tcp" "vless" && break
+            continue
+        fi
+
+        if [[ -n "$_holder" && "$_holder" != *sing-box* ]]; then
+            echo -e "${RED}检测到 ${_holder} 占用 ${vl_port}，本脚本只接管 Caddy 站点。${PLAIN}"
+            echo -e "${YELLOW}  请手工把它挪到 127.0.0.1:${FLIP_PORT:-9443}，或换一个 Reality 端口。${PLAIN}"
+            continue
+        fi
+
         check_port_conflict "$vl_port" "tcp" "vless" && break
     done
     # 写入全局，供后续 hy_port / sub_port 的冲突校验比较（新建时 env.conf 里还没有值）
     VL_PORT="$vl_port"
 
-    local vl_sni local_sites=() _site_default
-    mapfile -t local_sites < <(local_site_domains)
-    if (( ${#local_sites[@]} )); then
-        if (( ${#local_sites[@]} == 1 )); then
-            echo -e "${GREEN}✓ 检测到本机站点: ${local_sites[0]}${PLAIN}"
-            echo -e "${GRAY}  用它做伪装域名，探测者访问该域名看到的是真实站点，伪装效果最好。${PLAIN}"
-        else
-            echo -e "${GREEN}✓ 检测到本机站点:${PLAIN}"
-            local _i=1 _d
-            for _d in "${local_sites[@]}"; do echo -e "   ${_i}) ${_d}"; _i=$((_i+1)); done
-        fi
-    fi
-    _site_default="${local_sites[0]:-}"
-    if [[ -z "$old_vl_sni" && -n "$_site_default" ]]; then
-        _site_default="$_site_default"
+    if [[ -n "$handover_domain" ]]; then
+        # 站点已经搬到回环当回落目标，SNI 必须就是它，否则回落会打到别的域名上
+        vl_sni="$handover_domain"
+        echo -e "${GREEN}✓ 伪装域名: ${vl_sni}${PLAIN}"
     else
-        _site_default="${old_vl_sni:-www.icloud.com}"
+        if (( ${#local_sites[@]} )); then
+            if (( ${#local_sites[@]} == 1 )); then
+                echo -e "${GREEN}✓ 检测到本机站点: ${local_sites[0]}${PLAIN}"
+                echo -e "${GRAY}  用它做伪装域名，探测者访问该域名看到的是真实站点，伪装效果最好。${PLAIN}"
+            else
+                echo -e "${GREEN}✓ 检测到本机站点:${PLAIN}"
+                local _i=1 _d
+                for _d in "${local_sites[@]}"; do echo -e "   ${_i}) ${_d}"; _i=$((_i+1)); done
+            fi
+        fi
+        _site_default="${local_sites[0]:-}"
+        if [[ -z "$old_vl_sni" && -n "$_site_default" ]]; then
+            _site_default="$_site_default"
+        else
+            _site_default="${old_vl_sni:-www.icloud.com}"
+        fi
+        while true; do
+            ask "请输入 Reality 借壳伪装域名 [默认: ${CYAN}${_site_default}${PLAIN}]: " vl_sni
+            vl_sni=$(trim_string "$vl_sni")
+            vl_sni=${vl_sni:-$_site_default}
+            if [[ "$vl_sni" == "$server_ip" ]]; then
+                echo -e "${RED}Reality 伪装域名不能是本机 IP，请重新输入！${PLAIN}"; continue
+            fi
+            if ! validate_domain "$vl_sni"; then
+                echo -e "${RED}域名格式非法（示例: www.icloud.com），请重新输入！${PLAIN}"; continue
+            fi
+            break
+        done
     fi
-    while true; do
-        ask "请输入 Reality 借壳伪装域名 [默认: ${CYAN}${_site_default}${PLAIN}]: " vl_sni
-        vl_sni=$(trim_string "$vl_sni")
-        vl_sni=${vl_sni:-$_site_default}
-        if [[ "$vl_sni" == "$server_ip" ]]; then
-            echo -e "${RED}Reality 伪装域名不能是本机 IP，请重新输入！${PLAIN}"; continue
-        fi
-        if ! validate_domain "$vl_sni"; then
-            echo -e "${RED}域名格式非法（示例: www.icloud.com），请重新输入！${PLAIN}"; continue
-        fi
-        break
-    done
 
     echo -e "\n${GRAY}──────── ${BOLD}[2/3] Hysteria2${PLAIN}"
 
@@ -3095,6 +3148,30 @@ flip_site_toggle() {
     # 用 reload 而不是 restart：连续翻转/建站会撞 systemd 的 start-limit-hit（5 次/10 秒）
     reload_caddy_safe
 }
+
+# 把占着公网端口的 Caddy 站点搬到 127.0.0.1:<port>，给 Reality 让出端口。
+# 失败会尝试还原站点文件和服务；返回 0 表示「端口已腾出且站点在回环上仍能提供 HTTPS」。
+site_handover_to_loopback() {
+    local site="${1:-}" domain="${2:-}" port="${3:-9443}"
+    [[ -f "$site" && -n "$domain" ]] || return 1
+    flip_transform "$site" "$domain" "$port" on || return 1
+    local ok=1
+    caddy validate --config "${CADDYFILE:-/etc/caddy/Caddyfile}" >/dev/null 2>&1 || ok=0
+    if [[ "$ok" == "1" ]]; then
+        reload_caddy_safe >/dev/null 2>&1 || ok=0
+    fi
+    if [[ "$ok" == "1" ]]; then
+        sleep 1
+        curl -sk -o /dev/null -m 8 --resolve "${domain}:${port}:127.0.0.1" "https://${domain}:${port}/" || ok=0
+    fi
+    if [[ "$ok" != "1" ]]; then
+        flip_transform "$site" "$domain" "$port" off >/dev/null 2>&1 || true
+        reload_caddy_safe >/dev/null 2>&1 || true
+        return 1
+    fi
+    return 0
+}
+
 
 # 纯文件变换（可单测）：只改站点块的监听地址与 bind，不动其它内容
 # 块首行按「行首 + 域名 + 可选 scheme/端口 + {」匹配，绝不裸子串替换：

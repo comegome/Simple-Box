@@ -1518,7 +1518,7 @@ reinstall_with_latest() {
     if [[ -f "$target" ]] && cmp -s "$latest" "$target"; then
         rm -f "$latest"
         echo -e "${GREEN}当前已是最新脚本，无需升级。${PLAIN}"
-        echo -e "${YELLOW}重装会轮换 UUID / 密钥 / short-id，所有客户端配置都会失效。${PLAIN}"
+        echo -e "${YELLOW}重装默认沿用现有凭据（客户端无需改动）；需要换凭据可在向导里选轮换。${PLAIN}"
         local again=""
         ask "仍要重装吗？(y/N): " again
         if [[ "$again" != "y" && "$again" != "Y" ]]; then
@@ -1542,7 +1542,7 @@ reinstall_with_latest() {
     ln -sf "$target" /usr/local/bin/simbo
 
     echo -e "${GREEN}脚本已更新到最新版本。${PLAIN}"
-    echo -e "${YELLOW}重装会轮换 UUID / 密钥 / short-id 并更换订阅 token，所有客户端都会失效。${PLAIN}"
+    echo -e "${YELLOW}重装默认沿用现有凭据（客户端无需改动）；需要换凭据可在向导里选轮换。${PLAIN}"
     local do_reinstall=""
     ask "是否现在重装？(y/N): " do_reinstall
     if [[ "$do_reinstall" != "y" && "$do_reinstall" != "Y" ]]; then
@@ -1824,12 +1824,16 @@ install_node() {
     mkdir -p "$CONF_DIR" "$WEB_DIR"
 
     # 读取既有配置，作为重置时的默认值（直接回车即沿用）
+    # 既有凭据：重装默认沿用，客户端订阅不用改；显式选轮换才重新生成
+    local keep_uuid="" keep_privkey="" keep_pubkey="" keep_shortid="" keep_hypass="" keep_token=""
     local old_vl_port="" old_vl_sni="" old_hy_port="" old_sub_port="" old_prefix="" old_domain=""
     if [[ -f "$ENV_FILE" ]]; then
         load_env
         old_vl_port="$VL_PORT"; old_vl_sni="$VL_SNI"; old_hy_port="$HY_PORT"
         old_sub_port="$SUB_PORT"; old_prefix="$NODE_PREFIX"
         old_domain="${HY_DOMAIN:-}"
+        keep_uuid="${VL_UUID:-}"; keep_privkey="${VL_PRIVKEY:-}"; keep_pubkey="${VL_PUBKEY:-}"
+        keep_shortid="${VL_SHORTID:-}"; keep_hypass="${HY_PASS:-}"; keep_token="${SUB_TOKEN:-}"
         # 若 env.conf 中无域名记录，探测 acme.sh 目录中是否曾签发过历史域名证书
         if [[ -z "$old_domain" ]] && [[ -d "$HOME/.acme.sh" ]]; then
             local acme_d
@@ -2019,16 +2023,42 @@ install_node() {
     fi
 
     # 生成密钥凭证（任一步失败都必须中止，否则空值会写进配置导致服务起不来）
-    echo -e "生成安全密钥凭证..."
     local key_pair vl_privkey vl_pubkey vl_shortid user_uuid hy_password sub_token
-    key_pair=$(/usr/local/bin/sing-box generate reality-keypair) || {
-        echo -e "${RED}Reality 密钥对生成失败，已中止。${PLAIN}"; return 1; }
-    vl_privkey=$(echo "$key_pair" | awk '/PrivateKey/{print $2}')
-    vl_pubkey=$(echo "$key_pair" | awk '/PublicKey/{print $2}')
-    vl_shortid=$(/usr/local/bin/sing-box generate rand 8 --hex) || vl_shortid=""
-    user_uuid=$(/usr/local/bin/sing-box generate uuid) || user_uuid=""
-    hy_password=$(/usr/local/bin/sing-box generate rand 16 --base64 | tr -dc 'a-zA-Z0-9' | head -c 16) || hy_password=""
-    sub_token=$(openssl rand -hex 12) || sub_token=""
+    local rotate_creds="N"
+    if [[ -n "$keep_uuid$keep_token$keep_hypass" ]]; then
+        echo -e "\n${CYAN}凭据${PLAIN}"
+        echo -e "${GRAY}检测到现有凭据（UUID / Reality 密钥 / Hy2 密码 / 订阅 token）。${PLAIN}"
+        echo -e "${GRAY}默认沿用，客户端订阅不用改；轮换会让所有客户端失效。${PLAIN}"
+        ask "要轮换全部凭据吗？(y/N): " rotate_creds
+    fi
+    if [[ "${rotate_creds,,}" == "y" ]]; then
+        keep_uuid=""; keep_privkey=""; keep_pubkey=""; keep_shortid=""; keep_hypass=""; keep_token=""
+        echo -e "${YELLOW}将生成全新凭据，客户端需要重新获取订阅。${PLAIN}"
+    fi
+
+    if [[ -n "$keep_privkey" && -n "$keep_pubkey" && -n "$keep_uuid" && -n "$keep_shortid" ]]; then
+        vl_privkey="$keep_privkey"; vl_pubkey="$keep_pubkey"
+        user_uuid="$keep_uuid"; vl_shortid="$keep_shortid"
+        echo -e "${GREEN}✓ 沿用现有 Reality 凭据（UUID / 私钥 / short-id）${PLAIN}"
+    else
+        echo -e "生成安全密钥凭证..."
+        key_pair=$(/usr/local/bin/sing-box generate reality-keypair) || {
+            echo -e "${RED}Reality 密钥对生成失败，已中止。${PLAIN}"; return 1; }
+        vl_privkey=$(echo "$key_pair" | awk '/PrivateKey/{print $2}')
+        vl_pubkey=$(echo "$key_pair" | awk '/PublicKey/{print $2}')
+        vl_shortid=$(/usr/local/bin/sing-box generate rand 8 --hex) || vl_shortid=""
+        user_uuid=$(/usr/local/bin/sing-box generate uuid) || user_uuid=""
+    fi
+    if [[ -n "$keep_hypass" ]]; then
+        hy_password="$keep_hypass"; echo -e "${GREEN}✓ 沿用现有 Hysteria2 密码${PLAIN}"
+    else
+        hy_password=$(/usr/local/bin/sing-box generate rand 16 --base64 | tr -dc 'a-zA-Z0-9' | head -c 16) || hy_password=""
+    fi
+    if [[ -n "$keep_token" ]]; then
+        sub_token="$keep_token"; echo -e "${GREEN}✓ 沿用现有订阅 token（旧链接继续有效）${PLAIN}"
+    else
+        sub_token=$(openssl rand -hex 12) || sub_token=""
+    fi
     if [[ -z "$vl_privkey" || -z "$vl_pubkey" || -z "$vl_shortid" || -z "$user_uuid" || -z "$sub_token" ]]; then
         echo -e "${RED}关键凭证生成不完整（privkey/uuid/shortid/token 有空值），已中止安装。${PLAIN}"
         return 1

@@ -180,6 +180,18 @@ grep -q "^${BBR_MARK}" "$BBR_CONF" || return 0   # 不是自己的，不动
 - `proto_enable_hy2` 找不到该域名的证书时一律中止，不再为「旧 skip 节点」开例外——那个例外正是两份状态并存的根源。
 - 套件 38.1–38.5 守这条：env 不写 `HY_SKIP_CERT`、生成器从 `CERT_MODE` 派生、domain/selfsigned 两种输出各一条、运行期不得赋值 `CERT_MODE`。改断言之前先想清楚是不是在放宽不变式。
 
+## 十五、重装默认沿用凭据
+
+重装向导会读入 env 里现有的 `VL_UUID / VL_PRIVKEY / VL_PUBKEY / VL_SHORTID / HY_PASS / SUB_TOKEN`，默认原样沿用；只有显式回答 `y` 才会轮换。菜单里那句「重装会让客户端失效」的旧文案一并删了。
+
+规则：
+
+- 轮换是**显式选择**（`rotate_creds` 初值 `N`），默认不轮换。写代码时不要把 `ask` 的默认值设成 `y`。
+- 沿用 token 时，`web/<token>/` 目录必须保留：清理规则是 `find "$WEB_DIR" -mindepth 1 ! -name "$sub_token" -exec rm -rf`，改这条之前先想清楚「沿用」路径。
+- 套件 39.1–39.5 守这条（读入、三处沿用、显式轮换、目录清理、菜单文案）。变异自检：把默认改成 `y`、把 `keep_hypass` 丢掉、把 `-name` 条件删掉，三处都应变红。
+
+这是「配置靠重装实现」这个方向的前置：重装不再有凭据代价，后面把协议集合、443 归属挪到安装期才划算。
+
 ## 验证清单
 
 改完跑这四组，缺一不可：

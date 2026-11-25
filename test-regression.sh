@@ -2145,6 +2145,42 @@ else
     bad "38.5 有运行期代码改证书模式" "全部=${_asis} 安装内=${_inissue}"
 fi
 
+# ---------- 39. 重装默认沿用凭据 ----------
+group "39. 重装保留凭据"
+
+_inst39=$(awk '/^install_node\(\) \{/,/^}/' "$TARGET")
+if grep -q 'keep_uuid=' <<<"$_inst39" && grep -q 'keep_token=' <<<"$_inst39"; then
+    ok "39.1 安装流程读入既有凭据"
+else
+    bad "39.1 安装流程没有读入既有凭据"
+fi
+
+if grep -q 'vl_privkey="\$keep_privkey"' <<<"$_inst39" \
+   && grep -q 'hy_password="\$keep_hypass"' <<<"$_inst39" \
+   && grep -q 'sub_token="\$keep_token"' <<<"$_inst39"; then
+    ok "39.2 Reality / Hy2 / 订阅 token 三处都优先沿用"
+else
+    bad "39.2 有凭据仍被无条件重新生成"
+fi
+
+if grep -q 'local rotate_creds="N"' <<<"$_inst39" && grep -q 'rotate_creds,,.*== "y"' <<<"$_inst39"; then
+    ok "39.3 轮换必须显式输入 y（默认沿用）"
+else
+    bad "39.3 轮换不是显式选择"
+fi
+
+if grep -q 'type d ! -name "\$sub_token"' <<<"$_inst39"; then
+    ok "39.4 只清理不属于当前 token 的订阅目录（沿用时不误删）"
+else
+    bad "39.4 订阅目录清理规则变了"
+fi
+
+if [[ "$(grep -c '所有客户端配置都会失效\|并更换订阅 token' "$TARGET")" -eq 0 ]]; then
+    ok "39.5 菜单不再宣称重装必然轮换"
+else
+    bad "39.5 菜单文案仍说重装必然轮换"
+fi
+
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
 ok "临时文件已清理"

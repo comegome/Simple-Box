@@ -2769,16 +2769,6 @@ site_cert_problem() {
     return 0
 }
 
-# 有站点块直接引用 CERT_DIR 的证书（翻转后的伪装站、接入域站点）。
-# 这些站点一旦被 IP 自签覆盖就会当场失效，所以证书降级前必须先问一句。
-sites_using_cert_dir() {
-    local dir="${CADDY_SITES_DIR:-/etc/caddy/sites}" main="${CADDYFILE:-/etc/caddy/Caddyfile}" f
-    for f in "$dir"/*.caddy "$main"; do
-        [[ -f "$f" ]] || continue
-        grep -qE "^[[:space:]]*tls[[:space:]]+${CERT_DIR}/" "$f" && printf '%s\n' "$f"
-    done
-    return 0
-}
 
 # 外部伪装域名必须支持 TLS 1.3 + h2，否则 Reality 握手失败但配置看起来正常
 probe_external_sni() {
@@ -2805,15 +2795,6 @@ sync_hy2_cert() {
     install_cert_to "$src" "$CERT_DIR"
 }
 
-ensure_reality_creds() {
-    [[ -n "${VL_UUID:-}" && -n "${VL_PRIVKEY:-}" ]] && return 0
-    local kp
-    kp=$(/usr/local/bin/sing-box generate reality-keypair) || return 1
-    VL_PRIVKEY=$(awk '/PrivateKey/{print $2}' <<<"$kp")
-    VL_PUBKEY=$(awk '/PublicKey/{print $2}' <<<"$kp")
-    VL_SHORTID=$(/usr/local/bin/sing-box generate rand 8 --hex)
-    VL_UUID=$(/usr/local/bin/sing-box generate uuid)
-}
 
 # 把大写 env 变量搬进 write_env_config 需要的变量名
 sync_env_locals() {
@@ -2822,7 +2803,6 @@ sync_env_locals() {
     # 槽 1 只支持 Hysteria2 落地；这里只派生「有无中转」判断用的地址。
     EXIT_SERVER=""
     [[ "$EXIT_TYPE" == "hy2" ]] && EXIT_SERVER="${EXIT_HY_SERVER:-}"
-    EXIT_SNI="${EXIT_HY_SNI:-}"
     node_prefix="$NODE_PREFIX"; server_ip="$SERVER_IP"
     vl_port="$VL_PORT"; vl_sni="$VL_SNI"; user_uuid="$VL_UUID"
     vl_privkey="$VL_PRIVKEY"; vl_pubkey="$VL_PUBKEY"; vl_shortid="$VL_SHORTID"
@@ -3320,12 +3300,6 @@ ensure_camo_generator() {
 }
 
 # 域名 → 内容源的确定性映射（同一个域名每次都是同一个源）
-camo_pick_source() {
-    local pool=(eso wikimedia w3c bhl)
-    local n
-    n=$(printf '%s' "${1:-}" | cksum | awk '{print $1}')
-    printf '%s' "${pool[$(( n % ${#pool[@]} ))]}"
-}
 
 # 生成 / 重建站点，并挂到 Caddy；Reality 在跑就同步翻转成 127.0.0.1:FLIP_PORT
 build_camo_site() {

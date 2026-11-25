@@ -1897,16 +1897,12 @@ exit_entry_ports_ok 1 39181 8444 >/dev/null 2>&1 && bad "32.19 入口端口撞 S
 exit_entry_ports_ok 1 39181 39182 >/dev/null 2>&1 && ok "32.20 合法端口组合通过" || bad "32.20 合法组合被误拒"
 VL_PORT="${_o_vl:-443}"; HY_PORT="${_o_hy:-8443}"; SUB_PORT="${_o_sp:-8444}"
 
-# 32.21-32.23 证书归属护栏：站点引用 CERT_DIR 时，证书降级必须能被发现
+# 32.21 / 32.22 随证书降级路径删除：4.1 起证书申请失败直接中止安装，
+# 不存在「自签覆盖 CERT_DIR 打死站点」这条失败路径，sites_using_cert_dir 已删除。
+# 32.23 站点证书校验本身仍在（reality_target_check 依赖它）。
 mkdir -p "$_t32/sites" "$_t32/cert"
 _c_cd="$CERT_DIR"; _c_sites="${CADDY_SITES_DIR:-}"; _c_file="${CADDYFILE:-}"
 CERT_DIR="$_t32/cert"; CADDY_SITES_DIR="$_t32/sites"; CADDYFILE="$_t32/Caddyfile"
-printf 'a.example.com {\n\ttls %s/fullchain.cer %s/private.key\n}\n' "$CERT_DIR" "$CERT_DIR" > "$_t32/sites/a.caddy"
-[[ -n "$(sites_using_cert_dir)" ]] \
-    && ok "32.21 识别出引用 CERT_DIR 的站点（降级会同时打死站点与 Reality）" \
-    || bad "32.21 引用 CERT_DIR 的站点未被识别"
-printf 'b.example.com {\n\trespond ok\n}\n' > "$_t32/sites/a.caddy"
-[[ -z "$(sites_using_cert_dir)" ]] && ok "32.22 未引用 CERT_DIR 的站点不算" || bad "32.22 误报站点"
 printf 'c.example.com {\n\ttls %s/nope.cer %s/nope.key\n}\n' "$_t32" "$_t32" > "$_t32/sites/c.caddy"
 site_cert_problem "$_t32/sites/c.caddy" "c.example.com" >/dev/null 2>&1 \
     && bad "32.23 站点证书文件缺失未报错" || ok "32.23 站点证书缺失被拦"

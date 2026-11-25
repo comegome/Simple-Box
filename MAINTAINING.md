@@ -222,15 +222,13 @@ grep -q "^${BBR_MARK}" "$BBR_CONF" || return 0   # 不是自己的，不动
 
 ## 验证清单
 
-改完跑这四组，缺一不可：
+改完跑仓库里的套件，这是唯一一套（旧的 `/tmp/r22.sh`、`r23b.sh`、`final_verify.sh` 已废弃并删除）：
 
 ```bash
-sudo bash /tmp/r22.sh          # 非破坏性全功能，102 项
-sudo bash /tmp/r23b.sh         # 破坏性（装/卸/重装），44 项
-sudo bash /tmp/final_verify.sh # 健康与出网，16 项
+cd ~/Simple-Box && sudo TARGET_SCRIPT=$PWD/simple-box.sh bash test-regression.sh
 ```
 
-专项测试按改动内容补充。全部通过才算完成。
+带 `caddy` / `mihomo` 的机器会多跑 15.20/15.21 与 31.10（缺二进制则跳过），计数以当次输出为准。全部通过才算完成。
 
 第 35 组把几条「机械不变式」变成了红灯，不再靠记性：配置只能从 `render_set` 进 `write_singbox_config`、`render_set` 的调用方必须补 `apply_exit_config`/`render_and_reload`、清 `ENV_LOADED` 只能发生在 `write_env_config`、`mktemp` 要登记 `TMP_CLEANUP`、每个 `menu*` 循环都要能在 stdin 关闭时退出。新增路径时如果踩到这几条，先看断言名字，不要改断言去迁就实现。
 

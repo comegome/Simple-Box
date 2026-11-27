@@ -196,16 +196,6 @@ check_domain_ip_binding() {
     return 1
 }
 
-# 严格判断域名的 A 记录里是否包含指定 IP（不交互、不确认）。
-# 与 check_domain_ip_binding 的区别：那个允许「警告后继续」，这个只认命中，
-# 用来决定「能不能把该域名当成本机伪装站来建站」。
-domain_a_matches_ip() {
-    local domain="${1:-}" ip="${2:-}" ips
-    [[ -n "$domain" && -n "$ip" ]] || return 1
-    ips=$(timeout 4 getent ahostsv4 "$domain" 2>/dev/null | awk '{print $1}' | sort -u || true)
-    [[ -n "$ips" ]] && grep -qxF "$ip" <<<"$ips"
-}
-
 # 剔除字符串首尾的空白字符与引号（清洗换行符、制表符、空格与单双引号任意层嵌套）
 trim_string() {
     local val="${1:-}"
@@ -2359,32 +2349,6 @@ EOF
     # 订阅站不在安装层单独建：render_and_reload 内部按「先写文件、再写站点、再自检」的顺序做，
     # 安装层提前建一次会拿旧 token 去自检，导致一次无意义的 404 告警。
 
-    # 伪装域名是「本机还没建站、但 A 记录已指向本机」时，安装期直接把站建好：
-    # 必须在 render_set 之前完成，否则回落目标会指向一个不存在的站点。
-    if [[ "${CAMO_PENDING:-0}" == "1" && -n "${vl_sni:-}" ]]; then
-        echo -e "\n${CYAN}本机伪装站${PLAIN}"
-        echo -e "${GRAY}为 ${vl_sni} 生成静态站（作为 Reality 的回落目标）${PLAIN}"
-        if ! install_caddy; then
-            echo -e "${RED}✗ Caddy 不可用，无法建立伪装站，安装中止${PLAIN}"
-            return 1
-        fi
-        # 只落 Caddyfile 骨架与 sites/ 的 import，不建订阅站（订阅站由
-        # render_and_reload 建，提前建会拿旧 token 自检并报无意义的 404）。
-        ensure_caddyfile >/dev/null 2>&1 || true
-        mkdir -p "${CADDY_SITES_DIR:-/etc/caddy/sites}"
-        # 同 zone 复用刚输入的 token；不同 zone 留空，让 issue_site_cert
-        # 走 /root/.cf-token-site 或现场提示，避免拿错 zone 的 token 签成 invalid domain。
-        local _camotok=""
-        if [[ -n "${cf_token:-}" && -n "${hy_domain:-}" ]]; then
-            case "$vl_sni" in *".${hy_domain#*.}") _camotok="$cf_token" ;; esac
-        fi
-        if ! CF_TOKEN="$_camotok" CAMO_SKIP_SWITCH=1 CAMO_DEFER_RELOAD=1 build_camo_site "$vl_sni" eso ""; then
-            echo -e "${RED}✗ 伪装站生成失败，安装中止（否则 Reality 的回落目标不可用）${PLAIN}"
-            echo -e "${YELLOW}  可改用外部伪装域名重跑安装${PLAIN}"
-            return 1
-        fi
-    fi
-
     # 大写字段一律从刚落盘的 env 回读：内存里再维护一套赋值，漏一行就会写坏订阅。
     load_env || { echo -e "${RED}回读 ${ENV_FILE} 失败，安装中止。${PLAIN}"; return 1; }
 
@@ -2403,19 +2367,6 @@ EOF
     if ! render_and_reload; then
         echo -e "${RED}配置应用失败，安装中止。${PLAIN}"
         return 1
-    fi
-
-    # 安装期新建的伪装站：sing-box 已经抢回 443，这里从回环验收回落目标。
-    if [[ "${CAMO_PENDING:-0}" == "1" ]]; then
-        local _camocode
-        _camocode=$(curl -s -o /dev/null -k -m 8 -w '%{http_code}' \
-            --resolve "${vl_sni}:${FLIP_PORT}:127.0.0.1" "https://${vl_sni}:${FLIP_PORT}/" 2>/dev/null || true)
-        if [[ "$_camocode" == "200" ]]; then
-            echo -e "${GREEN}✓ 伪装站自检 200（${vl_sni} → 127.0.0.1:${FLIP_PORT}）${PLAIN}"
-        else
-            echo -e "${YELLOW}⚠ 伪装站自检返回 ${_camocode:-无响应}：Reality 的回落会打不开${PLAIN}"
-            echo -e "${YELLOW}  检查 Caddy 是否在跑、证书是否就位；站点文件在 ${CADDY_SITES_DIR:-/etc/caddy/sites}/camo-${vl_sni}.caddy${PLAIN}"
-        fi
     fi
 
     echo -e "\n${GRAY}====================================================${PLAIN}"
@@ -2988,22 +2939,16 @@ reality_target_check() {
         echo -e "${GREEN}✓ 本机站点 ${site} 作为回落目标（${FLIP_PORT}）${PLAIN}"
         return 0
     fi
-    # 自己的域名还没建站，但 A 记录已经指向本机：按「本机伪装站」处理，
-    # 安装时自动生成站点，不再逼用户先借一个外部域名。
-    if domain_a_matches_ip "$sni" "${server_ip:-}"; then
-        echo -e "${GREEN}✓ ${sni} 的 A 记录指向本机（${server_ip:-}）${PLAIN}"
-        echo -e "${GRAY}  本机还没有它的站点，安装时会自动生成一个（证书走 DNS-01）${PLAIN}"
-        CAMO_PENDING=1
-        return 0
-    fi
     echo -e "${YELLOW}本机没有 ${sni} 的站点，按外部伪装域名校验 TLS 1.3 + h2 ...${PLAIN}"
     if ! probe_external_sni "$sni"; then
         echo -e "${RED}✗ ${sni} 不支持 TLS 1.3 + h2 或不可达${PLAIN}"
-        echo -e "${YELLOW}  确认 A 记录指向本机后可直接填它（会自动建站）；否则换一个域名，${PLAIN}"
-        echo -e "${YELLOW}  或装完后用菜单「伪装站点」为该域名建站（会自动切换 VL_SNI）${PLAIN}"
+        echo -e "${YELLOW}  换一个域名；或装完后用菜单「伪装站点」为该域名建站，"
+        echo -e "  它会自动把 Reality 的伪装域名切过去（客户端需重拉订阅）${PLAIN}"
         return 1
     fi
     echo -e "${GREEN}✓ 外部伪装域名可用${PLAIN}"
+    echo -e "${GRAY}  装完后可以用自有域名建站替换它：菜单「伪装站点」→ 输入域名，"
+    echo -e "  会提示一次 SNI 变更（客户端需重拉订阅），确认后自动切换${PLAIN}"
 }
 
 # Hy2 证书必须覆盖该域名。证书模式不可中途切换：找不到就中止，不回退自签
@@ -3431,8 +3376,7 @@ build_camo_site() {
     # 只能先挂在回环上；要让它真正对外，必须把 Reality 的伪装域名一起切过去。
     # 以前这里直接拒绝，于是安装（没有站点只能选外部域名）与建站互相死锁：
     # 安装要求先有站点，建站又要求先改 VL_SNI。现在改成确认后一次做完。
-    if [[ "${CAMO_SKIP_SWITCH:-0}" != "1" ]] \
-       && [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in" && [[ "$domain" != "${VL_SNI:-}" ]]; then
+    if [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in" && [[ "$domain" != "${VL_SNI:-}" ]]; then
         echo -e "${YELLOW}Reality 当前用 ${VL_SNI:-} 作伪装域名，${domain} 还不是它的回落目标。${PLAIN}"
         echo -e "${YELLOW}继续会把 Reality 的伪装域名切换成 ${domain}：${PLAIN}"
         echo -e "${GRAY}  · 证书走 DNS-01，不依赖 443，但域名要能解析${PLAIN}"
@@ -3482,15 +3426,6 @@ build_camo_site() {
     caddy_file="${CADDY_SITES_DIR:-/etc/caddy/sites}/camo-${domain}.caddy"
     mkdir -p "${CADDY_SITES_DIR:-/etc/caddy/sites}"
     camo_caddy_block "$domain" "$dir" "$cert" > "$caddy_file" || return 1
-
-    # 安装期：站还没到能对外服务的时候（Caddyfile 里的 import 由后续
-    # setup_caddy_subscription 写），只把文件落成「已在回环」的形态，
-    # 不 reload、不自检——重载与验收交给安装流程。
-    if [[ "${CAMO_DEFER_RELOAD:-0}" == "1" ]]; then
-        flip_transform "$caddy_file" "$domain" "$FLIP_PORT" on >/dev/null 2>&1 || true
-        echo -e "${GREEN}✓ 站点文件已生成（回环 ${FLIP_PORT}），等待 Caddy 重载${PLAIN}"
-        return 0
-    fi
 
     if [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in"; then
         flip_site on "$domain" || { echo -e "${RED}✗ Caddy 重载失败${PLAIN}"; return 1; }

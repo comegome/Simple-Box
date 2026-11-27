@@ -2942,7 +2942,8 @@ reality_target_check() {
     echo -e "${YELLOW}本机没有 ${sni} 的站点，按外部伪装域名校验 TLS 1.3 + h2 ...${PLAIN}"
     if ! probe_external_sni "$sni"; then
         echo -e "${RED}✗ ${sni} 不支持 TLS 1.3 + h2 或不可达${PLAIN}"
-        echo -e "${YELLOW}  换一个域名，或先用菜单「伪装站点」在本机建好站点再重跑安装${PLAIN}"
+        echo -e "${YELLOW}  换一个域名；或装完后用菜单「伪装站点」为该域名建站，"
+        echo -e "  它会自动把 Reality 的伪装域名切过去（客户端需重拉订阅）${PLAIN}"
         return 1
     fi
     echo -e "${GREEN}✓ 外部伪装域名可用${PLAIN}"
@@ -3368,14 +3369,19 @@ ensure_camo_generator() {
 # 生成 / 重建站点，并挂到 Caddy；Reality 在跑就同步翻转成 127.0.0.1:FLIP_PORT
 build_camo_site() {
     local domain="$1" source="$2" style="${3:-}"
-    local gen dir caddy_file cert
-    # Reality 在跑时 443 归 sing-box，只有「当前伪装域名」能通过它的回落对外服务。
-    # 给别的域名建站只能把它搬到回环，公网 443 上仍是 Reality 的回落目标——站点等于不存在，
-    # 而且会让翻转目标指向这个站，真正的回落站点会留在回环上。
+    local gen dir caddy_file cert switch_sni=0 ans
+    # Reality 在跑时 443 归 sing-box。给「不是当前伪装域名」的域名建站时，站本身
+    # 只能先挂在回环上；要让它真正对外，必须把 Reality 的伪装域名一起切过去。
+    # 以前这里直接拒绝，于是安装（没有站点只能选外部域名）与建站互相死锁：
+    # 安装要求先有站点，建站又要求先改 VL_SNI。现在改成确认后一次做完。
     if [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in" && [[ "$domain" != "${VL_SNI:-}" ]]; then
-        echo -e "${RED}✗ Reality 正在 443 上用 ${VL_SNI} 伪装，${domain} 无法同时对外服务${PLAIN}"
-        echo -e "${YELLOW}  要让它对外服务，只能重跑安装向导把 Reality 的伪装域名填成 ${domain}${PLAIN}"
-        return 1
+        echo -e "${YELLOW}Reality 当前用 ${VL_SNI:-} 作伪装域名，${domain} 还不是它的回落目标。${PLAIN}"
+        echo -e "${YELLOW}继续会把 Reality 的伪装域名切换成 ${domain}：${PLAIN}"
+        echo -e "${GRAY}  · 证书走 DNS-01，不依赖 443，但域名要能解析${PLAIN}"
+        echo -e "${RED}  · 所有客户端必须重新拉订阅（SNI 变了，旧订阅会握手失败）${PLAIN}"
+        ask "继续切换？(y/N): " ans
+        [[ "${ans,,}" == "y" ]] || { echo -e "${GRAY}已取消，未做任何改动${PLAIN}"; return 1; }
+        switch_sni=1
     fi
     # 同一域名已有站点块时不能再写 camo-<域名>.caddy：Caddy 会因同一个地址出现两次而加载失败
     local _exist
@@ -3415,8 +3421,8 @@ build_camo_site() {
     fi
     chmod -R a+rX "$dir" 2>/dev/null || true
 
-    caddy_file="/etc/caddy/sites/camo-${domain}.caddy"
-    mkdir -p /etc/caddy/sites
+    caddy_file="${CADDY_SITES_DIR:-/etc/caddy/sites}/camo-${domain}.caddy"
+    mkdir -p "${CADDY_SITES_DIR:-/etc/caddy/sites}"
     camo_caddy_block "$domain" "$dir" "$cert" > "$caddy_file" || return 1
 
     if [[ -f "$CONF_FILE" ]] && set_has "vless-reality-in"; then
@@ -3435,6 +3441,24 @@ build_camo_site() {
     if [[ "$code" == "200" ]]; then
         echo -e "${GREEN}✓ 伪装站点已上线：https://${domain}/（回落端口 ${port}）${PLAIN}"
         echo -e "  目录: ${dir}   配置: ${caddy_file}"
+        # 站点自检通过后才改 VL_SNI：先证实这个域名真的能服 200，再把 Reality
+        # 的回落目标切过去。失败时站点留在回环上，VL_SNI 不动，旧节点继续可用。
+        if [[ "$switch_sni" == "1" ]]; then
+            local old_sni="${VL_SNI:-}"
+            VL_SNI="$domain"
+            if ! write_env_config; then
+                VL_SNI="$old_sni"
+                echo -e "${RED}✗ 写入 env 失败，VL_SNI 已回滚为 ${VL_SNI}（站点已建好）${PLAIN}"
+                return 1
+            fi
+            if ! render_set || ! render_and_reload; then
+                echo -e "${RED}✗ 切换伪装域名失败：env 已改，但 sing-box 未重载${PLAIN}"
+                echo -e "${YELLOW}  站点已建好；重跑安装或手工 render_set + systemctl restart sing-box${PLAIN}"
+                return 1
+            fi
+            echo -e "${GREEN}✓ Reality 伪装域名已切换为 ${domain}（回落 ${FLIP_PORT}）${PLAIN}"
+            echo -e "${RED}  所有客户端必须重新拉订阅：SNI 已变，旧订阅会握手失败${PLAIN}"
+        fi
     else
         echo -e "${YELLOW}⚠ 站点已生成但自检返回 HTTP ${code}${PLAIN}"
         echo -e "  排查: systemctl status caddy; ss -ltnp | grep :${port}"

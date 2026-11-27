@@ -822,7 +822,8 @@ fi
 
 # 15.23 port_holder 能识别占用者
 python3 -m http.server 18099 --bind 127.0.0.1 >/dev/null 2>&1 &
-_ph_pid=$!; sleep 0.6
+_ph_pid=$!
+for _i in $(seq 1 25); do ss -ltn 2>/dev/null | grep -q ':18099 ' && break; sleep 0.2; done
 _h=$(port_holder 18099 tcp)
 kill "$_ph_pid" 2>/dev/null; wait "$_ph_pid" 2>/dev/null
 [[ "$_h" == *python* ]] && ok "15.23 port_holder 识别端口占用者" || bad "15.23 port_holder 未识别占用者" "${_h:-空}"
@@ -872,6 +873,8 @@ printf '{"inbounds":[]}\n' > "$SB16/config.json"
 ENV_FILE="$SB16/env.conf"; CONF_FILE="$SB16/config.json"; CERT_DIR="$SB16/cert"
 CADDY_SITES_DIR="$SB16/sites"
 ENV_LOADED=""
+_save_render_and_reload=$(declare -f render_and_reload)
+_save_flip_site=$(declare -f flip_site)
 render_and_reload() { return 0; }
 flip_site() { return 0; }
 
@@ -981,6 +984,11 @@ grep -qx 'PROTO_SET="reality hy2"' "$SB16/env2.conf" 2>/dev/null \
 # 16.8 / 16.9 随 proto_enable_* 删除（安装期检查已在 16.3/16.5 覆盖）
 
 
+
+# 第 16 组的桩必须在这里撤掉：flip_site 造假会让后面的伪装站测试看不见真翻转
+eval "$_save_render_and_reload"
+eval "$_save_flip_site"
+unset _save_render_and_reload _save_flip_site
 
 # ---------- 17. 出口中转 ----------
 group "17. 出口中转"
@@ -1347,10 +1355,13 @@ CERT_SSL_ROOT="$_t23/ssl"; CERT_ACME_ROOT="$_t23/acme"
 mkdir -p "$CERT_SSL_ROOT" "$CERT_ACME_ROOT"
 CONF_FILE="$_t23/config.json"; CADDY_SITES_DIR="$_t23/sites"; VL_SNI="other.example.com"
 if build_camo_site "cam.example.com" "eso" "" </dev/null > "$_t23/o1" 2>&1; then
-    bad "23.10 Reality 占用 443 时仍给别的域名建站"
+    bad "23.10 Reality 占用 443 时未经确认就给别的域名建站"
 else
-    grep -q '无法同时对外服务' "$_t23/o1" \
-        && ok "23.10 拒绝为「非当前伪装域名」建站" || bad "23.10 拒绝原因不明确" "$(tail -1 "$_t23/o1")"
+    if grep -q '必须重新拉订阅' "$_t23/o1" && grep -q '已取消' "$_t23/o1" && [[ "$VL_SNI" == "other.example.com" ]]; then
+        ok "23.10 非当前伪装域名需确认切换，EOF 视为取消且不改 VL_SNI"
+    else
+        bad "23.10 取消路径说明不清或有副作用" "$(tail -1 "$_t23/o1")"
+    fi
 fi
 printf 'cam.example.com {\n\trespond ok\n}\n' > "$_t23/sites/existing.caddy"
 CONF_FILE="$_t23/none.json"; VL_SNI=""
@@ -2369,6 +2380,62 @@ flip_transform "$SB40/site.caddy" sb40.example.com 9443 off >/dev/null 2>&1
 _back=$(head -1 "$SB40/site.caddy")
 [[ "$_back" == "sb40.example.com {" ]] && ok "40.7 反向翻回原样（不留 bind）" || bad "40.7 反向还原异常" "$_back"
 rm -rf "$SB40"
+
+group "41. 伪装站点接管 VL_SNI（安装/建站死锁）"
+_sb41=$(mktemp -d); mkdir -p "$_sb41/sites" "$_sb41/www" "$_sb41/cert"
+printf '{"inbounds":[{"type":"vless","tag":"vless-reality-in"}]}\n' > "$_sb41/config.json"
+printf 'import sys\nsys.exit(0)\n' > "$_sb41/gen.py"
+_s41_conf=$CONF_FILE; _s41_sites=${CADDY_SITES_DIR:-}; _s41_camo=$CAMO_ROOT
+_s41_sni=$VL_SNI; _s41_hy=${HY_DOMAIN:-}; _s41_th=${TARGET_HOST:-}; _s41_ssl=${CERT_SSL_ROOT:-}
+CONF_FILE=$_sb41/config.json; CADDY_SITES_DIR=$_sb41/sites; CAMO_ROOT=$_sb41/www
+CERT_SSL_ROOT=$_sb41/cert; VL_SNI="old.example.com"; HY_DOMAIN="other.example.com"; TARGET_HOST="other.example.com"; FLIP_PORT=9443
+ensure_camo_generator(){ printf '%s\n' "$_sb41/gen.py"; }
+issue_site_cert(){ return 0; }
+caddy(){ return 0; }
+reload_caddy_safe(){ return 0; }
+write_env_config(){ echo ENV >> "$_sb41/marks"; return 0; }
+render_set(){ echo RENDER >> "$_sb41/marks"; return 0; }
+render_and_reload(){ echo RELOAD >> "$_sb41/marks"; return 0; }
+curl(){ printf '200'; }
+ask(){ printf -v "$2" '%s' "${_41_ans:-y}"; }
+
+build_camo_site "new.example.com" eso "" >"$_sb41/out" 2>&1
+if [[ "$VL_SNI" == "new.example.com" ]]; then ok "41.1 确认后 VL_SNI 切到新域名"; else bad "41.1 VL_SNI 未切换" "VL_SNI=$VL_SNI"; fi
+if grep -qx ENV "$_sb41/marks" 2>/dev/null && grep -qx RENDER "$_sb41/marks" 2>/dev/null && grep -qx RELOAD "$_sb41/marks" 2>/dev/null; then
+    ok "41.2 切换按 env → render_set → render_and_reload 顺序落地"
+else
+    bad "41.2 切换步骤缺失" "$(tr '\n' ' ' < "$_sb41/marks" 2>/dev/null)"
+fi
+if grep -q 'https://new.example.com:9443 {' "$_sb41/sites/camo-new.example.com.caddy" 2>/dev/null \
+   && grep -q 'bind 127.0.0.1' "$_sb41/sites/camo-new.example.com.caddy" 2>/dev/null; then
+    ok "41.3 站点块在回环 9443 上（不抢 443）"
+else
+    bad "41.3 站点块未翻转到回环" "files=$(ls "$_sb41/sites" 2>/dev/null | tr '\n' ' ') head=$(head -2 "$_sb41/sites/camo-new.example.com.caddy" 2>/dev/null | tr '\n' ' ') out=$(tail -2 "$_sb41/out" | tr '\n' ' ')"
+fi
+
+# 拒绝切换：不做任何改动
+VL_SNI="old.example.com"; rm -f "$_sb41/marks" "$_sb41/sites/camo-new.example.com.caddy"
+_41_ans=n build_camo_site "new.example.com" eso "" >"$_sb41/out2" 2>&1; _rc41=$?
+unset _41_ans
+if [[ "$_rc41" -ne 0 && "$VL_SNI" == "old.example.com" && ! -f "$_sb41/marks" ]]; then
+    ok "41.4 回答 n 时不改 VL_SNI、不写 env"
+else
+    bad "41.4 取消路径仍有副作用" "rc=$_rc41 VL_SNI=$VL_SNI"
+fi
+
+# 当前伪装域名本身就允许（旧行为：直接建站，不需要确认）
+VL_SNI="new.example.com"; rm -f "$_sb41/marks"
+build_camo_site "new.example.com" eso "" >"$_sb41/out3" 2>&1
+if [[ -f "$_sb41/sites/camo-new.example.com.caddy" && ! -f "$_sb41/marks" ]]; then
+    ok "41.5 域名已是 VL_SNI 时直接建站、不触发切换"
+else
+    bad "41.5 同域名路径被切换逻辑污染"
+fi
+
+unset -f ensure_camo_generator issue_site_cert caddy reload_caddy_safe write_env_config render_set render_and_reload curl ask
+CONF_FILE=$_s41_conf; CADDY_SITES_DIR=$_s41_sites; CAMO_ROOT=$_s41_camo
+VL_SNI=$_s41_sni; HY_DOMAIN=$_s41_hy; TARGET_HOST=$_s41_th; CERT_SSL_ROOT=$_s41_ssl
+rm -rf "$_sb41"
 
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null

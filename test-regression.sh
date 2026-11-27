@@ -349,8 +349,9 @@ if [[ -f "$_sb9/99-zz-simbo-net.conf" ]] \
 else
     bad "9.6 基线文件缺失/缺标记/键数不对"
 fi
-if grep -q '网络基线已应用（9 项一致）' "$_sb9/out1" && grep -q 'eth9 队列规则已切换为 fq' "$_sb9/out1"; then
-    ok "9.7 回读 9 项一致，并对默认路由网卡应用 fq"
+if grep -q '网络基线已应用（9 项一致）' "$_sb9/out1" && grep -q 'eth9 队列规则已切换为 fq' "$_sb9/out1" \
+   && ! grep -q '基线将覆盖' "$_sb9/out1"; then
+    ok "9.7 回读 9 项一致，对默认路由网卡应用 fq；无外部文件时不打印覆盖提示"
 else
     bad "9.7 回读或 qdisc 应用未按预期工作" "$(tail -3 "$_sb9/out1")"
 fi
@@ -369,18 +370,29 @@ if [[ ! -f "$_sb9/99-bbr.conf" && -f "$_sb9/99-zz-simbo-net.conf" ]]; then
 else
     bad "9.9 旧文件未迁移（卸载会残留）"
 fi
-# 无标记 = 服务商配置：内容不动，但基线仍写入（靠文件名覆盖效果）
+# 无标记 = 服务商配置：内容不动，但基线仍写入（靠文件名覆盖效果），且日志点名
 _sb9f=$(mktemp -d)
 printf 'net.core.default_qdisc=cake\n' > "$_sb9f/99-bbr.conf"
 _sb9_h1=$(sha256sum "$_sb9f/99-bbr.conf" | cut -d' ' -f1)
-SYSCTL_DIR="$_sb9f" apply_net_baseline >/dev/null 2>&1
+SYSCTL_DIR="$_sb9f" apply_net_baseline >"$_sb9f/out" 2>&1
 _sb9_h2=$(sha256sum "$_sb9f/99-bbr.conf" | cut -d' ' -f1)
-if [[ "$_sb9_h1" == "$_sb9_h2" && -f "$_sb9f/99-zz-simbo-net.conf" ]]; then
-    ok "9.10 服务商配置不改写，基线靠 99-zz 优先级生效"
+if [[ "$_sb9_h1" == "$_sb9_h2" && -f "$_sb9f/99-zz-simbo-net.conf" ]] \
+   && grep -q '基线将覆盖' "$_sb9f/out" && grep -q '99-bbr.conf' "$_sb9f/out"; then
+    ok "9.10 服务商配置不改写，基线生效且日志点名 99-bbr.conf"
 else
-    bad "9.10 服务商配置被改写或基线未写入"
+    bad "9.10 服务商配置被改写、基线未写入或日志没点名"
 fi
 rm -rf "$_sb9f"
+# 服务商的调优文件未必叫 99-bbr.conf（isif 就是 99-network-tuning.conf），也要点名
+_sb9g=$(mktemp -d)
+printf 'net.core.default_qdisc = fq\nnet.ipv4.tcp_congestion_control = bbr\n' > "$_sb9g/99-network-tuning.conf"
+SYSCTL_DIR="$_sb9g" apply_net_baseline >"$_sb9g/out" 2>&1
+if grep -q '基线将覆盖' "$_sb9g/out" && grep -q '99-network-tuning.conf' "$_sb9g/out"; then
+    ok "9.16 非 99-bbr.conf 的服务商文件同样被点名"
+else
+    bad "9.16 只按文件名判断覆盖对象（会漏报）"
+fi
+rm -rf "$_sb9g"
 # 回读不一致只告警，不中止安装
 touch "$_sb9/badcc"
 SYSCTL_DIR="$_sb9" apply_net_baseline >"$_sb9/out2" 2>&1; _sb9_rc=$?

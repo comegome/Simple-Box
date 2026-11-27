@@ -465,8 +465,16 @@ apply_net_baseline() {
     # 旧版文件名（同样带标记）迁走，内容已包含在新基线里
     if [[ -f "$legacy" ]] && grep -qxF "$BBR_MARK" "$legacy"; then
         rm -f "$legacy" || true
-    elif [[ -f "$legacy" ]]; then
-        echo -e "${CYAN}保留服务商配置 ${legacy}，基线用 99-zz 覆盖同名键${PLAIN}"
+    fi
+
+    # 报告被覆盖的外部文件：只写自己的文件，但要让人知道覆盖了谁。
+    # 不能只看 99-bbr.conf —— 服务商还可能写 99-network-tuning.conf。
+    local others
+    others=$(grep -lsE '^[[:space:]]*(net\.core\.default_qdisc|net\.ipv4\.tcp_congestion_control|net\.ipv4\.tcp_rmem|net\.ipv4\.tcp_wmem|net\.ipv4\.tcp_slow_start_after_idle|net\.ipv4\.tcp_mtu_probing|net\.core\.somaxconn|net\.ipv4\.tcp_max_syn_backlog|net\.core\.netdev_max_backlog)[[:space:]]*=' \
+        "$dir"/*.conf 2>/dev/null | grep -v "/${NET_CONF_NAME}$" || true)
+    if [[ -n "$others" ]]; then
+        echo -e "${CYAN}基线将覆盖以下文件里的同名键（文件本身不改）：${PLAIN}"
+        printf '%s\n' "$others" | sed 's/^/  · /'
     fi
 
     if ! mkdir -p "$dir" 2>/dev/null || ! cat > "$conf" <<EOF

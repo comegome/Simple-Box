@@ -2437,6 +2437,37 @@ CONF_FILE=$_s41_conf; CADDY_SITES_DIR=$_s41_sites; CAMO_ROOT=$_s41_camo
 VL_SNI=$_s41_sni; HY_DOMAIN=$_s41_hy; TARGET_HOST=$_s41_th; CERT_SSL_ROOT=$_s41_ssl
 rm -rf "$_sb41"
 
+group "43. 内容源选择（回车=随机）"
+_s43_map="1:eso 2:wikimedia 3:w3c 4:bhl"
+_s43_ok=1
+for _kv in $_s43_map; do
+    _k=${_kv%%:*}; _v=${_kv##*:}
+    [[ "$(pick_camo_source "$_k")" == "$_v" ]] || { _s43_ok=0; bad "43.1 内容源 $_k 映射错误" "$(pick_camo_source "$_k")"; }
+done
+[[ "$_s43_ok" == "1" ]] && ok "43.1 1-4 映射到四种内容源"
+if pick_camo_source 9 >/dev/null 2>&1; then
+    bad "43.2 非法选项未拒绝"
+else
+    ok "43.2 非法选项返回非零（菜单不留死在生成分支）"
+fi
+_s43_seen=""
+for _i in $(seq 1 40); do _s43_seen+=$(pick_camo_source "")$'\n'; done
+_s43_uniq=$(printf '%s\n' "$_s43_seen" | sed '/^$/d' | sort -u)
+_s43_valid=1
+for _v in $_s43_uniq; do
+    case "$_v" in eso|wikimedia|w3c|bhl) ;; *) _s43_valid=0 ;; esac
+done
+if [[ "$_s43_valid" == "1" && -n "$_s43_uniq" ]]; then
+    ok "43.3 空输入只落在四种源内"
+else
+    bad "43.3 空输入出现非法源" "$(printf '%s' "$_s43_uniq" | tr '\n' ' ')"
+fi
+if [[ "$(printf '%s' "$_s43_seen" | sort -u | wc -l)" -ge 2 ]]; then
+    ok "43.4 40 次空输入不是同一个源"
+else
+    bad "43.4 空输入每次都给同一个源（随机没生效）"
+fi
+
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
 ok "临时文件已清理"

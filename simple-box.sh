@@ -3368,6 +3368,18 @@ ensure_camo_generator() {
 
 # 域名 → 内容源的确定性映射（同一个域名每次都是同一个源）
 
+# 内容源：1-4 显式选择，空输入随机（与版式「回车=自动」一致）
+pick_camo_source() {
+    case "${1:-}" in
+        "") shuf -n1 -e eso wikimedia w3c bhl ;;
+        1) echo eso ;;
+        2) echo wikimedia ;;
+        3) echo w3c ;;
+        4) echo bhl ;;
+        *) return 1 ;;
+    esac
+}
+
 # 生成 / 重建站点，并挂到 Caddy；Reality 在跑就同步翻转成 127.0.0.1:FLIP_PORT
 build_camo_site() {
     local domain="$1" source="$2" style="${3:-}"
@@ -3495,11 +3507,11 @@ menu_camo() {
                 [[ -n "$domain" ]] || { echo -e "${RED}域名不能为空${PLAIN}"; continue; }
                 validate_domain "$domain" || { echo -e "${RED}域名格式不合法${PLAIN}"; continue; }
                 echo -e " 内容源: 1) ESO 天文  2) Wikimedia 开放知识  3) W3C 标准  4) BHL 自然史"
-                read -r -p "内容源 [1-4]: " source || return 0
-                case "$source" in
-                    1) source=eso ;; 2) source=wikimedia ;; 3) source=w3c ;; 4) source=bhl ;;
-                    *) echo -e "${RED}无效选项${PLAIN}"; continue ;;
-                esac
+                read -r -p "内容源 [1-4]（回车=随机）: " source || return 0
+                if ! source=$(pick_camo_source "$source"); then
+                    echo -e "${RED}无效选项${PLAIN}"; continue
+                fi
+                echo -e "${GRAY}  使用内容源：${source}${PLAIN}"
                 read -r -p "版式 0-7（回车=自动）: " style || return 0
                 [[ "$style" =~ ^[0-7]$ ]] || style=""
                 build_camo_site "$domain" "$source" "$style" || true

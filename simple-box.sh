@@ -3460,18 +3460,34 @@ build_camo_site() {
         if [[ "$switch_sni" == "1" ]]; then
             local old_sni="${VL_SNI:-}"
             VL_SNI="$domain"
+            # write_env_config 读的是小写场景变量（装配期契约），只改大写 VL_SNI
+            # 不调 set_env_scene 会以「环境变量缺失」中止——这条路径曾经因此必失败。
+            set_env_scene
             if ! write_env_config; then
-                VL_SNI="$old_sni"
+                VL_SNI="$old_sni"; set_env_scene
                 echo -e "${RED}✗ 写入 env 失败，VL_SNI 已回滚为 ${VL_SNI}（站点已建好）${PLAIN}"
                 return 1
             fi
-            if ! render_set || ! render_and_reload; then
-                echo -e "${RED}✗ 切换伪装域名失败：env 已改，但 sing-box 未重载${PLAIN}"
-                echo -e "${YELLOW}  站点已建好；重跑安装或手工 render_set + systemctl restart sing-box${PLAIN}"
+            if ! render_set; then
+                # 配置没落盘：回滚 env，让磁盘状态与运行中的服务保持一致
+                VL_SNI="$old_sni"; set_env_scene
+                write_env_config >/dev/null 2>&1 || true
+                echo -e "${RED}✗ 配置生成失败，VL_SNI 已回滚为 ${old_sni}（站点文件保留）${PLAIN}"
+                return 1
+            fi
+            if ! render_and_reload; then
+                # 配置已按新 SNI 落盘，此时回滚 env 只会造成「env 旧、配置新」的第二种错位
+                echo -e "${RED}✗ env 已切到 ${domain}，但 sing-box 未成功重载${PLAIN}"
+                echo -e "${YELLOW}  磁盘配置是新的，运行中的进程可能仍是旧的${PLAIN}"
+                echo -e "${YELLOW}  先看 journalctl -u sing-box -n 30，修好后重跑菜单「伪装站点」重建${PLAIN}"
                 return 1
             fi
             echo -e "${GREEN}✓ Reality 伪装域名已切换为 ${domain}（回落 ${FLIP_PORT}）${PLAIN}"
             echo -e "${RED}  所有客户端必须重新拉订阅：SNI 已变，旧订阅会握手失败${PLAIN}"
+            if [[ -n "$old_sni" ]] && site_file_for "$old_sni" >/dev/null 2>&1; then
+                echo -e "${GRAY}  旧域名 ${old_sni} 的站点仍在回环 ${FLIP_PORT} 上；Reality 不再回落它，${PLAIN}"
+                echo -e "${GRAY}  如需继续对外服务，请给它单配端口或删除站点${PLAIN}"
+            fi
         fi
     else
         echo -e "${YELLOW}⚠ 站点已生成但自检返回 HTTP ${code}${PLAIN}"

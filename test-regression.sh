@@ -2387,13 +2387,18 @@ printf '{"inbounds":[{"type":"vless","tag":"vless-reality-in"}]}\n' > "$_sb41/co
 printf 'import sys\nsys.exit(0)\n' > "$_sb41/gen.py"
 _s41_conf=$CONF_FILE; _s41_sites=${CADDY_SITES_DIR:-}; _s41_camo=$CAMO_ROOT
 _s41_sni=$VL_SNI; _s41_hy=${HY_DOMAIN:-}; _s41_th=${TARGET_HOST:-}; _s41_ssl=${CERT_SSL_ROOT:-}
+_s41_env=$ENV_FILE; _s41_vars="NODE_PREFIX=${NODE_PREFIX:-} SERVER_IP=${SERVER_IP:-} VL_UUID=${VL_UUID:-} VL_PRIVKEY=${VL_PRIVKEY:-} VL_PUBKEY=${VL_PUBKEY:-} VL_SHORTID=${VL_SHORTID:-} VL_PORT=${VL_PORT:-} HY_PORT=${HY_PORT:-} HY_PASS=${HY_PASS:-} SUB_PORT=${SUB_PORT:-} SUB_TOKEN=${SUB_TOKEN:-}"
 CONF_FILE=$_sb41/config.json; CADDY_SITES_DIR=$_sb41/sites; CAMO_ROOT=$_sb41/www
 CERT_SSL_ROOT=$_sb41/cert; VL_SNI="old.example.com"; HY_DOMAIN="other.example.com"; TARGET_HOST="other.example.com"; FLIP_PORT=9443
+# write_env_config 走真实实现（只把落盘目标换到沙箱），否则「没调 set_env_scene
+# 导致必然失败」这类 bug 会被桩挡住——这正是组 41 曾经漏掉的那个缺陷。
+ENV_FILE=$_sb41/env.conf; ENV_LOADED=""
+NODE_PREFIX=SIMBO; SERVER_IP=203.0.113.9; VL_UUID=uuid; VL_PRIVKEY=priv; VL_PUBKEY=pub
+VL_SHORTID=sid; VL_PORT=443; HY_PORT=8443; HY_PASS=hypass; SUB_PORT=8444; SUB_TOKEN=tok
 ensure_camo_generator(){ printf '%s\n' "$_sb41/gen.py"; }
 issue_site_cert(){ return 0; }
 caddy(){ return 0; }
 reload_caddy_safe(){ return 0; }
-write_env_config(){ echo ENV >> "$_sb41/marks"; return 0; }
 render_set(){ echo RENDER >> "$_sb41/marks"; return 0; }
 render_and_reload(){ echo RELOAD >> "$_sb41/marks"; return 0; }
 curl(){ printf '200'; }
@@ -2401,10 +2406,11 @@ ask(){ printf -v "$2" '%s' "${_41_ans:-y}"; }
 
 build_camo_site "new.example.com" eso "" >"$_sb41/out" 2>&1
 if [[ "$VL_SNI" == "new.example.com" ]]; then ok "41.1 确认后 VL_SNI 切到新域名"; else bad "41.1 VL_SNI 未切换" "VL_SNI=$VL_SNI"; fi
-if grep -qx ENV "$_sb41/marks" 2>/dev/null && grep -qx RENDER "$_sb41/marks" 2>/dev/null && grep -qx RELOAD "$_sb41/marks" 2>/dev/null; then
-    ok "41.2 切换按 env → render_set → render_and_reload 顺序落地"
+if grep -qxF 'VL_SNI="new.example.com"' "$_sb41/env.conf" 2>/dev/null \
+   && grep -qx RENDER "$_sb41/marks" 2>/dev/null && grep -qx RELOAD "$_sb41/marks" 2>/dev/null; then
+    ok "41.2 真实 write_env_config 写入新 SNI，再 render → reload"
 else
-    bad "41.2 切换步骤缺失" "$(tr '\n' ' ' < "$_sb41/marks" 2>/dev/null)"
+    bad "41.2 切换步骤缺失" "env=$(grep -c . "$_sb41/env.conf" 2>/dev/null) marks=$(tr '\n' ' ' < "$_sb41/marks" 2>/dev/null) out=$(tail -2 "$_sb41/out" | tr '\n' ' ')"
 fi
 if grep -q 'https://new.example.com:9443 {' "$_sb41/sites/camo-new.example.com.caddy" 2>/dev/null \
    && grep -q 'bind 127.0.0.1' "$_sb41/sites/camo-new.example.com.caddy" 2>/dev/null; then
@@ -2432,9 +2438,11 @@ else
     bad "41.5 同域名路径被切换逻辑污染"
 fi
 
-unset -f ensure_camo_generator issue_site_cert caddy reload_caddy_safe write_env_config render_set render_and_reload curl ask
+unset -f ensure_camo_generator issue_site_cert caddy reload_caddy_safe render_set render_and_reload curl ask
 CONF_FILE=$_s41_conf; CADDY_SITES_DIR=$_s41_sites; CAMO_ROOT=$_s41_camo
 VL_SNI=$_s41_sni; HY_DOMAIN=$_s41_hy; TARGET_HOST=$_s41_th; CERT_SSL_ROOT=$_s41_ssl
+ENV_FILE=$_s41_env; ENV_LOADED=""
+for _kv in $_s41_vars; do printf -v "${_kv%%=*}" '%s' "${_kv#*=}"; done
 rm -rf "$_sb41"
 
 group "43. 内容源选择（回车=随机）"

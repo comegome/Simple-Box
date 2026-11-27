@@ -81,8 +81,6 @@ if [[ -z "${BASH_SOURCE[0]:-}" ]]; then
     exit 1
 fi
 
-[[ $EUID -ne 0 ]] && echo -e "${RED}错误: 必须使用 root 权限运行此脚本！${PLAIN}" && exit 1
-
 get_arch() {
     local arch
     arch=$(uname -m)
@@ -4097,6 +4095,12 @@ menu() {
 #   3) curl ... | bash                       -> BASH_SOURCE[0] 为空，$0 为 bash（管道）
 _ENTRY_SRC="${BASH_SOURCE[0]:-}"
 if [[ -z "$_ENTRY_SRC" || "$_ENTRY_SRC" == "$0" ]]; then
+    # EUID 只拦「真正执行」。被 source 时必须允许普通用户加载函数定义，否则纯函数
+    # 单测永远起不来；需要 root 的动作在调用处自然失败（权限错误），或用 require_root。
+    if [[ $EUID -ne 0 ]]; then
+        echo -e "${RED}错误: 必须使用 root 权限运行此脚本！${PLAIN}"
+        exit 1
+    fi
     trap cleanup_tmp EXIT
     # 系统不在支持范围内就直接退出，别让用户走到一半才失败
     OS_NAME=$(require_os) || exit 1

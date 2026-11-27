@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Simple-Box 回归测试套件
-# 用法: sudo bash test-regression.sh [--commit <ref>]
+# 用法: bash test-regression.sh          （普通用户即可；需要 root 的组会自行失败）
+#       sudo bash test-regression.sh     （与上面等价，历史上要求 root）
 # 说明: 直接 source 目标脚本以复用全部函数定义；source 时 BASH_SOURCE[0] != $0，
 #       入口守卫会被跳过，不会触发主流程。
 
@@ -20,7 +21,13 @@ group(){ printf '\n\033[1m%s\033[0m\n' "$1"; }
 # ---------- 0. 前置检查 ----------
 group "0. 前置检查"
 [[ -f "$TARGET" ]] && ok "目标脚本存在: $TARGET" || { bad "目标脚本不存在: $TARGET"; exit 1; }
-[[ $EUID -eq 0 ]] && ok "以 root 运行" || { bad "必须以 root 运行（脚本第 45 行有 EUID 守卫）"; exit 1; }
+# 4.x 起脚本的 EUID 检查只在「真正执行」时生效，source 不再被拦；套件本身
+# 全在 mktemp 沙箱里跑、系统命令都有桩，所以普通用户也能跑全量（实测 361 条通过）。
+if [[ $EUID -eq 0 ]]; then
+    ok "以 root 运行"
+else
+    ok "以普通用户运行（沙箱测试，不需要 root）"
+fi
 
 # ---------- 1. 语法与静态检查 ----------
 group "1. 语法与静态检查"

@@ -412,3 +412,12 @@ DIRECT_SUFFIXES="example.com"          # 多个后缀用空格分隔
 ### 📄 开源许可证
 
 本项目采用 [MIT 许可证](LICENSE)。
+
+## 开发与回归
+
+```bash
+bash -n simple-box.sh            # 语法
+bash test-regression.sh          # 全量回归（361 条，普通用户即可）
+```
+
+套件全部在 `mktemp` 沙箱里跑、系统命令有桩，不需要 root；`simple-box.sh` 的 EUID 检查只在真正执行时生效。`.github/workflows/ci.yml` 在每次 push / PR 跑同样的两件事（静态检查 + 全量回归）。

@@ -2437,6 +2437,60 @@ CONF_FILE=$_s41_conf; CADDY_SITES_DIR=$_s41_sites; CAMO_ROOT=$_s41_camo
 VL_SNI=$_s41_sni; HY_DOMAIN=$_s41_hy; TARGET_HOST=$_s41_th; CERT_SSL_ROOT=$_s41_ssl
 rm -rf "$_sb41"
 
+group "42. 安装期本机伪装站（域名直填）"
+_sb42=$(mktemp -d); mkdir -p "$_sb42/sites" "$_sb42/www" "$_sb42/cert"
+printf 'import sys\nsys.exit(0)\n' > "$_sb42/gen.py"
+_s42_sites=${CADDY_SITES_DIR:-}; _s42_camo=$CAMO_ROOT; _s42_ssl=${CERT_SSL_ROOT:-}
+_s42_sni=${VL_SNI:-}; _s42_cf=${CF_TOKEN:-}
+CADDY_SITES_DIR=$_sb42/sites; CAMO_ROOT=$_sb42/www; CERT_SSL_ROOT=$_sb42/cert
+VL_SNI="old.example.com"; CF_TOKEN=""
+ensure_camo_generator(){ printf '%s\n' "$_sb42/gen.py"; }
+issue_site_cert(){ echo CERT >> "$_sb42/marks"; return 0; }
+caddy(){ return 0; }
+reload_caddy_safe(){ return 0; }
+curl(){ printf '200'; }
+write_env_config(){ echo ENV >> "$_sb42/marks"; return 0; }
+render_set(){ echo RENDER >> "$_sb42/marks"; return 0; }
+render_and_reload(){ echo RELOAD >> "$_sb42/marks"; return 0; }
+
+domain_a_matches_ip localhost 127.0.0.1 && ok "42.1 A 记录命中本机" || bad "42.1 A 记录命中判定失败"
+domain_a_matches_ip localhost 10.9.9.9 && bad "42.2 不匹配的 IP 也判真" || ok "42.2 不匹配的 IP 拒绝"
+
+CAMO_PENDING=0; _s42_ip=${server_ip:-}; server_ip=127.0.0.1
+if reality_target_check 443 localhost >"$_sb42/o1" 2>&1 \
+   && [[ "$CAMO_PENDING" == "1" ]] && grep -q '安装时会自动生成' "$_sb42/o1"; then
+    ok "42.3 无站点但 A 指向本机 → 标记待建站并放行"
+else
+    bad "42.3 待建站分支未放行" "pending=${CAMO_PENDING:-} $(tail -1 "$_sb42/o1")"
+fi
+
+CAMO_PENDING=0
+reality_target_check 443 example.com >"$_sb42/o2" 2>&1
+if [[ "$CAMO_PENDING" == "0" ]]; then
+    ok "42.4 A 不指向本机时不当作本机站点"
+else
+    bad "42.4 A 不指向本机却被标成待建站" "$(tail -1 "$_sb42/o2")"
+fi
+server_ip=$_s42_ip
+
+CAMO_SKIP_SWITCH=1 CAMO_DEFER_RELOAD=1 build_camo_site "cam.install.example" eso "" >"$_sb42/o3" 2>&1
+if grep -q 'https://cam.install.example:9443 {' "$_sb42/sites/camo-cam.install.example.caddy" 2>/dev/null \
+   && grep -q 'bind 127.0.0.1' "$_sb42/sites/camo-cam.install.example.caddy" 2>/dev/null; then
+    ok "42.5 安装期建站直接落成回环形态（不 reload）"
+else
+    bad "42.5 安装期站点文件形态不对" "out=$(tail -2 "$_sb42/o3" | tr '\n' ' ')"
+fi
+if ! grep -qxE 'ENV|RENDER|RELOAD' "$_sb42/marks" 2>/dev/null; then
+    ok "42.6 安装期建站不写 env、不重载（交给安装流程）"
+else
+    bad "42.6 安装期建站越权改了运行态" "$(tr '\n' ' ' < "$_sb42/marks")"
+fi
+
+unset -f ensure_camo_generator issue_site_cert caddy reload_caddy_safe curl write_env_config render_set render_and_reload
+CADDY_SITES_DIR=$_s42_sites; CAMO_ROOT=$_s42_camo; CERT_SSL_ROOT=$_s42_ssl
+VL_SNI=$_s42_sni; CF_TOKEN=$_s42_cf; CAMO_PENDING=0
+rm -rf "$_sb42"
+
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
 ok "临时文件已清理"

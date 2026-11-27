@@ -228,6 +228,8 @@ grep -q "^${BBR_MARK}" "$BBR_CONF" || return 0   # 不是自己的，不动
 - 安装期检查只有两处，都不写配置：`reality_target_check`（站点证书可用 / 有站点时 Reality 必须占 443 / 无站点时探测外部 SNI 的 TLS 1.3 + h2）、`hy2_cert_sync`（域名模式缺证书即中止，不回退自签）。
 - **翻转状态不落库。** 没有 `SITE_FILE` / `FLIP_HOST` 字段，`FLIP_PORT` 是常量 `9443`；唯一入口是 `flip_site <on|off> <域名>`——现场用 `site_file_for` 解析站点，改完 `caddy validate`，失败还原文件并 reload。没有站点（外部 SNI）时它什么都不做、返回 0。
 - **换伪装域名、或把 Reality 从集合里去掉时，旧站点必须搬回公网 443。** 翻转是站点块上的状态，不跟 env 走：`install_node` 在写 env 之前按**旧的 `VL_SNI`** 现场解析站点，不一致就 `flip_site off <旧域名>`，否则站点永久留在回环上，公网 443 空着（探测者拿到 connection refused，比不伪装更可疑）。
+- **安装期建站必须早于 `render_set`。** `reality_target_check` 对「无站点但 A 记录指向本机」的域名只置 `CAMO_PENDING=1` 放行；真正建站在 `write_env_config` 之后、`load_env` 之前，用 `CAMO_SKIP_SWITCH=1 CAMO_DEFER_RELOAD=1` 调 `build_camo_site`：只落内容和站点文件（已经是回环 9443 形态），不 reload、不自检。若把这步挪到 `render_set` 之后，回落目标会先被写成「域名:443」，自环。
+- **`CAMO_DEFER_RELOAD` 的站点必须已翻到回环。** 安装期 Caddyfile 的 `import sites/*.caddy` 还没写（由后续 `setup_caddy_subscription` 负责），所以这里不能走 `flip_site`（它要求 Caddyfile 存在并通过 `caddy validate`）；直接 `flip_transform` 改文本，重载交给安装流程。
 - 面板：不在集合里的协议显示 `[未安装]`；在集合内但配置缺 inbound 显示 `[配置缺失]`（= 渲染失败，重装）。
 - 套件 15.13–15.15（三种集合）、16.x（安装期检查）、27.x（`PROTO_SET` 只由 `ask_proto_set` 与 `write_env_config` 赋值）、35.6 守这些。变异自检：让 `render_set` 无视集合、删掉 env 落库行、让 `hy2_cert_sync` 缺证书放行，三处都应变红。
 - 存量节点（env 里没有 `PROTO_SET`）默认按「两个都装」跑，换脚本不需要改 env；这个字段会在下一次写 env（改订阅参数 / 重装）时补上。

@@ -2402,6 +2402,16 @@ CERT_SSL_ROOT=$_sb41/cert; VL_SNI="old.example.com"; HY_DOMAIN="other.example.co
 ENV_FILE=$_sb41/env.conf; ENV_LOADED=""
 NODE_PREFIX=SIMBO; SERVER_IP=203.0.113.9; VL_UUID=uuid; VL_PRIVKEY=priv; VL_PUBKEY=pub
 VL_SHORTID=sid; VL_PORT=443; HY_PORT=8443; HY_PASS=hypass; SUB_PORT=8444; SUB_TOKEN=tok
+# 这些名字在被测脚本里都是真函数，桩用完必须还原（unset -f 会把原件一起删掉，
+# 后续组再调 ask/render_set 就会 command not found，表现为莫名其妙的空输入）。
+_save41_ensure_camo_generator=$(declare -f ensure_camo_generator)
+_save41_issue_site_cert=$(declare -f issue_site_cert)
+_save41_caddy=$(declare -f caddy || true)
+_save41_reload_caddy_safe=$(declare -f reload_caddy_safe)
+_save41_render_set=$(declare -f render_set)
+_save41_render_and_reload=$(declare -f render_and_reload)
+_save41_curl=$(declare -f curl || true)
+_save41_ask=$(declare -f ask)
 ensure_camo_generator(){ printf '%s\n' "$_sb41/gen.py"; }
 issue_site_cert(){ return 0; }
 caddy(){ return 0; }
@@ -2445,7 +2455,15 @@ else
     bad "41.5 同域名路径被切换逻辑污染"
 fi
 
-unset -f ensure_camo_generator issue_site_cert caddy reload_caddy_safe render_set render_and_reload curl ask
+eval "$_save41_ensure_camo_generator"; eval "$_save41_issue_site_cert"
+[[ -n "$_save41_caddy" ]] && eval "$_save41_caddy" || unset -f caddy
+eval "$_save41_reload_caddy_safe"; eval "$_save41_render_set"
+eval "$_save41_render_and_reload"
+[[ -n "$_save41_curl" ]] && eval "$_save41_curl" || unset -f curl
+eval "$_save41_ask"
+unset _save41_ensure_camo_generator _save41_issue_site_cert _save41_caddy \
+      _save41_reload_caddy_safe _save41_render_set _save41_render_and_reload \
+      _save41_curl _save41_ask
 CONF_FILE=$_s41_conf; CADDY_SITES_DIR=$_s41_sites; CAMO_ROOT=$_s41_camo
 VL_SNI=$_s41_sni; HY_DOMAIN=$_s41_hy; TARGET_HOST=$_s41_th; CERT_SSL_ROOT=$_s41_ssl
 ENV_FILE=$_s41_env; ENV_LOADED=""
@@ -2559,6 +2577,67 @@ fi
 ENV_FILE=$_s44_env; ENV_LOADED=$_s44_loaded
 for _kv in $_s44_vars; do printf -v "${_kv%%=*}" '%s' "${_kv#*=}"; done
 rm -rf "$_sb44"
+
+group "45. 收敛细节：Token 文案 / -k 降级条件 / 主机校验 / 原子落盘"
+
+# 45.1 主机/IP 校验器：接受合法值
+_h_ok=1
+for v in node.example.com 203.0.113.9 node1 a-b.example.co.uk; do
+    valid_host_or_ip "$v" || { _h_ok=0; bad "45.1 合法值被拒" "$v"; }
+done
+[[ "$_h_ok" == "1" ]] && ok "45.1 合法主机名/IPv4 通过"
+# 45.2 拒绝空标签与越界八位组
+if valid_host_or_ip "a..b" || valid_host_or_ip "999.999.999.999" || valid_host_or_ip "bad_host" || valid_host_or_ip ""; then
+    bad "45.2 非法主机名/IPv4 未被拒绝"
+else
+    ok "45.2 拒绝 a..b / 999.x / 下划线 / 空值"
+fi
+
+# 45.3 非证书类失败不降级 -k：file:// 不存在 -> curl 非 51/60，且提示不含「证书」
+_out45=$(exit_parse_url "file:///nonexistent-simbo-sub" 2 2>&1); _rc45=$?
+if [[ $_rc45 -ne 0 ]] && ! grep -q '证书校验' <<<"$_out45"; then
+    ok "45.3 非证书错误直接失败，不谎报证书问题"
+else
+    bad "45.3 降级条件仍过宽" "rc=$_rc45 out=$_out45"
+fi
+
+# 45.4 Token 放弃分支文案：输入 n 后应说「中止」，不再承诺 IP 自签
+_save_verify=$(declare -f verify_cloudflare_token)
+verify_cloudflare_token(){ return 1; }
+_out45b=$(printf 'badtoken\nn\n' | prompt_cf_token 2>&1)
+eval "$_save_verify"; unset _save_verify
+if grep -q '中止域名证书签发' <<<"$_out45b" && ! grep -q '将自动使用 IP 自签证书' <<<"$_out45b"; then
+    ok "45.4 放弃重试提示与实际行为一致（中止，不承诺自签）"
+else
+    bad "45.4 放弃重试仍是旧文案" "$(tail -1 <<<"$_out45b")"
+fi
+
+# 45.5 apply_exit_config 原子落盘：无临时残留、配置仍可解析、密码正确
+_sb45=$(mktemp -d)
+_s45_conf=$CONF_FILE; _s45_dir=${CONF_DIR:-}
+CONF_DIR=$_sb45; CONF_FILE=$_sb45/config.json
+printf '{"inbounds":[{"type":"vless","tag":"vless-reality-in"},{"type":"hysteria2","tag":"hy2-in"}],"outbounds":[{"type":"direct","tag":"direct"}]}\n' > "$CONF_FILE"
+chmod 600 "$CONF_FILE"
+EXIT_TYPE=hy2; EXIT_HY_SERVER=203.0.113.9; EXIT_HY_PORT=8443
+EXIT_HY_PASS='p$"q`'; EXIT_HY_SNI=sni.example.com; EXIT_SKIP_CERT=false
+EXIT_ENTRY_VL=2053; EXIT_ENTRY_HY=2054
+apply_exit_config; _rc45b=$?
+_tmp45=$(find "$_sb45" -maxdepth 1 -name '*.tmp.*' | wc -l)
+_mode45=$(stat -c '%a' "$CONF_FILE")
+_ok45=$(python3 - "$CONF_FILE" <<'PY'
+import json, sys
+d = json.load(open(sys.argv[1]))
+o = [x for x in d["outbounds"] if x["tag"] == "exit-out"][0]
+print("yes" if o["password"] == 'p$"q`' else "no")
+PY
+)
+if [[ $_rc45b -eq 0 && "$_tmp45" == "0" && "$_mode45" == "600" && "$_ok45" == "yes" ]]; then
+    ok "45.5 apply_exit_config 原子落盘（无 tmp 残留、权限保持、内容正确）"
+else
+    bad "45.5 落盘不干净" "rc=$_rc45b tmp=$_tmp45 mode=$_mode45 pass=$_ok45"
+fi
+CONF_DIR=$_s45_dir; CONF_FILE=$_s45_conf
+rm -rf "$_sb45"
 
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null

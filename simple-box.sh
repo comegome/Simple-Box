@@ -153,6 +153,18 @@ validate_port() {
     (( p >= 1 && p <= 65535 ))
 }
 
+# 主机名或 IPv4 的严格校验：拒绝空标签（a..b）与越界八位组（999.1.1.1）。
+# 只用作防注入白名单；单标签主机名（node1）也接受，落点常见。
+valid_host_or_ip() {
+    local v="${1:-}" o
+    if [[ "$v" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]]; then
+        local -a _parts; IFS=. read -r -a _parts <<< "$v"
+        for o in "${_parts[@]}"; do (( 10#$o <= 255 )) || return 1; done
+        return 0
+    fi
+    [[ "$v" =~ ^[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]{0,61}[A-Za-z0-9])?)*$ ]]
+}
+
 validate_domain() {
     local d="${1:-}"
     [[ "$d" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?\.[A-Za-z]{2,}$ ]]
@@ -318,9 +330,9 @@ prompt_cf_token() {
             return 0
         fi
         local retry=""
-        ask "是否重新输入 Token？Y/n (回车重试，输入 n 使用 IP 自签): " retry
+        ask "是否重新输入 Token？Y/n (回车重试，输入 n 中止域名证书签发): " retry
         if [[ "${retry,,}" == "n" ]]; then
-            echo -e "${YELLOW}已放弃域名证书，将自动使用 IP 自签证书。${PLAIN}"
+            echo -e "${YELLOW}已中止域名证书签发（要改用 IP 自签，请在向导里填 ip 后重跑安装）。${PLAIN}"
             return 1
         fi
     done
@@ -2706,7 +2718,7 @@ apply_exit_config() {
     ) || { rm -f "$tmp"; return 1; }
 
     python3 - "$CONF_FILE" "$tmp" <<'PY'
-import json, sys, copy
+import json, os, stat, sys, copy
 conf, src = sys.argv[1], sys.argv[2]
 d = json.load(open(conf))
 inb = d.get("inbounds", [])
@@ -2754,7 +2766,13 @@ d.setdefault("outbounds", []).extend(outs)
 _keep = [r for r in (d.get("route") or {}).get("rules", [])
          if r.get("outbound") not in {o["tag"] for o in outs}]
 d["route"] = {"rules": _keep + rules, "final": "direct"}
-json.dump(d, open(conf, "w"), ensure_ascii=False, indent=2)
+# 同目录临时文件 + os.replace：写到一半被打断时旧配置完整保留
+tmp_conf = "%s.tmp.%d" % (conf, os.getpid())
+with open(tmp_conf, "w", encoding="utf-8") as fh:
+    json.dump(d, fh, ensure_ascii=False, indent=2)
+    fh.flush(); os.fsync(fh.fileno())
+os.chmod(tmp_conf, stat.S_IMODE(os.stat(conf).st_mode))
+os.replace(tmp_conf, conf)
 PY
     local rc=$?
     rm -f "$tmp"
@@ -3304,9 +3322,18 @@ exit_parse_url() {
     local body
     # 先按证书校验取；失败才降级 -k（落地机用 IP 自签时只能这样）。降级必须留痕：
     # 这条回退路径意味着内容可能来自中间人，后面还有一层字段白名单校验兜底。
-    if ! body=$(curl -fsS -m 20 "$url" 2>/dev/null); then
-        echo -e "${YELLOW}证书校验未通过，改为跳过校验重试（导入内容可能被篡改）${PLAIN}" >&2
-        body=$(curl -fsSk -m 20 "$url" 2>/dev/null) || return 1
+    local _crc=0
+    body=$(curl -fsS -m 20 "$url" 2>/dev/null) || _crc=$?
+    if (( _crc != 0 )); then
+        # 只有证书错误才降级 -k（51 证书无效 / 60 本地 CA 无法验证）。404、超时、
+        # DNS 失败重试也不会成功，只会让用户白等第二次 20 秒并被误导成证书问题。
+        if (( _crc == 51 || _crc == 60 )); then
+            echo -e "${YELLOW}证书校验未通过（curl ${_crc}），改为跳过校验重试（内容可能被篡改）${PLAIN}" >&2
+            body=$(curl -fsSk -m 20 "$url" 2>/dev/null) || return 1
+        else
+            echo -e "${YELLOW}拉取订阅失败（curl ${_crc}）${PLAIN}" >&2
+            return 1
+        fi
     fi
     local tmpf; tmpf=$(mktemp /tmp/exitimport.XXXXXX)
     TMP_CLEANUP+=("$tmpf")
@@ -3368,7 +3395,7 @@ PY
                 [[ "$v" =~ ^[0-9]{1,5}$ ]] && (( 10#$v >= 1 && 10#$v <= 65535 )) || {
                     echo -e "${RED}导入失败：${k} 不是合法端口（1-65535）${PLAIN}" >&2; return 1; } ;;
             *_SERVER|*_SNI)
-                [[ "$v" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ || "$v" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || {
+                valid_host_or_ip "$v" || {
                     echo -e "${RED}导入失败：${k} 不是合法域名或 IPv4${PLAIN}" >&2; return 1; } ;;
             *_PASS)
                 v=$(printf '%s' "$v" | tr -d '\000-\037')

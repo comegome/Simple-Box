@@ -443,38 +443,47 @@ install_caddy() {
     systemctl enable caddy >/dev/null 2>&1 || true
 }
 
-# BBR 拥塞控制管理（开启与关闭）
-# BBR 配置文件路径与归属标记
-# 标记用于区分「本脚本创建的」与「用户自己配的」，
-# 卸载时只删带标记的，绝不覆盖或误删别人的 sysctl 配置。
-BBR_CONF="/etc/sysctl.d/99-bbr.conf"
+# ---------------------------------------------------------------- 网络基线
+# 配置文件与归属标记。
+# 文件名用 99-zz-*：sysctl.d 按文件名字典序应用，这样才能排在服务商的
+# 99-bbr.conf / 99-network-tuning.conf 之后——只写自己的文件，以我为准。
 BBR_MARK="# managed-by: simple-box"
+NET_CONF_NAME="99-zz-simbo-net.conf"
+LEGACY_BBR_NAME="99-bbr.conf"
 
 # 开启 BBR（安装时调用，无交互）
-# 三种情况分别处理：已开启则跳过；已有他人配置则不动；否则写入并打标记
+# 三种情况：已开启则跳过；已有他人配置则不动；否则写入并打标记。
+# 迁移：旧版本写的是 99-bbr.conf，发现带本脚本标记的就换成本脚本的新文件，
+# 否则卸载只删新文件，旧文件会在下次启动把 BBR 又打开。
 enable_bbr() {
-    local cur
+    local dir="${SYSCTL_DIR:-/etc/sysctl.d}"
+    local conf="${dir}/${NET_CONF_NAME}"
+    local legacy="${dir}/${LEGACY_BBR_NAME}"
+    local cur migrated=0
     cur=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "")
 
-    if [[ "$cur" == "bbr" ]]; then
-        echo -e "${GREEN}✓ TCP BBR 已处于开启状态，无需调整${PLAIN}"
-        return 0
-    fi
-
-    # 文件存在但不带本脚本标记 → 是用户的配置，不动
-    if [[ -f "$BBR_CONF" ]] && ! grep -q "^${BBR_MARK}" "$BBR_CONF"; then
-        echo -e "${YELLOW}检测到已有的 ${BBR_CONF}（非本脚本创建），保留不覆盖。${PLAIN}"
+    if [[ -f "$legacy" ]] && grep -qxF "$BBR_MARK" "$legacy"; then
+        rm -f "$legacy" || true
+        migrated=1
+    elif [[ -f "$legacy" ]]; then
+        # 文件存在但不带本脚本标记 → 是用户/服务商的配置，不动
+        echo -e "${YELLOW}检测到已有的 ${legacy}（非本脚本创建），保留不覆盖。${PLAIN}"
         echo -e "${YELLOW}如需 BBR 加速请手动确认该文件内容。${PLAIN}"
         return 0
     fi
 
-    mkdir -p /etc/sysctl.d
-    cat > "$BBR_CONF" <<EOF
+    if [[ "$cur" == "bbr" && "$migrated" -eq 0 ]]; then
+        echo -e "${GREEN}✓ TCP BBR 已处于开启状态，无需调整${PLAIN}"
+        return 0
+    fi
+
+    mkdir -p "$dir"
+    cat > "$conf" <<EOF
 ${BBR_MARK}
 net.core.default_qdisc=fq
 net.ipv4.tcp_congestion_control=bbr
 EOF
-    sysctl -p "$BBR_CONF" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
+    sysctl -p "$conf" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
 
     cur=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "")
     if [[ "$cur" == "bbr" ]]; then
@@ -484,12 +493,15 @@ EOF
     fi
 }
 
-# 卸载时调用：只删除本脚本创建的 BBR 配置文件
-# 不改运行中的拥塞控制算法——卸载代理软件不该动系统网络栈，而且多数机器的
-# bbr 也写在 /etc/sysctl.conf 里，这里改成 cubic 会在下次 sysctl --system 时
-# 被覆盖回去，"恢复系统默认"本就做不到。用户自己的配置一律不碰。
+# 卸载时调用：只删除本脚本创建的文件（含旧版文件名），不改运行中的拥塞控制
+# 算法——卸载代理软件不该动系统网络栈，而且多数机器的 bbr 也写在
+# /etc/sysctl.conf 里，这里改成 cubic 会在下次 sysctl --system 时被覆盖回去，
+# "恢复系统默认"本就做不到。用户/服务商的配置一律不碰。
 disable_bbr() {
-    [[ -f "$BBR_CONF" ]] && grep -q "^${BBR_MARK}" "$BBR_CONF" && rm -f "$BBR_CONF" || true
+    local dir="${SYSCTL_DIR:-/etc/sysctl.d}" f
+    for f in "${dir}/${NET_CONF_NAME}" "${dir}/${LEGACY_BBR_NAME}"; do
+        [[ -f "$f" ]] && grep -qxF "$BBR_MARK" "$f" && rm -f "$f" || true
+    done
 }
 
 

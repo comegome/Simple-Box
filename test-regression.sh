@@ -322,8 +322,54 @@ grep -q 'DEBIAN_FRONTEND=noninteractive' "$TARGET" && ok "apt 操作设置 nonin
 grep -q 'sing-box check' "$TARGET" && ok "启动前执行 sing-box check" || bad "缺少配置校验"
 grep -q 'BASH_SOURCE\[0\]' "$TARGET" && ok "存在管道执行检测" || bad "缺少管道执行检测"
 
-# BBR 幂等：已开启则跳过
-grep -qE '\[\[ "\$cur" == "bbr" \]\]' "$TARGET" && ok "BBR 已开启时跳过（幂等）" || bad "BBR 缺少幂等判断"
+# 网络基线：归属与旧文件迁移（行为测试：沙箱目录 + sysctl stub）
+# 静态 grep 只能证明代码长得像，证明不了文件落在哪、卸载删了什么。
+_sb9=$(mktemp -d)
+sysctl() {
+    if [[ "${1:-}" == "-n" && "${2:-}" == "net.ipv4.tcp_congestion_control" ]]; then
+        [[ -f "$_sb9/99-zz-simbo-net.conf" ]] && echo bbr || echo cubic
+    fi
+    return 0
+}
+SYSCTL_DIR="$_sb9" enable_bbr >/dev/null 2>&1
+if [[ -f "$_sb9/99-zz-simbo-net.conf" ]] && grep -qxF "$BBR_MARK" "$_sb9/99-zz-simbo-net.conf"; then
+    ok "9.6 安装写入 99-zz-simbo-net.conf 并带归属标记"
+else
+    bad "9.6 未按新文件名写入或缺少标记"
+fi
+# 旧版 99-bbr.conf（带标记）必须被迁走，否则卸载会漏、重启又会生效
+rm -f "$_sb9/99-zz-simbo-net.conf"
+printf '%s\nnet.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' "$BBR_MARK" > "$_sb9/99-bbr.conf"
+SYSCTL_DIR="$_sb9" enable_bbr >/dev/null 2>&1
+if [[ ! -f "$_sb9/99-bbr.conf" && -f "$_sb9/99-zz-simbo-net.conf" ]]; then
+    ok "9.7 旧版 99-bbr.conf（带标记）迁移到新文件"
+else
+    bad "9.7 旧文件未迁移（卸载会残留）"
+fi
+# 无标记 = 用户/服务商配置，内容与存在性都不许变
+rm -f "$_sb9/99-zz-simbo-net.conf"
+printf 'net.core.default_qdisc=cake\n' > "$_sb9/99-bbr.conf"
+_sb9_h1=$(sha256sum "$_sb9/99-bbr.conf" | cut -d' ' -f1)
+SYSCTL_DIR="$_sb9" enable_bbr >/dev/null 2>&1
+_sb9_h2=$(sha256sum "$_sb9/99-bbr.conf" | cut -d' ' -f1)
+if [[ "$_sb9_h1" == "$_sb9_h2" && ! -f "$_sb9/99-zz-simbo-net.conf" ]]; then
+    ok "9.8 无标记的外来配置不被修改、不接管"
+else
+    bad "9.8 外来配置被改写或强行接管"
+fi
+# 卸载：删自己的两种文件名，绝不碰外来文件
+printf '%s\nnet.core.default_qdisc=fq\n' "$BBR_MARK" > "$_sb9/99-zz-simbo-net.conf"
+printf '%s\nnet.core.default_qdisc=fq\n' "$BBR_MARK" > "$_sb9/99-bbr.conf"
+SYSCTL_DIR="$_sb9" disable_bbr
+if [[ ! -f "$_sb9/99-zz-simbo-net.conf" && ! -f "$_sb9/99-bbr.conf" ]]; then
+    ok "9.9 卸载删除本脚本的新旧两个文件"
+else
+    bad "9.9 卸载残留本脚本配置文件"
+fi
+SYSCTL_DIR="$_sb9" disable_bbr
+[[ ! -e "$_sb9/99-zz-simbo-net.conf" ]] && ok "9.10 卸载幂等（重复执行不报错）" || bad "9.10 卸载不幂等"
+unset -f sysctl
+rm -rf "$_sb9"
 
 # BBR 卸载只删文件，不改运行中的拥塞控制（卸载代理不该动系统网络栈）
 if grep -q 'sysctl -w net.ipv4.tcp_congestion_control=cubic' "$TARGET"; then
@@ -332,10 +378,10 @@ else
     ok "disable_bbr 不改运行中的拥塞控制"
 fi
 _dbb=$(awk '/^disable_bbr\(\)/,/^}/' "$TARGET")
-if grep -q 'rm -f "\$BBR_CONF"' <<<"$_dbb" && grep -q 'BBR_MARK' <<<"$_dbb"; then
-    ok "disable_bbr 仍清理本脚本创建的配置文件"
+if grep -q 'NET_CONF_NAME' <<<"$_dbb" && grep -q 'LEGACY_BBR_NAME' <<<"$_dbb" && grep -q 'BBR_MARK' <<<"$_dbb"; then
+    ok "disable_bbr 同时清理新文件与旧版文件，且只删带标记的"
 else
-    bad "disable_bbr 丢失了配置文件清理（卸载不再彻底）"
+    bad "disable_bbr 清理范围不完整（迁移后会残留）"
 fi
 
 # Caddy 归属标记

@@ -2476,6 +2476,83 @@ else
     bad "43.4 空输入每次都给同一个源（随机没生效）"
 fi
 
+group "44. env 注入防护 / 导入校验 / 兜底哈希"
+_sb44=$(mktemp -d)
+_s44_env=$ENV_FILE; _s44_loaded=$ENV_LOADED
+_s44_vars="NODE_PREFIX=${NODE_PREFIX:-} SERVER_IP=${SERVER_IP:-} VL_UUID=${VL_UUID:-} VL_PRIVKEY=${VL_PRIVKEY:-} VL_PUBKEY=${VL_PUBKEY:-} VL_SHORTID=${VL_SHORTID:-} VL_PORT=${VL_PORT:-} VL_SNI=${VL_SNI:-} HY_PORT=${HY_PORT:-} HY_PASS=${HY_PASS:-} SUB_PORT=${SUB_PORT:-} SUB_TOKEN=${SUB_TOKEN:-} HY_DOMAIN=${HY_DOMAIN:-} TARGET_HOST=${TARGET_HOST:-}"
+
+# 44.1 _env_dq 把命令替换中和掉
+_q44=$(_env_dq 'x$(touch /tmp/simbo_pwn_44)y')
+if [[ "$_q44" == 'x\$(touch /tmp/simbo_pwn_44)y' ]]; then
+    ok "44.1 _env_dq 转义 \$(...)"
+else
+    bad "44.1 _env_dq 未转义命令替换" "$_q44"
+fi
+
+# 44.2 恶意密码写盘后可原样读回，且未被执行
+ENV_FILE=$_sb44/env.conf; ENV_LOADED=""
+NODE_PREFIX=SIMBO; SERVER_IP=203.0.113.9; VL_UUID=uuid; VL_PRIVKEY=priv; VL_PUBKEY=pub
+VL_SHORTID=sid; VL_PORT=443; VL_SNI=example.com; HY_PORT=8443; SUB_PORT=8444; SUB_TOKEN=tok
+HY_DOMAIN=""; TARGET_HOST="203.0.113.9"
+_evil='p$(touch /tmp/simbo_pwn_44b)"尾`'
+HY_PASS="$_evil"
+set_env_scene
+if write_env_config >/dev/null 2>&1; then
+    if [[ -e /tmp/simbo_pwn_44b ]]; then
+        bad "44.2 恶意密码被执行（RCE 未堵住）"
+    else
+        ENV_LOADED=""; load_env
+        if [[ "$HY_PASS" == "$_evil" ]]; then
+            ok "44.2 含 \$()/引号/反引号的密码落盘后可原样读回且不执行"
+        else
+            bad "44.2 往返值被改写" "got=$HY_PASS"
+        fi
+    fi
+else
+    bad "44.2 write_env_config 写入失败" "$(tail -2 "$_sb44/env.conf" 2>/dev/null | tr '\n' ' ')"
+fi
+rm -f /tmp/simbo_pwn_44b
+
+# 44.3 导入字段白名单：合法通过、非法端口拒绝
+printf -- '- name: "x"\n  type: hysteria2\n  server: node.example.com\n  port: 8443\n  password: "p@ss"\n  sni: node.example.com\n' > "$_sb44/good.yaml"
+printf -- '- name: "y"\n  type: hysteria2\n  server: node.example.com\n  port: 70000\n  password: "p"\n' > "$_sb44/badport.yaml"
+if exit_parse_url "file://$_sb44/good.yaml" 2 2>/dev/null | awk -F'\t' '$1=="EXIT2_SERVER" && $2=="node.example.com"{f=1} END{exit !f}'; then
+    ok "44.3 合法订阅字段通过白名单"
+else
+    bad "44.3 合法字段被误拒" "$(exit_parse_url "file://$_sb44/good.yaml" 2 2>&1 | tr '\n' ' ')"
+fi
+if exit_parse_url "file://$_sb44/badport.yaml" 2 >/dev/null 2>&1; then
+    bad "44.4 非法端口未被拒绝"
+else
+    ok "44.4 非法端口（70000）整条拒绝"
+fi
+
+# 44.5 兜底版本有内置 sha256
+_d44=$(_builtin_digest v1.14.3 amd64)
+if [[ "$_d44" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    ok "44.5 兜底 v1.14.3/amd64 内置 sha256"
+else
+    bad "44.5 兜底哈希缺失" "$_d44"
+fi
+if _builtin_digest v9.9.9 amd64 >/dev/null 2>&1; then
+    bad "44.6 未知版本也返回哈希"
+else
+    ok "44.6 未知版本不给假哈希"
+fi
+
+# 44.7 menu_sub_module 的两个内层输入循环都有 EOF 守卫
+_sub44=$(awk '/^menu_sub_module\(\) \{/,/^\}/' "$TARGET")
+_guards=$(grep -c 'ASK_EOF' <<<"$_sub44")
+if [[ "$_guards" -ge 3 ]]; then
+    ok "44.7 子菜单内层循环有 EOF 守卫（${_guards} 处）"
+else
+    bad "44.7 内层循环缺 EOF 守卫" "$_guards 处"
+fi
+
+ENV_FILE=$_s44_env; ENV_LOADED=$_s44_loaded
+for _kv in $_s44_vars; do printf -v "${_kv%%=*}" '%s' "${_kv#*=}"; done
+rm -rf "$_sb44"
+
 group "14. 清理"
 rm -rf "$TMPD" "$TMPC2" "$TMPC3" "$TMPC4" /tmp/t41.out /tmp/t61.out /tmp/t62.out /tmp/t63.out 2>/dev/null
 ok "临时文件已清理"

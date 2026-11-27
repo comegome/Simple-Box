@@ -196,6 +196,19 @@ check_domain_ip_binding() {
     return 1
 }
 
+# 把值转义成可安全嵌进 env.conf 双引号里的形式：换行压平，$ ` " \ 全部转义。
+# env.conf 由 load_env 用 `.` 执行，任何一个未转义的 $(...) 都是 root 执行入口。
+_env_dq() {
+    local v="${1-}"
+    v="${v//$'\r'/}"
+    v="${v//$'\n'/ }"
+    v="${v//\\/\\\\}"
+    v="${v//\"/\\\"}"
+    v="${v//\$/\\\$}"
+    v="${v//\`/\\\`}"
+    printf '%s' "$v"
+}
+
 # 剔除字符串首尾的空白字符与引号（清洗换行符、制表符、空格与单双引号任意层嵌套）
 trim_string() {
     local val="${1:-}"
@@ -249,7 +262,7 @@ verify_cloudflare_token() {
 
     echo -e "正在在线校验 Cloudflare API Token..."
     local check_res
-    check_res=$(curl -s -m 8 -H "Authorization: Bearer ${token}" https://api.cloudflare.com/client/v4/user/tokens/verify || true)
+    check_res=$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -s -m 8 -K - https://api.cloudflare.com/client/v4/user/tokens/verify || true)
     if echo "$check_res" | grep -q '"status":"active"'; then
         echo -e "${GREEN}✓ Cloudflare API Token 校验通过 (Active)！${PLAIN}"
         return 0
@@ -299,7 +312,7 @@ prompt_cf_token() {
         ask "请输入 Cloudflare API Token: " token
         token=$(trim_string "$token")
         if [[ -z "$token" ]]; then
-            echo -e "${YELLOW}未输入 Token，将自动使用 IP 自签证书。${PLAIN}"
+            echo -e "${YELLOW}未输入 Token，域名证书无法签发；要用 IP 自签请在向导里填 ip。${PLAIN}"
             return 1
         fi
         if verify_cloudflare_token "$token"; then
@@ -615,6 +628,8 @@ update_singbox_core() {
     local pkg="sing-box-${latest_ver}-linux-${arch}.tar.gz"
     local want_sha=""
     want_sha=$(_release_digest "$rel_json" "$pkg")
+    # API 没有 digest（限流兜底 / 旧版无 digest 字段）时用内置值，不再静默跳过校验
+    [[ -n "$want_sha" ]] || want_sha=$(_builtin_digest "$tag" "$arch" || true)
     local url="https://github.com/SagerNet/sing-box/releases/download/${tag}/${pkg}"
     local tmp_dir
     tmp_dir=$(mktemp -d)
@@ -1780,42 +1795,54 @@ write_env_config() {
     fi
     # 槽 1 沿用历史字段名（存量 env 与订阅都指着它们）；槽 2..N 用 EXIT<n>_*，
     # 由循环统一写出，加槽位只需要改 EXIT_SLOTS_MAX。
-    ( umask 077; cat > "$ENV_FILE" <<EOF
-NODE_PREFIX="${node_prefix}"
-SERVER_IP="${server_ip}"
-VL_PORT="${vl_port}"
-VL_SNI="${vl_sni}"
-VL_UUID="${user_uuid}"
-VL_PRIVKEY="${vl_privkey}"
-VL_PUBKEY="${vl_pubkey}"
-VL_SHORTID="${vl_shortid}"
-HY_DOMAIN="${hy_domain}"
-TARGET_HOST="${target_host}"
-HY_PORT="${hy_port}"
-HY_PASS="${hy_password}"
-SUB_PORT="${sub_port}"
-SUB_TOKEN="${sub_token}"
-CERT_MODE="${CERT_MODE:-selfsigned}"
-PROTO_SET="${PROTO_SET}"
-DIRECT_SUFFIXES="${direct_suffixes}"
-EXIT_TYPE="${EXIT_TYPE:-none}"
-EXIT_HY_SERVER="${EXIT_HY_SERVER:-}"
-EXIT_HY_PORT="${EXIT_HY_PORT:-}"
-EXIT_HY_PASS="${EXIT_HY_PASS:-}"
-EXIT_HY_SNI="${EXIT_HY_SNI:-}"
-EXIT_SKIP_CERT="${EXIT_SKIP_CERT:-false}"
-EXIT_LABEL="${EXIT_LABEL:-SG}"
-EXIT_ENTRY_VL="${EXIT_ENTRY_VL:-2053}"
-EXIT_ENTRY_HY="${EXIT_ENTRY_HY:-2054}"
+    local _env_tmp
+    _env_tmp=$(mktemp "${ENV_FILE}.tmp.XXXXXX") || {
+        echo -e "${RED}内部错误: 无法创建 ${ENV_FILE} 的临时文件，已中止。${PLAIN}" >&2
+        return 1
+    }
+    TMP_CLEANUP+=("$_env_tmp")
+    # 先写临时文件再 mv：中途被打断时旧 env 完整保留，不会留下半截配置。
+    ( umask 077; cat > "$_env_tmp" <<EOF
+NODE_PREFIX="$(_env_dq "${node_prefix}")"
+SERVER_IP="$(_env_dq "${server_ip}")"
+VL_PORT="$(_env_dq "${vl_port}")"
+VL_SNI="$(_env_dq "${vl_sni}")"
+VL_UUID="$(_env_dq "${user_uuid}")"
+VL_PRIVKEY="$(_env_dq "${vl_privkey}")"
+VL_PUBKEY="$(_env_dq "${vl_pubkey}")"
+VL_SHORTID="$(_env_dq "${vl_shortid}")"
+HY_DOMAIN="$(_env_dq "${hy_domain}")"
+TARGET_HOST="$(_env_dq "${target_host}")"
+HY_PORT="$(_env_dq "${hy_port}")"
+HY_PASS="$(_env_dq "${hy_password}")"
+SUB_PORT="$(_env_dq "${sub_port}")"
+SUB_TOKEN="$(_env_dq "${sub_token}")"
+CERT_MODE="$(_env_dq "${CERT_MODE:-selfsigned}")"
+PROTO_SET="$(_env_dq "${PROTO_SET}")"
+DIRECT_SUFFIXES="$(_env_dq "${direct_suffixes}")"
+EXIT_TYPE="$(_env_dq "${EXIT_TYPE:-none}")"
+EXIT_HY_SERVER="$(_env_dq "${EXIT_HY_SERVER:-}")"
+EXIT_HY_PORT="$(_env_dq "${EXIT_HY_PORT:-}")"
+EXIT_HY_PASS="$(_env_dq "${EXIT_HY_PASS:-}")"
+EXIT_HY_SNI="$(_env_dq "${EXIT_HY_SNI:-}")"
+EXIT_SKIP_CERT="$(_env_dq "${EXIT_SKIP_CERT:-false}")"
+EXIT_LABEL="$(_env_dq "${EXIT_LABEL:-SG}")"
+EXIT_ENTRY_VL="$(_env_dq "${EXIT_ENTRY_VL:-2053}")"
+EXIT_ENTRY_HY="$(_env_dq "${EXIT_ENTRY_HY:-2054}")"
 EOF
         for ((_n = 2; _n <= EXIT_SLOTS_MAX; _n++)); do
             for _f in SERVER PORT PASS SNI SKIP_CERT LABEL ENTRY_VL ENTRY_HY; do
                 _v="EXIT${_n}_${_f}"
-                printf 'EXIT%d_%s="%s"\n' "$_n" "$_f" "${!_v:-}" >> "$ENV_FILE"
+                printf 'EXIT%d_%s="%s"\n' "$_n" "$_f" "$(_env_dq "${!_v:-}")" >> "$_env_tmp"
             done
         done
-    )
-    chmod 600 "$ENV_FILE" 2>/dev/null || true
+    ) || { rm -f "$_env_tmp"; return 1; }
+    chmod 600 "$_env_tmp" 2>/dev/null || true
+    if ! mv -f "$_env_tmp" "$ENV_FILE"; then
+        rm -f "$_env_tmp"
+        echo -e "${RED}内部错误: 写入 ${ENV_FILE} 失败，原文件未改动。${PLAIN}" >&2
+        return 1
+    fi
     ENV_LOADED=""
 
 }
@@ -2109,7 +2136,7 @@ install_node() {
         fi
 
         while true; do
-            ask "请输入域名 [回车=IP自签]: " hy_domain
+            ask "请输入域名（用 IP 自签请输入 ip）: " hy_domain
             if [[ "${ASK_EOF:-0}" == "1" ]]; then
                 echo -e "${RED}输入结束，安装中止。${PLAIN}"; return 1
             fi
@@ -2661,22 +2688,40 @@ exit_slot_tag() {
 # 按槽位给 config.json 追加「链式入口 + 出口」；无启用槽时一个字节都不改
 apply_exit_config() {
     [[ -f "$CONF_FILE" ]] || return 0
-    local -a slots=() envs=()
-    local n
-    for n in $(exit_active_slots); do
-        exit_slot_env "$n"
-        slots+=("$n")
-        envs+=("E${n}_SERVER=$SE_SERVER" "E${n}_PORT=$SE_PORT" \
-               "E${n}_PASS=$SE_PASS" "E${n}_SNI=$SE_SNI" "E${n}_SKIP_CERT=$SE_SKIP" \
-               "E${n}_ENTRY_VL=$SE_ENTRY_VL" "E${n}_ENTRY_HY=$SE_ENTRY_HY")
-    done
+    local -a slots=()
+    local n tmp
+    for n in $(exit_active_slots); do slots+=("$n"); done
     [[ ${#slots[@]} -gt 0 ]] || return 0
-    env "${envs[@]}" EXIT_SLOTS="${slots[*]}" python3 - "$CONF_FILE" <<'PY'
-import json, os, sys, copy
-conf = sys.argv[1]
+
+    # 凭据不进 argv、也不进环境变量：`env K=V cmd` 的 K=V 会出现在 env 进程的
+    # /proc/<pid>/cmdline 里。改成 0600 临时 TSV 交给 python，读完立刻删。
+    tmp=$(mktemp "${CONF_DIR}/.exits.XXXXXX") || return 1
+    TMP_CLEANUP+=("$tmp")
+    (
+        umask 077
+        for n in "${slots[@]}"; do
+            exit_slot_env "$n"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$n" "$SE_SERVER" "$SE_PORT" "$SE_PASS" "$SE_SNI" "$SE_SKIP" \
+                "$SE_ENTRY_VL" "$SE_ENTRY_HY"
+        done > "$tmp"
+    ) || { rm -f "$tmp"; return 1; }
+
+    python3 - "$CONF_FILE" "$tmp" <<'PY'
+import json, sys, copy
+conf, src = sys.argv[1], sys.argv[2]
 d = json.load(open(conf))
 inb = d.get("inbounds", [])
 tags = {i["tag"]: i for i in inb}
+
+# 槽位数据：n, server, port, pass, sni, skip_cert, entry_vl, entry_hy
+rows = [l.rstrip("\n").split("\t") for l in open(src, encoding="utf-8") if l.strip()]
+slots = [r[0] for r in rows]
+D = {r[0]: r for r in rows}
+
+def f(n, i):
+    r = D[n]
+    return r[i] if i < len(r) else ""
 
 def rename(n, kind):
     return "exit-%s" % kind if n == "1" else "exit%s-%s" % (n, kind)
@@ -2687,7 +2732,6 @@ def clone(src_tag, new_tag, port):
     c = copy.deepcopy(tags[src_tag]); c["tag"] = new_tag; c["listen_port"] = int(port)
     return c
 
-slots = os.environ["EXIT_SLOTS"].split()
 # 幂等：先摘掉上一次追加的同类单元，重复应用不会再撞 duplicate inbound tag
 own = {rename(n, k) for n in slots for k in ("vless-in", "hy2-in", "out")}
 inb = [i for i in inb if i["tag"] not in own]
@@ -2695,15 +2739,15 @@ d["outbounds"] = [o for o in d.get("outbounds", []) if o.get("tag") not in own]
 
 entries, outs, rules = [], [], []
 for n in slots:
-    e = [x for x in (clone("vless-reality-in", rename(n, "vless-in"), os.environ.get("E%s_ENTRY_VL" % n)),
-                     clone("hy2-in", rename(n, "hy2-in"), os.environ.get("E%s_ENTRY_HY" % n))) if x]
+    e = [x for x in (clone("vless-reality-in", rename(n, "vless-in"), f(n, 6)),
+                     clone("hy2-in", rename(n, "hy2-in"), f(n, 7))) if x]
     out_tag = rename(n, "out")
     out = {"type": "hysteria2", "tag": out_tag,
-           "server": os.environ["E%s_SERVER" % n], "server_port": int(os.environ["E%s_PORT" % n]),
-           "password": os.environ["E%s_PASS" % n],
+           "server": f(n, 1), "server_port": int(f(n, 2)),
+           "password": f(n, 3),
            "tls": {"enabled": True,
-                   "server_name": os.environ.get("E%s_SNI" % n) or os.environ["E%s_SERVER" % n],
-                   "insecure": os.environ.get("E%s_SKIP_CERT" % n) == "true"}}
+                   "server_name": f(n, 4) or f(n, 1),
+                   "insecure": f(n, 5) == "true"}}
     entries += e; outs.append(out)
     rules += [{"inbound": [x["tag"]], "outbound": out_tag} for x in e]
 
@@ -2714,8 +2758,21 @@ _keep = [r for r in (d.get("route") or {}).get("rules", [])
 d["route"] = {"rules": _keep + rules, "final": "direct"}
 json.dump(d, open(conf, "w"), ensure_ascii=False, indent=2)
 PY
+    local rc=$?
+    rm -f "$tmp"
+    return $rc
 }
 
+
+# 兜底版本必须自带校验值：GitHub API 限流时 rel_json 为空、拿不到 digest，
+# 旧代码在这条路径上静默跳过 sha256。新增兜底版本时同步补这里。
+_builtin_digest() {
+    case "${1:-}:${2:-}" in
+        v1.14.3:amd64) echo "sha256:e2bdf179c15a3652955dc44867e33ca0965c9c9b91b34267dcc5a5d639a5feee" ;;
+        v1.14.3:arm64) echo "sha256:29dae24d76bea3bc62d07dd3e60cfc12003de7debbd6b768df9be9c68360174e" ;;
+        *) return 1 ;;
+    esac
+}
 
 # ---------------------------------------------------------------- 协议模块
 # enabled 的唯一事实来源：config.json 里的 inbound
@@ -2995,6 +3052,8 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 local sub_port
                 while true; do
                     ask_trim "请输入新的订阅监听端口 [默认: ${CYAN}${SUB_PORT}${PLAIN}]: " "${SUB_PORT}" sub_port
+                    # stdin 关闭时必须退出：否则空端口 → 校验失败 → continue 无限刷屏
+                    [[ "${ASK_EOF:-0}" == "1" ]] && return 0
                     if ! validate_port "$sub_port"; then
                         echo -e "${RED}端口非法，请重新输入。${PLAIN}"; continue
                     fi
@@ -3046,6 +3105,7 @@ ${GRAY}================= Clash 订阅地址配置 =================${PLAIN}"
                 local new_prefix=""
                 while true; do
                     ask_trim "请输入节点名称前缀 [当前: ${CYAN}${NODE_PREFIX:-Node}${PLAIN}]: " "${NODE_PREFIX:-Node}" new_prefix
+                    [[ "${ASK_EOF:-0}" == "1" ]] && return 0
                     new_prefix=$(printf '%s' "$new_prefix" | tr -d '\"'"'"',#:\\')
                     if [[ -z "$new_prefix" ]]; then
                         echo -e "${RED}前缀不能为空（过滤特殊字符后为空），请重新输入。${PLAIN}"; continue
@@ -3244,10 +3304,17 @@ PYEOF
 exit_parse_url() {
     local url="${1:-}" slot="${2:-1}"
     local body
-    body=$(curl -fsSk -m 20 "$url" 2>/dev/null) || return 1
+    # 先按证书校验取；失败才降级 -k（落地机用 IP 自签时只能这样）。降级必须留痕：
+    # 这条回退路径意味着内容可能来自中间人，后面还有一层字段白名单校验兜底。
+    if ! body=$(curl -fsS -m 20 "$url" 2>/dev/null); then
+        echo -e "${YELLOW}证书校验未通过，改为跳过校验重试（导入内容可能被篡改）${PLAIN}" >&2
+        body=$(curl -fsSk -m 20 "$url" 2>/dev/null) || return 1
+    fi
     local tmpf; tmpf=$(mktemp /tmp/exitimport.XXXXXX)
+    TMP_CLEANUP+=("$tmpf")
     printf '%s' "$body" > "$tmpf"
-    python3 - "$tmpf" "$slot" <<'PY'
+    local out
+    out=$(python3 - "$tmpf" "$slot" <<'PY'
 import sys
 lines = open(sys.argv[1]).read().splitlines()
 blocks, cur = [], None
@@ -3288,9 +3355,30 @@ if b:
     sys.exit(0)
 sys.exit(1)
 PY
+)
     local rc=$?
     rm -f "$tmpf"
-    return $rc
+    [[ $rc -eq 0 ]] || return $rc
+
+    # 字段白名单校验：内容来自远端（且可能走的是 -k），不合格就整条拒绝，
+    # 不让它进 env.conf / sing-box 配置。
+    local k v
+    while IFS=$'\t' read -r k v; do
+        [[ -n "$k" ]] || continue
+        case "$k" in
+            *_PORT)
+                [[ "$v" =~ ^[0-9]{1,5}$ ]] && (( 10#$v >= 1 && 10#$v <= 65535 )) || {
+                    echo -e "${RED}导入失败：${k} 不是合法端口（1-65535）${PLAIN}" >&2; return 1; } ;;
+            *_SERVER|*_SNI)
+                [[ "$v" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ || "$v" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || {
+                    echo -e "${RED}导入失败：${k} 不是合法域名或 IPv4${PLAIN}" >&2; return 1; } ;;
+            *_PASS)
+                v=$(printf '%s' "$v" | tr -d '\000-\037')
+                [[ -n "$v" ]] || { echo -e "${RED}导入失败：密码为空${PLAIN}" >&2; return 1; } ;;
+            *) continue ;;
+        esac
+        printf '%s\t%s\n' "$k" "$v"
+    done <<< "$out"
 }
 
 # 出口生效性自检：起临时 socks 走该槽的出口，看出口 IP 是否符合预期

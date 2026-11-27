@@ -155,7 +155,7 @@ grep -q "^${BBR_MARK}" "$BBR_CONF" || return 0   # 不是自己的，不动
 
 这不是域名问题，是主机配置问题。它表现为「所有目标一起慢」，很容易被误判成「这个 SNI 的 CDN 节点远」——排查顺序应该是先看 `curl -4` 和默认的差值。
 
-现在 `check_ipv6` 在安装时测一次，只在「有地址但连不通」时禁用，写入带 `managed-by` 标记的 `/etc/sysctl.d/99-disable-ipv6.conf`；卸载时 `disable_ipv6_managed` 只删带标记的文件，并把运行时切回启用（IPv6 只有开/关，装之前必然是开，可精确还原）。IPv6 正常的主机完全不受影响。
+4.x 起脚本不再探测也不再改 IPv6（纯 IPv4 架构，不读 `/etc/sysctl.d/99-disable-ipv6.conf` 也不写）。遇到上面这种「双栈域名比 `curl -4` 慢 200ms 以上」的现象，按主机问题处理：确认 `ping6` / `curl -6` 是否真的不通，需要就由运维在系统层关掉 IPv6，脚本不代劳。
 
 ## 十二、升级路径不能在活节点上测，raw 有 CDN 缓存
 

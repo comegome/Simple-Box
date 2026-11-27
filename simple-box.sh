@@ -451,45 +451,88 @@ BBR_MARK="# managed-by: simple-box"
 NET_CONF_NAME="99-zz-simbo-net.conf"
 LEGACY_BBR_NAME="99-bbr.conf"
 
-# 开启 BBR（安装时调用，无交互）
-# 三种情况：已开启则跳过；已有他人配置则不动；否则写入并打标记。
-# 迁移：旧版本写的是 99-bbr.conf，发现带本脚本标记的就换成本脚本的新文件，
-# 否则卸载只删新文件，旧文件会在下次启动把 BBR 又打开。
-enable_bbr() {
+# 应用网络基线（安装/重装时调用，无交互）。
+# 只写「影响性能、不影响功能」的键；不碰 vm.swappiness / kernel.panic /
+# rmem_max —— 前两个不是网络参数，rmem_max 对 sing-box 无效（quic-go 用
+# SO_RCVBUFFORCE 绕过它，实测 socket 缓冲本来就是 16 MB）。
+# 不覆盖、不解析服务商的 sysctl 文件：靠文件名排在它们之后生效。
+apply_net_baseline() {
     local dir="${SYSCTL_DIR:-/etc/sysctl.d}"
     local conf="${dir}/${NET_CONF_NAME}"
     local legacy="${dir}/${LEGACY_BBR_NAME}"
-    local cur migrated=0
-    cur=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "")
+    local key want got mism=0 count=0
 
+    # 旧版文件名（同样带标记）迁走，内容已包含在新基线里
     if [[ -f "$legacy" ]] && grep -qxF "$BBR_MARK" "$legacy"; then
         rm -f "$legacy" || true
-        migrated=1
     elif [[ -f "$legacy" ]]; then
-        # 文件存在但不带本脚本标记 → 是用户/服务商的配置，不动
-        echo -e "${YELLOW}检测到已有的 ${legacy}（非本脚本创建），保留不覆盖。${PLAIN}"
-        echo -e "${YELLOW}如需 BBR 加速请手动确认该文件内容。${PLAIN}"
-        return 0
+        echo -e "${CYAN}保留服务商配置 ${legacy}，基线用 99-zz 覆盖同名键${PLAIN}"
     fi
 
-    if [[ "$cur" == "bbr" && "$migrated" -eq 0 ]]; then
-        echo -e "${GREEN}✓ TCP BBR 已处于开启状态，无需调整${PLAIN}"
-        return 0
-    fi
-
-    mkdir -p "$dir"
-    cat > "$conf" <<EOF
+    if ! mkdir -p "$dir" 2>/dev/null || ! cat > "$conf" <<EOF
 ${BBR_MARK}
-net.core.default_qdisc=fq
-net.ipv4.tcp_congestion_control=bbr
+net.core.default_qdisc = fq
+net.ipv4.tcp_congestion_control = bbr
+net.ipv4.tcp_rmem = 4096 131072 16777216
+net.ipv4.tcp_wmem = 4096 65536 16777216
+net.ipv4.tcp_slow_start_after_idle = 0
+net.ipv4.tcp_mtu_probing = 1
+net.core.somaxconn = 4096
+net.ipv4.tcp_max_syn_backlog = 4096
+net.core.netdev_max_backlog = 16384
 EOF
-    sysctl -p "$conf" >/dev/null 2>&1 || sysctl --system >/dev/null 2>&1 || true
+    then
+        echo -e "${YELLOW}⚠ 网络基线写入失败（${dir} 不可写），未应用${PLAIN}"
+        return 0
+    fi
 
-    cur=$(sysctl -n net.ipv4.tcp_congestion_control 2>/dev/null || echo "")
-    if [[ "$cur" == "bbr" ]]; then
-        echo -e "${GREEN}✓ TCP BBR 已开启${PLAIN}"
+    sysctl -p "$conf" >/dev/null 2>&1 || true
+
+    # 回读校验：不一致只告警，不中止安装——网络性能不是功能依赖。
+    while IFS='=' read -r key want; do
+        key=$(printf '%s' "$key" | tr -d ' \t')
+        [[ "$key" == net.* ]] || continue
+        want=$(printf '%s' "$want" | tr -s ' \t' ' ' | sed 's/^ //; s/ $//')
+        count=$((count + 1))
+        if ! got=$(sysctl -n "$key" 2>/dev/null); then
+            echo -e "${YELLOW}⚠ ${key} 当前内核不支持，已跳过${PLAIN}"
+            continue
+        fi
+        got=$(printf '%s' "$got" | tr -s ' \t' ' ' | sed 's/^ //; s/ $//')
+        if [[ "$got" != "$want" ]]; then
+            echo -e "${YELLOW}⚠ ${key} 期望 ${want}，实际 ${got}${PLAIN}"
+            mism=$((mism + 1))
+        fi
+    done < <(grep '^net\.' "$conf")
+
+    if [[ "$mism" -eq 0 ]]; then
+        echo -e "${GREEN}✓ 网络基线已应用（${count} 项一致）${PLAIN}"
     else
-        echo -e "${YELLOW}BBR 配置已写入，但内核当前返回 ${cur:-未知}，可能需要重启系统。${PLAIN}"
+        echo -e "${YELLOW}⚠ 网络基线有 ${mism}/${count} 项未生效，重启后复查${PLAIN}"
+    fi
+
+    # /etc/sysctl.conf 在 sysctl.d/* 之后应用，会把基线静默盖掉
+    if grep -qE '^[[:space:]]*(net\.core\.default_qdisc|net\.ipv4\.tcp_congestion_control)[[:space:]]*=' /etc/sysctl.conf 2>/dev/null; then
+        echo -e "${YELLOW}⚠ /etc/sysctl.conf 也设置了 qdisc/CC，它在本文件之后应用，会覆盖基线${PLAIN}"
+    fi
+
+    apply_qdisc_live
+}
+
+# 让运行中的网卡立即用上 fq（net.core.default_qdisc 只对新队列生效）。
+# 队列重建会有毫秒级丢包，但不断连接；失败只告警，不回滚已写入的基线。
+apply_qdisc_live() {
+    local dev
+    dev=$(ip -4 route show default 2>/dev/null | awk '{print $5; exit}')
+    if [[ -z "$dev" ]]; then
+        echo -e "${YELLOW}⚠ 未找到默认路由网卡，qdisc 保持现状${PLAIN}"
+        return 0
+    fi
+    if tc qdisc replace dev "$dev" root fq >/dev/null 2>&1 \
+       && tc qdisc show dev "$dev" 2>/dev/null | grep -q 'qdisc fq '; then
+        echo -e "${GREEN}✓ ${dev} 队列规则已切换为 fq${PLAIN}"
+    else
+        echo -e "${YELLOW}⚠ ${dev} 切换 fq 失败（sch_fq 不可用？），qdisc 保持现状${PLAIN}"
     fi
 }
 
@@ -497,7 +540,7 @@ EOF
 # 算法——卸载代理软件不该动系统网络栈，而且多数机器的 bbr 也写在
 # /etc/sysctl.conf 里，这里改成 cubic 会在下次 sysctl --system 时被覆盖回去，
 # "恢复系统默认"本就做不到。用户/服务商的配置一律不碰。
-disable_bbr() {
+remove_net_baseline() {
     local dir="${SYSCTL_DIR:-/etc/sysctl.d}" f
     for f in "${dir}/${NET_CONF_NAME}" "${dir}/${LEGACY_BBR_NAME}"; do
         [[ -f "$f" ]] && grep -qxF "$BBR_MARK" "$f" && rm -f "$f" || true
@@ -2264,7 +2307,7 @@ install_node() {
         echo -e "${RED}环境配置写入失败，安装中止。${PLAIN}"
         return 1
     fi
-    enable_bbr
+    apply_net_baseline
 
     # 配置 systemd 服务
     cat > /etc/systemd/system/sing-box.service <<EOF
@@ -2534,7 +2577,7 @@ uninstall_all() {
     echo -e "${GREEN}sing-box 与订阅配置已彻底干净卸载！${PLAIN}"
     echo -e "${YELLOW}本脚本自身的入口 (simbo) 也已删除，控制台即将退出。${PLAIN}"
     echo -e "${YELLOW}如需重装，请重新执行一键安装命令。${PLAIN}"
-    disable_bbr
+    remove_net_baseline
     # 卸载后目录与入口都已不存在，继续停留在菜单毫无意义（面板还会读到已删除的配置）
     UNINSTALL_DONE=true
 }

@@ -322,53 +322,96 @@ grep -q 'DEBIAN_FRONTEND=noninteractive' "$TARGET" && ok "apt 操作设置 nonin
 grep -q 'sing-box check' "$TARGET" && ok "启动前执行 sing-box check" || bad "缺少配置校验"
 grep -q 'BASH_SOURCE\[0\]' "$TARGET" && ok "存在管道执行检测" || bad "缺少管道执行检测"
 
-# 网络基线：归属与旧文件迁移（行为测试：沙箱目录 + sysctl stub）
+# 网络基线：归属、迁移、回读与 qdisc（行为测试：沙箱目录 + sysctl/ip/tc stub）
 # 静态 grep 只能证明代码长得像，证明不了文件落在哪、卸载删了什么。
 _sb9=$(mktemp -d)
 sysctl() {
-    if [[ "${1:-}" == "-n" && "${2:-}" == "net.ipv4.tcp_congestion_control" ]]; then
-        [[ -f "$_sb9/99-zz-simbo-net.conf" ]] && echo bbr || echo cubic
+    [[ "${1:-}" == "-n" ]] || return 0
+    local k="${2:-}" line
+    if [[ "$k" == "net.ipv4.tcp_congestion_control" && -f "$_sb9/badcc" ]]; then
+        echo cubic; return 0
     fi
+    line=$(grep -E "^[[:space:]]*${k//./\\.}[[:space:]]*=" "$_sb9/99-zz-simbo-net.conf" 2>/dev/null | head -1)
+    [[ -n "$line" ]] && { printf '%s\n' "${line#*=}" | sed 's/^ *//'; return 0; }
+    return 1
+}
+ip() { echo "default via 192.0.2.1 dev eth9 proto static"; }
+tc() {
+    [[ -f "$_sb9/badtc" ]] && return 1
+    [[ "${1:-}" == "qdisc" && "${2:-}" == "show" ]] && echo "qdisc fq 0: root refcnt 2"
     return 0
 }
-SYSCTL_DIR="$_sb9" enable_bbr >/dev/null 2>&1
-if [[ -f "$_sb9/99-zz-simbo-net.conf" ]] && grep -qxF "$BBR_MARK" "$_sb9/99-zz-simbo-net.conf"; then
-    ok "9.6 安装写入 99-zz-simbo-net.conf 并带归属标记"
+SYSCTL_DIR="$_sb9" apply_net_baseline >"$_sb9/out1" 2>&1
+if [[ -f "$_sb9/99-zz-simbo-net.conf" ]] \
+   && grep -qxF "$BBR_MARK" "$_sb9/99-zz-simbo-net.conf" \
+   && [[ "$(grep -c '^net\.' "$_sb9/99-zz-simbo-net.conf")" -eq 9 ]]; then
+    ok "9.6 安装写入 99-zz-simbo-net.conf（带标记，9 个键）"
 else
-    bad "9.6 未按新文件名写入或缺少标记"
+    bad "9.6 基线文件缺失/缺标记/键数不对"
 fi
-# 旧版 99-bbr.conf（带标记）必须被迁走，否则卸载会漏、重启又会生效
+if grep -q '网络基线已应用（9 项一致）' "$_sb9/out1" && grep -q 'eth9 队列规则已切换为 fq' "$_sb9/out1"; then
+    ok "9.7 回读 9 项一致，并对默认路由网卡应用 fq"
+else
+    bad "9.7 回读或 qdisc 应用未按预期工作" "$(tail -3 "$_sb9/out1")"
+fi
+# 不碰非网络参数，也不写对 sing-box 无效的 rmem_max
+if grep -qE '^[[:space:]]*(vm\.swappiness|kernel\.panic|net\.core\.rmem_max)' "$_sb9/99-zz-simbo-net.conf"; then
+    bad "9.8 基线混入了非网络参数或无效键"
+else
+    ok "9.8 基线只含网络性能键（无 swappiness/panic/rmem_max）"
+fi
+# 旧版带标记文件必须迁走，否则卸载会漏、重启又会生效
 rm -f "$_sb9/99-zz-simbo-net.conf"
-printf '%s\nnet.core.default_qdisc=fq\nnet.ipv4.tcp_congestion_control=bbr\n' "$BBR_MARK" > "$_sb9/99-bbr.conf"
-SYSCTL_DIR="$_sb9" enable_bbr >/dev/null 2>&1
-if [[ ! -f "$_sb9/99-bbr.conf" && -f "$_sb9/99-zz-simbo-net.conf" ]]; then
-    ok "9.7 旧版 99-bbr.conf（带标记）迁移到新文件"
-else
-    bad "9.7 旧文件未迁移（卸载会残留）"
-fi
-# 无标记 = 用户/服务商配置，内容与存在性都不许变
-rm -f "$_sb9/99-zz-simbo-net.conf"
-printf 'net.core.default_qdisc=cake\n' > "$_sb9/99-bbr.conf"
-_sb9_h1=$(sha256sum "$_sb9/99-bbr.conf" | cut -d' ' -f1)
-SYSCTL_DIR="$_sb9" enable_bbr >/dev/null 2>&1
-_sb9_h2=$(sha256sum "$_sb9/99-bbr.conf" | cut -d' ' -f1)
-if [[ "$_sb9_h1" == "$_sb9_h2" && ! -f "$_sb9/99-zz-simbo-net.conf" ]]; then
-    ok "9.8 无标记的外来配置不被修改、不接管"
-else
-    bad "9.8 外来配置被改写或强行接管"
-fi
-# 卸载：删自己的两种文件名，绝不碰外来文件
-printf '%s\nnet.core.default_qdisc=fq\n' "$BBR_MARK" > "$_sb9/99-zz-simbo-net.conf"
 printf '%s\nnet.core.default_qdisc=fq\n' "$BBR_MARK" > "$_sb9/99-bbr.conf"
-SYSCTL_DIR="$_sb9" disable_bbr
-if [[ ! -f "$_sb9/99-zz-simbo-net.conf" && ! -f "$_sb9/99-bbr.conf" ]]; then
-    ok "9.9 卸载删除本脚本的新旧两个文件"
+SYSCTL_DIR="$_sb9" apply_net_baseline >/dev/null 2>&1
+if [[ ! -f "$_sb9/99-bbr.conf" && -f "$_sb9/99-zz-simbo-net.conf" ]]; then
+    ok "9.9 旧版 99-bbr.conf（带标记）迁移到新文件"
 else
-    bad "9.9 卸载残留本脚本配置文件"
+    bad "9.9 旧文件未迁移（卸载会残留）"
 fi
-SYSCTL_DIR="$_sb9" disable_bbr
-[[ ! -e "$_sb9/99-zz-simbo-net.conf" ]] && ok "9.10 卸载幂等（重复执行不报错）" || bad "9.10 卸载不幂等"
-unset -f sysctl
+# 无标记 = 服务商配置：内容不动，但基线仍写入（靠文件名覆盖效果）
+_sb9f=$(mktemp -d)
+printf 'net.core.default_qdisc=cake\n' > "$_sb9f/99-bbr.conf"
+_sb9_h1=$(sha256sum "$_sb9f/99-bbr.conf" | cut -d' ' -f1)
+SYSCTL_DIR="$_sb9f" apply_net_baseline >/dev/null 2>&1
+_sb9_h2=$(sha256sum "$_sb9f/99-bbr.conf" | cut -d' ' -f1)
+if [[ "$_sb9_h1" == "$_sb9_h2" && -f "$_sb9f/99-zz-simbo-net.conf" ]]; then
+    ok "9.10 服务商配置不改写，基线靠 99-zz 优先级生效"
+else
+    bad "9.10 服务商配置被改写或基线未写入"
+fi
+rm -rf "$_sb9f"
+# 回读不一致只告警，不中止安装
+touch "$_sb9/badcc"
+SYSCTL_DIR="$_sb9" apply_net_baseline >"$_sb9/out2" 2>&1; _sb9_rc=$?
+if [[ "$_sb9_rc" -eq 0 ]] && grep -q 'tcp_congestion_control 期望 bbr' "$_sb9/out2" && grep -q '未生效' "$_sb9/out2"; then
+    ok "9.11 回读不一致时告警且安装继续（rc=0）"
+else
+    bad "9.11 不一致被静默吞掉或中止了安装" "rc=$_sb9_rc"
+fi
+rm -f "$_sb9/badcc"
+# qdisc 失败只告警，不回滚基线
+touch "$_sb9/badtc"
+SYSCTL_DIR="$_sb9" apply_net_baseline >"$_sb9/out3" 2>&1; _sb9_rc=$?
+if [[ "$_sb9_rc" -eq 0 ]] && grep -q '切换 fq 失败' "$_sb9/out3" && [[ -f "$_sb9/99-zz-simbo-net.conf" ]]; then
+    ok "9.12 qdisc 失败告警但保留已写入的基线（rc=0）"
+else
+    bad "9.12 qdisc 失败路径处理不对" "rc=$_sb9_rc"
+fi
+rm -f "$_sb9/badtc"
+# 卸载：删自己的两种文件名，绝不碰外来文件；重复执行不报错
+printf '%s\nnet.core.default_qdisc=fq\n' "$BBR_MARK" > "$_sb9/99-bbr.conf"
+SYSCTL_DIR="$_sb9" remove_net_baseline
+if [[ ! -f "$_sb9/99-zz-simbo-net.conf" && ! -f "$_sb9/99-bbr.conf" ]]; then
+    ok "9.13 卸载删除本脚本的新旧两个文件"
+else
+    bad "9.13 卸载残留本脚本配置文件"
+fi
+printf 'cake\n' > "$_sb9/99-bbr.conf"
+SYSCTL_DIR="$_sb9" remove_net_baseline
+[[ -f "$_sb9/99-bbr.conf" ]] && ok "9.14 卸载不碰无标记的外来文件" || bad "9.14 卸载误删外来文件"
+SYSCTL_DIR="$_sb9" remove_net_baseline; ok "9.15 卸载幂等（重复执行不报错）"
+unset -f sysctl ip tc
 rm -rf "$_sb9"
 
 # BBR 卸载只删文件，不改运行中的拥塞控制（卸载代理不该动系统网络栈）
@@ -377,11 +420,11 @@ if grep -q 'sysctl -w net.ipv4.tcp_congestion_control=cubic' "$TARGET"; then
 else
     ok "disable_bbr 不改运行中的拥塞控制"
 fi
-_dbb=$(awk '/^disable_bbr\(\)/,/^}/' "$TARGET")
+_dbb=$(awk '/^remove_net_baseline\(\)/,/^}/' "$TARGET")
 if grep -q 'NET_CONF_NAME' <<<"$_dbb" && grep -q 'LEGACY_BBR_NAME' <<<"$_dbb" && grep -q 'BBR_MARK' <<<"$_dbb"; then
-    ok "disable_bbr 同时清理新文件与旧版文件，且只删带标记的"
+    ok "remove_net_baseline 同时清理新文件与旧版文件，且只删带标记的"
 else
-    bad "disable_bbr 清理范围不完整（迁移后会残留）"
+    bad "remove_net_baseline 清理范围不完整（迁移后会残留）"
 fi
 
 # Caddy 归属标记
